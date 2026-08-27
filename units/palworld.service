@@ -1,0 +1,39 @@
+[Unit]
+Description=Palworld Dedicated Server
+Wants=network-online.target
+After=network-online.target
+Requires=palworld-rest-firewall.service
+After=palworld-rest-firewall.service
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=palworld
+Group=palworld
+WorkingDirectory=/srv/palworld/server
+Environment=HOME=/srv/palworld/server
+ExecStart=/srv/palworld/server/PalServer.sh
+Restart=on-failure
+RestartSec=15s
+SuccessExitStatus=0 130 143
+KillSignal=SIGINT
+KillMode=mixed
+TimeoutStopSec=120s
+LimitNOFILE=65536
+TasksMax=4096
+# CPU intentionally remains unlimited. Cap only the service's memory cgroup.
+MemoryMax=48G
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+ReadWritePaths=/srv/palworld/server
+
+[Install]
+WantedBy=multi-user.target

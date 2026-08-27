@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily Palworld Backup and Update Timer
+
+[Timer]
+OnCalendar=*-*-* 04:30:00
+Persistent=true
+Unit=palworld-maintenance.service
+
+[Install]
+WantedBy=timers.target

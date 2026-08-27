@@ -1,0 +1,4 @@
+# The Discord bot can invoke only fixed, argument-free administrative actions;
+# it cannot run shell commands or stop/reconfigure arbitrary services.
+palworld-manager ALL=(root) NOPASSWD: /usr/local/sbin/palworld-control start, \
+    /usr/bin/systemctl start palworld-maintenance.service --no-block

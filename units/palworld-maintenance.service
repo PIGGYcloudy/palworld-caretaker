@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily Palworld backup and update
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/srv/palworld/scripts/daily-palworld-maintenance.sh
+TimeoutStartSec=90min
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7

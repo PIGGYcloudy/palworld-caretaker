@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+IFS=$'\n\t'
+
+LOCK_FILE='/run/lock/palworld-start.lock'
+[[ $# -eq 1 && "$1" == start ]] || { printf 'Usage: palworld-control start\n' >&2; exit 2; }
+exec 9>"$LOCK_FILE"
+flock -w 120 9 || { printf 'START_BUSY\n'; exit 3; }
+if systemctl is-active --quiet palworld.service; then
+  printf 'ALREADY_RUNNING\n'
+  exit 0
+fi
+systemctl start palworld.service
+systemctl is-active --quiet palworld.service
+printf 'STARTED\n'

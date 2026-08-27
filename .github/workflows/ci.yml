@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install ShellCheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: Check Bash syntax
+        run: |
+          bash -n install-palworld.sh upgrade-palworld-manager.sh scripts/*.sh
+          bash -n scripts/palworld-control scripts/palworld-rest-firewall scripts/palworld-discord-configure
+      - name: Run ShellCheck
+        run: |
+          shellcheck install-palworld.sh upgrade-palworld-manager.sh scripts/*.sh
+          shellcheck scripts/palworld-control scripts/palworld-rest-firewall scripts/palworld-discord-configure
+      - name: Compile Python
+        run: python -m py_compile scripts/*.py tests/*.py
+      - name: Run tests
+        run: python -m unittest discover -s tests -v

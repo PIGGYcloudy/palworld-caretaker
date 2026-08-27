@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+IFS=$'\n\t'
+umask 077
+
+(( EUID == 0 )) || { printf 'Run this tool with sudo.\n' >&2; exit 1; }
+CONFIG='/srv/palworld/config/palworld.env'
+[[ -f "$CONFIG" ]] || { printf 'Palworld configuration was not found.\n' >&2; exit 1; }
+[[ -f /etc/systemd/system/palworld-discord-bot.service ]] || {
+  printf 'Install the Palworld manager upgrade first.\n' >&2; exit 1;
+}
+
+printf 'Discord Application ID: '
+read -r application_id
+printf 'Discord Bot token (input hidden): '
+read -rs token
+printf '\nAllowed Discord server (guild) ID: '
+read -r guild_ids
+printf 'Allowed channel ID (comma-separated), or * for every channel: '
+read -r channel_ids
+printf 'Allowed role ID (comma-separated if needed): '
+read -r role_ids
+printf 'Administrator role ID (comma-separated if needed): '
+read -r admin_ids
+
+[[ "$application_id" =~ ^[0-9]{15,22}$ ]] || { printf 'Invalid Application ID.\n' >&2; exit 2; }
+[[ "$token" =~ ^[A-Za-z0-9._-]{20,}$ ]] || { printf 'Invalid Bot token format.\n' >&2; exit 2; }
+validate_ids() { [[ "$1" =~ ^[0-9]{15,22}(,[0-9]{15,22})*$ ]]; }
+validate_ids "$guild_ids" || { printf 'Invalid guild ID list.\n' >&2; exit 2; }
+[[ "$channel_ids" == '*' ]] || validate_ids "$channel_ids" || { printf 'Invalid channel ID list.\n' >&2; exit 2; }
+validate_ids "$role_ids" || { printf 'Invalid allowed role ID list.\n' >&2; exit 2; }
+validate_ids "$admin_ids" || { printf 'Invalid administrator role ID list.\n' >&2; exit 2; }
+
+backup="${CONFIG}.pre-discord-$(date +%Y%m%d-%H%M%S)"
+install -o root -g root -m 0600 "$CONFIG" "$backup"
+temporary="$(mktemp "${CONFIG}.tmp.XXXXXX")"
+cleanup() { rm -f -- "${temporary:-}"; }
+trap cleanup EXIT
+while IFS= read -r line || [[ -n "$line" ]]; do
+  case "$line" in
+    DISCORD_BOT_TOKEN=*) printf "DISCORD_BOT_TOKEN='%s'\n" "$token" ;;
+    DISCORD_PALWORLD_ALLOWED_GUILD_IDS=*) printf 'DISCORD_PALWORLD_ALLOWED_GUILD_IDS=%s\n' "$guild_ids" ;;
+    DISCORD_PALWORLD_ALLOWED_CHANNEL_IDS=*) printf 'DISCORD_PALWORLD_ALLOWED_CHANNEL_IDS=%s\n' "$channel_ids" ;;
+    DISCORD_PALWORLD_ALLOWED_ROLE_IDS=*) printf 'DISCORD_PALWORLD_ALLOWED_ROLE_IDS=%s\n' "$role_ids" ;;
+    DISCORD_PALWORLD_ADMIN_ROLE_IDS=*) printf 'DISCORD_PALWORLD_ADMIN_ROLE_IDS=%s\n' "$admin_ids" ;;
+    *) printf '%s\n' "$line" ;;
+  esac
+done < "$CONFIG" > "$temporary"
+chown root:palworld-manager "$temporary"
+chmod 0640 "$temporary"
+mv -f -- "$temporary" "$CONFIG"
+trap - EXIT
+unset token
+
+systemctl daemon-reload
+systemctl enable --now palworld-discord-bot.service >/dev/null
+sleep 3
+if ! systemctl is-active --quiet palworld-discord-bot.service; then
+  printf 'Bot failed to start. Review: sudo journalctl -u palworld-discord-bot.service -n 50\n' >&2
+  exit 3
+fi
+
+printf '\nBot is running. Invite it to the Discord server whose guild ID you entered:\n'
+printf 'https://discord.com/oauth2/authorize?client_id=%s&permissions=3072&integration_type=0&scope=bot%%20applications.commands\n' "$application_id"
+printf '\nThe token was stored only in the protected configuration file. Backup: %s\n' "$backup"

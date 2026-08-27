@@ -1,0 +1,12 @@
+[Unit]
+Description=Restrict Palworld REST API to localhost
+Before=palworld.service
+
+[Service]
+Type=oneshot
+ExecStart=/srv/palworld/scripts/palworld-rest-firewall start
+ExecStop=/srv/palworld/scripts/palworld-rest-firewall stop
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+CONFIG='/srv/palworld/config/palworld.env'
+[[ -r "$CONFIG" ]] || exit 1
+# shellcheck disable=SC1090
+source "$CONFIG"
+PORT="${PALWORLD_REST_API_PORT:-8212}"
+[[ "$PORT" =~ ^[1-9][0-9]*$ ]] && (( PORT <= 65535 )) || exit 1
+action="${1:-}"
+[[ "$action" == start || "$action" == stop ]] || exit 2
+
+manage() {
+  local command="$1" binary="$2" family="$3"
+  command -v "$binary" >/dev/null 2>&1 || return 0
+  if [[ "$command" == start ]]; then
+    "$binary" -w -C INPUT ! -i lo -p tcp --dport "$PORT" -j REJECT 2>/dev/null ||
+      "$binary" -w -I INPUT 1 ! -i lo -p tcp --dport "$PORT" -j REJECT
+  else
+    "$binary" -w -D INPUT ! -i lo -p tcp --dport "$PORT" -j REJECT 2>/dev/null || true
+  fi
+}
+
+manage "$action" iptables ipv4
+manage "$action" ip6tables ipv6

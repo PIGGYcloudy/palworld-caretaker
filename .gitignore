@@ -1,0 +1,34 @@
+# Local configuration and secrets
+config/palworld.env
+*.env
+!.env.example
+!config/palworld.env.example
+
+# Local backups and pre-upgrade snapshots
+.local-backups/
+.pre-*/
+*.pre-*
+maintain-palworld-*.sh
+
+# Runtime and game data
+server/
+venv/
+backups-local/
+SaveGames/
+Saved/
+*.sav
+*.tar
+*.tar.gz
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
