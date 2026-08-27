@@ -45,7 +45,9 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install workflow test dependencies
-        run: sudo apt-get update && sudo apt-get install -y rsync
+        run: |
+          sudo apt-get update && sudo apt-get install -y rsync
+          pip install "discord.py>=2.3.0,<3"
       - name: Run unit tests
         env:
           PYTHONDONTWRITEBYTECODE: "1"
