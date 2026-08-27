@@ -147,5 +147,5 @@ sudo /srv/palworld/scripts/restore-palworld.sh restore palworld-YYYYMMDD-HHMMSS
 方式見 [`SECURITY.md`](SECURITY.md)。GitHub Actions 會執行 Python 測試、Python
 編譯、Bash 語法檢查與 ShellCheck。
 
-本專案尚未選定公開授權。首次公開發布前必須加入明確的 `LICENSE`，否則
-第三方沒有複製、修改及散布程式碼的授權。
+本專案採用 [GNU General Public License v3.0](LICENSE) 授權。你可以依照
+GPL-3.0 的條款使用、修改及散布本專案；散布衍生作品時也必須保留相同授權。
