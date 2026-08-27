@@ -6,12 +6,14 @@ CONFIG='/srv/palworld/config/palworld.env'
 # shellcheck disable=SC1090
 source "$CONFIG"
 PORT="${PALWORLD_REST_API_PORT:-8212}"
-[[ "$PORT" =~ ^[1-9][0-9]*$ ]] && (( PORT <= 65535 )) || exit 1
+if [[ ! "$PORT" =~ ^[1-9][0-9]*$ ]] || (( PORT > 65535 )); then
+  exit 1
+fi
 action="${1:-}"
 [[ "$action" == start || "$action" == stop ]] || exit 2
 
 manage() {
-  local command="$1" binary="$2" family="$3"
+  local command="$1" binary="$2"
   command -v "$binary" >/dev/null 2>&1 || return 0
   if [[ "$command" == start ]]; then
     "$binary" -w -C INPUT ! -i lo -p tcp --dport "$PORT" -j REJECT 2>/dev/null ||
@@ -21,5 +23,5 @@ manage() {
   fi
 }
 
-manage "$action" iptables ipv4
-manage "$action" ip6tables ipv6
+manage "$action" iptables
+manage "$action" ip6tables
