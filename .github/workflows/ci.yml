@@ -58,3 +58,11 @@ jobs:
         env:
           PYTHONDONTWRITEBYTECODE: "1"
         run: python -m unittest discover -s tests -p 'test_lifecycle_integration.py' -v
+      - name: Run Discord configuration integration tests
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python -m unittest discover -s tests -p 'test_discord_configure.py' -v
+      - name: Validate release artifacts
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python -m unittest discover -s tests -p 'test_release_package.py' -v

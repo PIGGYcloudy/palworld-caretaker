@@ -19,6 +19,8 @@ Saved/
 *.sav
 *.tar
 *.tar.gz
+dist/
+SHA256SUMS
 
 # Python
 __pycache__/

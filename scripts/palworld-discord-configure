@@ -4,8 +4,32 @@ IFS=$'\n\t'
 umask 077
 
 (( EUID == 0 )) || { printf 'Run this tool with sudo.\n' >&2; exit 1; }
-CONFIG='/srv/palworld/config/palworld.env'
-[[ -f "$CONFIG" ]] || { printf 'Palworld configuration was not found.\n' >&2; exit 1; }
+CONFIG_DIR="${PALWORLD_CONFIG_DIR:-/srv/palworld/config}"
+if (( $# > 0 )); then
+  [[ $# -eq 2 && "$1" == --config-dir ]] || {
+    printf 'Usage: %s [--config-dir DIRECTORY]\n' "$0" >&2; exit 2;
+  }
+  CONFIG_DIR="$2"
+fi
+[[ -d "$CONFIG_DIR" ]] || { printf 'Palworld configuration directory was not found: %s\n' "$CONFIG_DIR" >&2; exit 1; }
+CONFIG_DIR="$(realpath -m -- "$CONFIG_DIR")"
+INSTALL_ROOT="$(dirname -- "$CONFIG_DIR")"
+MANAGER="$INSTALL_ROOT/scripts/palworld_manager.py"
+[[ -r "$MANAGER" ]] || { printf 'Configuration manager was not found: %s\n' "$MANAGER" >&2; exit 1; }
+python3 "$MANAGER" --config-dir "$CONFIG_DIR" --no-filesystem >/dev/null || exit $?
+MANAGER_USER="$(python3 "$MANAGER" --config-dir "$CONFIG_DIR" --get PALWORLD_MANAGER_USER)"
+
+if [[ -f "$CONFIG_DIR/secrets.env" || -f "$CONFIG_DIR/server.env" ]]; then
+  TOKEN_CONFIG="$CONFIG_DIR/secrets.env"
+  IDS_CONFIG="$CONFIG_DIR/server.env"
+  [[ -f "$TOKEN_CONFIG" && -f "$IDS_CONFIG" ]] || {
+    printf 'Layered deployments require both secrets.env and server.env.\n' >&2; exit 1;
+  }
+else
+  TOKEN_CONFIG="$CONFIG_DIR/palworld.env"
+  IDS_CONFIG="$TOKEN_CONFIG"
+  [[ -f "$TOKEN_CONFIG" ]] || { printf 'No supported deployment configuration was found.\n' >&2; exit 1; }
+fi
 [[ -f /etc/systemd/system/palworld-discord-bot.service ]] || {
   printf 'Install the Palworld manager upgrade first.\n' >&2; exit 1;
 }
@@ -31,26 +55,55 @@ validate_ids "$guild_ids" || { printf 'Invalid guild ID list.\n' >&2; exit 2; }
 validate_ids "$role_ids" || { printf 'Invalid allowed role ID list.\n' >&2; exit 2; }
 validate_ids "$admin_ids" || { printf 'Invalid administrator role ID list.\n' >&2; exit 2; }
 
-backup="${CONFIG}.pre-discord-$(date +%Y%m%d-%H%M%S)"
-install -o root -g root -m 0600 "$CONFIG" "$backup"
-temporary="$(mktemp "${CONFIG}.tmp.XXXXXX")"
-cleanup() { rm -f -- "${temporary:-}"; }
+stamp="$(date +%Y%m%d-%H%M%S)"
+backups=()
+temporary_files=()
+cleanup() { ((${#temporary_files[@]} == 0)) || rm -f -- "${temporary_files[@]}"; }
 trap cleanup EXIT
-while IFS= read -r line || [[ -n "$line" ]]; do
-  case "$line" in
-    DISCORD_BOT_TOKEN=*) printf "DISCORD_BOT_TOKEN='%s'\n" "$token" ;;
-    DISCORD_PALWORLD_ALLOWED_GUILD_IDS=*) printf 'DISCORD_PALWORLD_ALLOWED_GUILD_IDS=%s\n' "$guild_ids" ;;
-    DISCORD_PALWORLD_ALLOWED_CHANNEL_IDS=*) printf 'DISCORD_PALWORLD_ALLOWED_CHANNEL_IDS=%s\n' "$channel_ids" ;;
-    DISCORD_PALWORLD_ALLOWED_ROLE_IDS=*) printf 'DISCORD_PALWORLD_ALLOWED_ROLE_IDS=%s\n' "$role_ids" ;;
-    DISCORD_PALWORLD_ADMIN_ROLE_IDS=*) printf 'DISCORD_PALWORLD_ADMIN_ROLE_IDS=%s\n' "$admin_ids" ;;
-    *) printf '%s\n' "$line" ;;
-  esac
-done < "$CONFIG" > "$temporary"
-chown root:palworld-manager "$temporary"
-chmod 0640 "$temporary"
-mv -f -- "$temporary" "$CONFIG"
-trap - EXIT
+
+backup_config() {
+  local source=$1 backup="${1}.pre-discord-$stamp"
+  if [[ ! -e "$backup" ]]; then
+    install -o root -g root -m 0600 "$source" "$backup"
+    backups+=("$backup")
+  fi
+}
+
+replace_discord_values() {
+  local config=$1 mode=$2 temporary line key replacement matched
+  shift 2
+  backup_config "$config"
+  temporary="$(mktemp "${config}.tmp.XXXXXX")"
+  temporary_files+=("$temporary")
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    key=${line%%=*}
+    key=${key#"${key%%[![:space:]]*}"}
+    key=${key%"${key##*[![:space:]]}"}
+    matched=false
+    for replacement in "$@"; do
+      [[ "${replacement%%=*}" == "$key" ]] && { matched=true; break; }
+    done
+    [[ "$matched" == true ]] && continue
+    printf '%s\n' "$line"
+  done < "$config" > "$temporary"
+  for line in "$@"; do printf '%s\n' "$line" >> "$temporary"; done
+  chown root:"$MANAGER_USER" "$temporary"
+  chmod "$mode" "$temporary"
+  mv -f -- "$temporary" "$config"
+}
+
+replace_discord_values "$TOKEN_CONFIG" 0600 "DISCORD_BOT_TOKEN='$token'"
+replace_discord_values "$IDS_CONFIG" "$([[ "$IDS_CONFIG" == "$TOKEN_CONFIG" ]] && printf 0600 || printf 0640)" \
+  "DISCORD_PALWORLD_ALLOWED_GUILD_IDS=$guild_ids" \
+  "DISCORD_PALWORLD_ALLOWED_CHANNEL_IDS=$channel_ids" \
+  "DISCORD_PALWORLD_ALLOWED_ROLE_IDS=$role_ids" \
+  "DISCORD_PALWORLD_ADMIN_ROLE_IDS=$admin_ids"
 unset token
+
+python3 "$MANAGER" --config-dir "$CONFIG_DIR" --no-filesystem >/dev/null || {
+  printf 'Updated Discord configuration failed validation; restore: %s\n' "${backups[*]}" >&2
+  exit 3
+}
 
 systemctl daemon-reload
 systemctl enable --now palworld-discord-bot.service >/dev/null
@@ -62,4 +115,5 @@ fi
 
 printf '\nBot is running. Invite it to the Discord server whose guild ID you entered:\n'
 printf 'https://discord.com/oauth2/authorize?client_id=%s&permissions=3072&integration_type=0&scope=bot%%20applications.commands\n' "$application_id"
-printf '\nThe token was stored only in the protected configuration file. Backup: %s\n' "$backup"
+printf '\nThe token was stored only in the protected secrets layer. Backup(s):\n'
+printf '  %s\n' "${backups[@]}"

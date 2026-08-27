@@ -5,22 +5,23 @@ Linux 維運工具，重點是安全關服、可恢復備份、閒置自動關�
 遠端操作，不需要常駐公開的 Web 管理面板。
 
 > [!IMPORTANT]
-> 專案目前是準備公開的早期版本，僅驗證於現有 Ubuntu 部署。部署設定契約、
-> 安裝器、備份/還原/更新腳本與 systemd unit 已支援任意絕對安裝與備份路徑。
-> 請先閱讀安裝腳本，並在測試主機驗證後再用於重要存檔。
+> v0.1.0 支援 Ubuntu 24.04 LTS amd64 的原生 systemd 部署。部署設定契約、
+> 安裝器、備份/還原/更新腳本與 systemd unit 支援任意安全的絕對安裝與備份
+> 路徑。正式存檔仍建議先在測試主機完成安裝、備份與還原演練。
 
 ## 目前功能
 
 - SteamCMD 安裝、驗證與更新 Palworld Dedicated Server。
 - systemd 管理、崩潰有限重啟與 localhost-only REST API 防護。
-- 安全存檔、正常關服、NAS 版本化備份與互動式還原。
+- 安全存檔、正常關服、可設定目的地的版本化備份與互動式還原。
 - 無玩家逾時後再次確認，再執行存檔與正常關服。
 - Discord `/pal` 指令、guild/channel/role allowlist 與管理員確認。
 - 每日維護保留原本開關服狀態，失敗時避免強制關服或無聲資料損失。
 
-規劃中的可攜式安裝、任意備份目的地、設定模型與管理介面請見
-[`docs/ROADMAP.md`](docs/ROADMAP.md)。Discord Bot 圖文教學預留於
-[`docs/DISCORD_SETUP.md`](docs/DISCORD_SETUP.md)。
+從零部署請見 [`docs/INSTALL.md`](docs/INSTALL.md)，既有 `/srv/palworld` 部署
+請見 [`docs/UPGRADE.md`](docs/UPGRADE.md)，Discord Bot 的完整建立、權限與
+token 安全流程見 [`docs/DISCORD_SETUP.md`](docs/DISCORD_SETUP.md)。後續產品
+方向另列於 [`docs/ROADMAP.md`](docs/ROADMAP.md)。
 
 ## 架構
 
@@ -94,15 +95,17 @@ Bot 採 slash command，不會重複註冊文字指令。全域 slash command �
 互動式設定（token 輸入不顯示，也不會出現在 shell history）：
 
 ```bash
-sudo /usr/local/sbin/palworld-discord-configure
+sudo /usr/local/sbin/palworld-discord-configure \
+  --config-dir '<PALWORLD_INSTALL_ROOT>/config'
 ```
 
 工具會要求 Application ID、guild ID、channel ID、一般角色 ID 與管理員角色 ID，成功後啟動 Bot 並顯示只包含 View Channel、Send Messages 和 slash-command scope 的邀請網址。
 
 ## 安裝、啟停與紀錄
 
-安裝器以 Ubuntu、systemd 與 SteamCMD 套件為前提。先複製三個設定範本、
-填入實際值並保護 secrets，再在專案根目錄執行：
+安裝器以 Ubuntu 24.04、systemd 與 SteamCMD 套件為前提。完整系統需求、備份
+目的地選擇、非預設路徑和驗證流程見 [`docs/INSTALL.md`](docs/INSTALL.md)。快速
+流程如下：
 
 ```bash
 mkdir -p ./deployment-config
@@ -175,7 +178,7 @@ API 不通時，先查看遊戲 log、確認 `RESTAPIEnabled=True`、8212 loopba
 
 ## 備份與還原
 
-維護時間、備份目的地與保留版本數分別由 `BACKUP_TIME`、
+維護時間、通用備份目的地與保留版本數分別由 `BACKUP_TIME`、
 `PALWORLD_BACKUP_DIR` 與 `BACKUP_RETENTION_COUNT` 決定。維護會先透過本機
 REST API 存檔並要求正常關服，才取得一致 snapshot，再以 SteamCMD 驗證並
 更新伺服器。若正常關服失敗，維護會中止，不會以強制終止取代。若維護開始
@@ -192,7 +195,13 @@ sudo "<PALWORLD_INSTALL_ROOT>/scripts/restore-palworld.sh" restore palworld-YYYY
 
 提交變更前請閱讀 [`CONTRIBUTING.md`](CONTRIBUTING.md)，安全邊界與漏洞回報
 方式見 [`SECURITY.md`](SECURITY.md)。GitHub Actions 會執行 Python 測試、Python
-編譯、Bash 語法檢查與 ShellCheck。
+編譯、Bash 語法檢查、ShellCheck 與 release 產物驗證。從乾淨且已提交的
+v0.1.0 source tree 建立 tarball 與 checksum：
+
+```bash
+scripts/package-release.sh --version 0.1.0 --output-dir dist
+(cd dist && sha256sum --check SHA256SUMS)
+```
 
 本專案採用 [GNU General Public License v3.0](LICENSE) 授權。你可以依照
 GPL-3.0 的條款使用、修改及散布本專案；散布衍生作品時也必須保留相同授權。
