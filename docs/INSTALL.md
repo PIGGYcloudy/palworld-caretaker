@@ -2,11 +2,11 @@
 
 本指南適用於全新的 Palworld Dedicated Server。安裝器會安裝 SteamCMD、建立受
 限系統帳號、下載遊戲、渲染 systemd units，並啟用遊戲、REST 防火牆、閒置
-監看及備份排程。Discord Bot 只有在 token 已設定時才會啟動。
+監看、備份排程與僅限本機的 Web UI。Discord Bot 只有在 token 已設定時才會啟動。
 
 ## 系統需求
 
-- Ubuntu 24.04 LTS amd64，使用 systemd 與 APT；其他發行版尚未列入 v0.1.0
+- Ubuntu 24.04 LTS amd64，使用 systemd 與 APT；其他發行版尚未列入 v0.2.0
   的支援範圍。
 - 具 `sudo` 權限的登入帳號，以及可連線至 Ubuntu 套件庫、Steam 與 Discord
   （若啟用 Bot）的網路。
@@ -14,19 +14,20 @@
   「目前 SaveGames 與 Config 合計兩倍，再加 1 GiB」的可用空間。
 - 對外開放遊戲 UDP port（預設 `8211`）時需自行設定路由器或雲端防火牆。
   REST TCP port（預設 `8212`）必須維持 localhost-only，不可公開。
+  Local Web UI 固定只監聽 `127.0.0.1:8765`，不可透過 proxy 或防火牆公開。
 
 安裝會加入 i386 architecture，並透過 APT 安裝 `steamcmd:i386`、
 `python3-venv` 與 `iptables`。Valve 授權條款仍由操作者在 APT 流程中確認。
 
 ## 準備設定
 
-先把 `palworld-caretaker-v0.1.0.tar.gz` 與 `SHA256SUMS` 放在同一目錄，驗證並
+先把 `palworld-caretaker-v0.2.0.tar.gz` 與 `SHA256SUMS` 放在同一目錄，驗證並
 解壓：
 
 ```bash
 sha256sum --check SHA256SUMS
-tar -xzf palworld-caretaker-v0.1.0.tar.gz
-cd palworld-caretaker-v0.1.0
+tar -xzf palworld-caretaker-v0.2.0.tar.gz
+cd palworld-caretaker-v0.2.0
 ```
 
 驗證必須顯示 `OK`。接著在專案根目錄建立不受 Git 管理的部署設定：
@@ -36,19 +37,26 @@ mkdir -p deployment-config
 cp config/caretaker.env.example deployment-config/caretaker.env
 cp config/server.env.example deployment-config/server.env
 cp config/secrets.env.example deployment-config/secrets.env
-chmod 0600 deployment-config/secrets.env
+chmod 0640 deployment-config/secrets.env
 ```
 
 編輯三個檔案：
 
 - `caretaker.env`：安裝根目錄、系統帳號、備份目的地、保留數與排程。
 - `server.env`：遊戲、REST API、閒置關服與 Discord allowlist。
-- `secrets.env`：伺服器密碼、管理密碼與可選的 Discord Bot token。
+- `secrets.env`：伺服器密碼、管理密碼、可選的獨立 Web UI 密碼與 Discord Bot token。安裝後為
+  `root:<PALWORLD_MANAGER_USER>`、mode `0640`，讓本機 Web UI 與 Discord Bot 可讀取；
+  不可給其他群組或使用者讀取權限。
 
 `SERVER_PASSWORD` 與 `ADMIN_PASSWORD` 必須替換 placeholder，且不能含
 `,`、`(`、`)`、`"` 或換行。尚未設定 Discord 時可保留 token placeholder；
 Bot 不會啟動。完整欄位、優先順序與安全限制見
 [設定契約](CONFIGURATION.md)。
+
+Web UI 一律使用 HTTP Basic Auth。帳號由 `caretaker.env` 的
+`PALWORLD_WEB_UI_USERNAME` 決定；`secrets.env` 的
+`PALWORLD_WEB_UI_PASSWORD` 留空時會使用 `ADMIN_PASSWORD`。多使用者主機建議
+設定獨立 Web UI 密碼。
 
 ### 備份目的地
 
@@ -119,7 +127,7 @@ PALWORLD_MANAGER_STATE_DIR=/var/lib/palworld-manager
 ```bash
 sudo "<PALWORLD_INSTALL_ROOT>/scripts/diagnose-palworld.sh"
 sudo systemctl status palworld.service palworld-rest-firewall.service \
-  palworld-idle-watcher.service palworld-backup.timer --no-pager
+  palworld-idle-watcher.service palworld-backup.timer palworld-web-ui.service --no-pager
 sudo journalctl -u palworld.service -n 100 --no-pager
 sudo ss -lntp | grep ':8212'
 ```
@@ -131,6 +139,17 @@ Palworld client 連線測試 UDP port。接著手動建立並列出第一份備�
 sudo "<PALWORLD_INSTALL_ROOT>/scripts/backup-palworld.sh"
 sudo "<PALWORLD_INSTALL_ROOT>/scripts/restore-palworld.sh" list
 ```
+
+正式維護前可先只檢查備份來源、mount 與可用空間，不會存檔、停止或啟動服務：
+
+```bash
+sudo python3 "<PALWORLD_INSTALL_ROOT>/scripts/palworld_manager.py" \
+  --config-dir "<PALWORLD_INSTALL_ROOT>/config" --backup-preflight
+```
+
+所有備份、還原、更新與安全啟停都會共用
+`/run/palworld-caretaker/operation.lock`；若已有另一個操作進行中，命令會立即
+拒絕並等待下一次維護窗口。不要刪除、替換或以 symbolic link 取代這個鎖檔。
 
 閒置監看預設應先保持 `PALWORLD_IDLE_WATCHER_DRY_RUN=true`；觀察
 `journalctl -u palworld-idle-watcher.service` 確認判定正確後，再改為 `false`

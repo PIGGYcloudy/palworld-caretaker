@@ -18,6 +18,7 @@ BACKUP_MOUNT="$(config_value PALWORLD_BACKUP_MOUNT)"
 BACKUP_REQUIRE_MOUNT="$(config_value PALWORLD_BACKUP_REQUIRE_MOUNT)"
 LOCAL_ROOT="$(config_value PALWORLD_LOCAL_BACKUP_ROOT)"
 SERVICE_USER="$(config_value PALWORLD_SERVICE_USER)"
+LOCK_FILE="${PALWORLD_OPERATION_LOCK_FILE:-/run/palworld-caretaker/operation.lock}"
 
 die() {
   printf 'ERROR: %s\n' "$*" >&2
@@ -59,10 +60,24 @@ BACKUP_DIR="$BACKUP_ROOT/$VERSION"
 [[ -f "$BACKUP_DIR/config/LinuxServer/PalWorldSettings.ini" ]] || die 'backup settings file is missing'
 find "$BACKUP_DIR/savegames" -type d -name backup -print -quit | grep -q . || die 'backup built-in backup directory is missing'
 
+# The portable core checks the verified snapshot inventory, required mount, and
+# every restore filesystem before service interruption.  It repeats the check
+# immediately before copying to close the normal prompt-to-restore race.
+if python3 "$MANAGER" --core-engine >/dev/null 2>&1; then
+  python3 "$MANAGER" --config-dir "$CONFIG_DIR" --restore-preflight "$VERSION" || exit $?
+fi
+
 printf 'This will stop Palworld, create a fresh pre-restore backup, and overwrite the live save/config.\n'
 printf 'Type exactly "RESTORE %s" to continue: ' "$VERSION"
 read -r confirmation
 [[ "$confirmation" == "RESTORE $VERSION" ]] || die 'restore confirmation did not match'
+
+# The confirmation is deliberately outside the lock; the destructive state
+# check and every subsequent filesystem/service action are inside it.
+[[ -f "$LOCK_FILE" && ! -L "$LOCK_FILE" ]] || die "operation lock is unsafe or missing: $LOCK_FILE"
+exec 9<"$LOCK_FILE"
+flock -n 9 || die 'another Palworld operation is already running'
+export PALWORLD_OPERATION_LOCK_HELD=1
 
 was_active=0
 stamp="$(date +%Y%m%d-%H%M%S)"
@@ -85,6 +100,15 @@ fi
 
 # The backup script sees the service stopped and therefore leaves it stopped.
 "$SCRIPT_HOME/backup-palworld.sh" --pre-restore
+
+if python3 "$MANAGER" --core-engine >/dev/null 2>&1; then
+  python3 "$MANAGER" --config-dir "$CONFIG_DIR" --restore "$VERSION" || exit $?
+  chown -R "$SERVICE_USER:$SERVICE_USER" "$SAVE_ROOT" "$CONFIG_ROOT"
+  find "$SAVE_ROOT" "$CONFIG_ROOT" -type d -exec chmod 0750 {} +
+  find "$SAVE_ROOT" "$CONFIG_ROOT" -type f -exec chmod 0640 {} +
+  printf 'Restore completed from %s.\n' "$VERSION"
+  exit 0
+fi
 
 install -d -o root -g root -m 0700 "$local_snapshot"
 rsync -a "$SAVE_ROOT/" "$local_snapshot/savegames/"

@@ -49,7 +49,7 @@ class DiscordConfigureTests(unittest.TestCase):
         )
         secrets = self.config_dir / "secrets.env"
         secrets.write_text(self.original_secrets, encoding="utf-8")
-        secrets.chmod(0o600)
+        secrets.chmod(0o640)
         self.unit = self.base / "palworld-discord-bot.service"
         self.unit.write_text("fixture", encoding="utf-8")
 
@@ -119,7 +119,7 @@ cp -- "${remaining[0]}" "${remaining[1]}"
         self.assertIn("DISCORD_PALWORLD_ALLOWED_CHANNEL_IDS=323456789012345678", server)
         self.assertIn("DISCORD_PALWORLD_ALLOWED_ROLE_IDS=423456789012345678", server)
         self.assertIn("DISCORD_PALWORLD_ADMIN_ROLE_IDS=523456789012345678", server)
-        self.assertEqual((self.config_dir / "secrets.env").stat().st_mode & 0o777, 0o600)
+        self.assertEqual((self.config_dir / "secrets.env").stat().st_mode & 0o777, 0o640)
         self.assertEqual((self.config_dir / "server.env").stat().st_mode & 0o777, 0o640)
         secret_backups = list(self.config_dir.glob("secrets.env.pre-discord-*"))
         server_backups = list(self.config_dir.glob("server.env.pre-discord-*"))

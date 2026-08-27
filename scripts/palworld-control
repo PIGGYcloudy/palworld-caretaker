@@ -2,10 +2,20 @@
 set -euo pipefail
 IFS=$'\n\t'
 
-LOCK_FILE='/run/lock/palworld-start.lock'
+LOCK_FILE="${PALWORLD_OPERATION_LOCK_FILE:-/run/palworld-caretaker/operation.lock}"
 [[ $# -eq 1 && "$1" == start ]] || { printf 'Usage: palworld-control start\n' >&2; exit 2; }
-exec 9>"$LOCK_FILE"
-flock -w 120 9 || { printf 'START_BUSY\n'; exit 3; }
+[[ -f "$LOCK_FILE" && ! -L "$LOCK_FILE" ]] || { printf 'LOCK_UNSAFE\n'; exit 5; }
+exec 9<"$LOCK_FILE"
+# This adapter is the sole lock owner for every externally requested start.
+# Callers must never retain the operation lock while invoking it.  Use a
+# non-blocking acquisition so contention returns a useful conflict instead of
+# holding an HTTP/Discord request open behind another operation.
+flock -n 9 || { printf 'START_BUSY\n'; exit 3; }
+maintenance_state="$(systemctl is-active palworld-maintenance.service 2>/dev/null || true)"
+case "$maintenance_state" in
+  inactive|failed) ;;
+  *) printf 'MAINTENANCE_BUSY\n'; exit 4 ;;
+esac
 if systemctl is-active --quiet palworld.service; then
   printf 'ALREADY_RUNNING\n'
   exit 0

@@ -7,6 +7,7 @@ import signal
 import time
 
 from palworld_manager import ApiError, PalworldAPI, env_bool, env_int, load_runtime_config, read_state, service_active, service_lifecycle, write_state
+from palworld_caretaker.operations import OperationLock, OperationLockBusy
 
 CONFIG = os.environ.get("PALWORLD_CONFIG", "/srv/palworld/config/palworld.env")
 STATE = os.environ.get("PALWORLD_STATE", "/var/lib/palworld-manager/idle-state.json")
@@ -16,6 +17,43 @@ stopping = False
 def stop_handler(*_args):
     global stopping
     stopping = True
+
+
+def attempt_idle_shutdown(api, state, *, dry_run: bool, shutdown_wait: int, lock_factory=OperationLock) -> None:
+    """Recheck and stop while holding the deployment-wide operation lock.
+
+    The initial poll deliberately remains outside the lock.  Once the idle
+    threshold is reached, every decision capable of stopping the server--the
+    final player checks, save, and shutdown--is one mutually exclusive unit.
+    """
+    try:
+        with lock_factory():
+            logging.info("rechecking players before shutdown")
+            final_players = api.players()
+            if final_players:
+                state["idle_since"] = None
+                logging.info("shutdown cancelled; players_online=%d", len(final_players))
+            elif dry_run:
+                logging.warning("dry-run: would save world and request graceful shutdown")
+                state["idle_since"] = time.time()
+            else:
+                logging.info("saving world")
+                api.save()
+                logging.info("world save succeeded")
+                time.sleep(min(5, shutdown_wait))
+                final_players = api.players()
+                if final_players:
+                    state["idle_since"] = None
+                    logging.info("shutdown cancelled after save; players_online=%d", len(final_players))
+                else:
+                    logging.info("requesting graceful shutdown")
+                    api.shutdown(shutdown_wait, "Server stopping because it has been empty.")
+                    state["shutdown_requested"] = True
+                    logging.info("Palworld stopped due to inactivity")
+    except OperationLockBusy:
+        # A concurrent backup/update/web action owns the service transition;
+        # retain the idle timer and retry after the next normal interval.
+        logging.info("another Palworld operation is active; idle shutdown deferred")
 
 
 def main() -> int:
@@ -28,6 +66,7 @@ def main() -> int:
     grace = env_int(config, "PALWORLD_STARTUP_GRACE_SECONDS", 600, 0, 86400)
     shutdown_wait = env_int(config, "PALWORLD_SHUTDOWN_WAIT_SECONDS", 30, 1, 300)
     api = PalworldAPI(config)
+    manager_user = config.get("PALWORLD_MANAGER_USER", "palworld-manager")
     state = read_state(STATE)
     seen_offline = False
 
@@ -69,28 +108,10 @@ def main() -> int:
                 idle = now - float(state["idle_since"])
                 logging.info("players_online=0, idle=%d/%d minutes", int(idle // 60), timeout // 60)
                 if idle >= timeout:
-                    logging.info("rechecking players before shutdown")
-                    final_players = api.players()
-                    if final_players:
-                        state["idle_since"] = None
-                        logging.info("shutdown cancelled; players_online=%d", len(final_players))
-                    elif dry_run:
-                        logging.warning("dry-run: would save world and request graceful shutdown")
-                        state["idle_since"] = now
-                    else:
-                        logging.info("saving world")
-                        api.save()
-                        logging.info("world save succeeded")
-                        time.sleep(min(5, shutdown_wait))
-                        final_players = api.players()
-                        if final_players:
-                            state["idle_since"] = None
-                            logging.info("shutdown cancelled after save; players_online=%d", len(final_players))
-                        else:
-                            logging.info("requesting graceful shutdown")
-                            api.shutdown(shutdown_wait, "Server stopping because it has been empty.")
-                            state["shutdown_requested"] = True
-                            logging.info("Palworld stopped due to inactivity")
+                    attempt_idle_shutdown(
+                        api, state, dry_run=dry_run, shutdown_wait=shutdown_wait,
+                        lock_factory=lambda: OperationLock(manager_user=manager_user),
+                    )
         except ApiError as exc:
             # Unknown is never equivalent to zero. Requiring a fresh continuous
             # zero-player window after an API fault is intentionally fail-closed.

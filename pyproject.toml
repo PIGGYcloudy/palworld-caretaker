@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "palworld-caretaker"
+version = "0.2.0"
+description = "Cross-platform core for safely operating a Palworld dedicated server"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "GPL-3.0-or-later"}
+authors = [{name = "Palworld Caretaker contributors"}]
+dependencies = []
+
+[project.scripts]
+palworld-caretaker = "palworld_caretaker.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.unittest]
+start-directory = "tests"

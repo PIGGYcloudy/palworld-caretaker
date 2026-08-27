@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import argparse
 import base64
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass
 import json
 import os
+import pwd
 import re
 import shutil
 import stat
@@ -17,6 +19,24 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - the deployed adapter is Linux-only
+    fcntl = None
+
+try:
+    from palworld_caretaker.backup import BackupManager as _CoreBackupManager
+    from palworld_caretaker.errors import SnapshotError as _CoreSnapshotError
+    from palworld_caretaker.operations import OperationLock as _CoreOperationLock
+    from palworld_caretaker.operations import OperationLockBusy as _CoreOperationLockBusy
+except ImportError:
+    _CoreBackupManager = None
+    class _CoreSnapshotError(RuntimeError):
+        pass
+
+    _CoreOperationLock = None
+    class _CoreOperationLockBusy(RuntimeError):
+        pass
 
 
 class ConfigError(RuntimeError):
@@ -64,6 +84,8 @@ DEFAULT_CONFIG: dict[str, str] = {
     "DISCORD_PALWORLD_ALLOWED_ROLE_IDS": "",
     "DISCORD_PALWORLD_ADMIN_ROLE_IDS": "",
     "DISCORD_PALWORLD_ALLOWED_CHANNEL_IDS": "",
+    "PALWORLD_WEB_UI_USERNAME": "palworld-manager",
+    "PALWORLD_WEB_UI_PASSWORD": "",
     "BACKUP_RETENTION_COUNT": "14",
     "BACKUP_TIME": "04:30",
     "SERVER_PASSWORD": "",
@@ -237,8 +259,8 @@ def validate_config(config: dict[str, str]) -> dict[str, Path | None]:
     env_int(config, "BACKUP_RETENTION_COUNT", 14, 1, 1000)
     env_bool(config, "PALWORLD_IDLE_SHUTDOWN_ENABLED", True)
     env_bool(config, "PALWORLD_IDLE_WATCHER_DRY_RUN", True)
-    if config.get("PALWORLD_REST_API_HOST", "") not in {"127.0.0.1", "localhost", "::1"}:
-        raise ConfigError("PALWORLD_REST_API_HOST must be localhost")
+    if config.get("PALWORLD_REST_API_HOST", "") != "127.0.0.1":
+        raise ConfigError("PALWORLD_REST_API_HOST must be 127.0.0.1")
     if not re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", config.get("BACKUP_TIME", "")):
         raise ConfigError("BACKUP_TIME must use 24-hour HH:MM format")
     for key in ("PALWORLD_SERVICE_USER", "PALWORLD_MANAGER_USER"):
@@ -336,6 +358,7 @@ def render_systemd_units(
         "@FIREWALL_SCRIPT@": _systemd_quote(str(paths["scripts_root"] / "palworld-rest-firewall")),
         "@IDLE_SCRIPT@": _systemd_quote(str(paths["scripts_root"] / "palworld-idle-watcher.py")),
         "@DISCORD_SCRIPT@": _systemd_quote(str(paths["scripts_root"] / "palworld-discord-bot.py")),
+        "@WEB_UI_SCRIPT@": _systemd_quote(str(paths["scripts_root"] / "palworld-web-ui.py")),
         "@VENV_PYTHON@": _systemd_quote(str(paths["install_root"] / "venv/bin/python")),
         "@BACKUP_TIME@": f"*-*-* {config['BACKUP_TIME']}:00",
     }
@@ -375,24 +398,47 @@ class PreflightReport:
 
 def preflight_values(
     config: dict[str, str], *, config_dir: str | Path | None = None,
+    deployed: bool = True,
 ) -> PreflightReport:
     """Validate the full value/secret contract without deployment path checks."""
     validate_config(config)
     errors: list[str] = []
     if config_dir is not None:
         secrets = Path(config_dir) / "secrets.env"
-        if secrets.exists():
+        if secrets.exists() or secrets.is_symlink():
             if secrets.is_symlink() or not secrets.is_file():
                 errors.append(f"secrets.env must be a regular file, not a symlink: {secrets}")
-            mode = stat.S_IMODE(secrets.stat().st_mode)
-            if not secrets.is_symlink() and mode & 0o077:
-                errors.append(f"secrets.env permissions must be 0600 or stricter (found {mode:04o})")
+            else:
+                info = secrets.stat()
+                mode = stat.S_IMODE(info.st_mode)
+                if mode != 0o640:
+                    errors.append(f"secrets.env permissions must be exactly 0640 (found {mode:04o})")
+                # Install/upgrade preflight runs as root.  Development and
+                # unprivileged value checks cannot meaningfully assert root
+                # ownership, but a deployed configuration must have it.
+                if deployed and os.geteuid() == 0:
+                    try:
+                        manager_gid = pwd.getpwnam(config["PALWORLD_MANAGER_USER"]).pw_gid
+                    except KeyError:
+                        errors.append(
+                            "PALWORLD_MANAGER_USER does not resolve to a local account "
+                            "for secrets.env ownership validation"
+                        )
+                    else:
+                        if info.st_uid != 0 or info.st_gid != manager_gid:
+                            errors.append(
+                                "secrets.env owner/group must be root:"
+                                f"{config['PALWORLD_MANAGER_USER']}"
+                            )
     for key in ("SERVER_PASSWORD", "ADMIN_PASSWORD"):
         value = config.get(key, "")
         if not value or value.startswith("CHANGE_ME"):
             errors.append(f"{key} must be configured")
         elif any(character in value for character in ',()"\r\n'):
             errors.append(f"{key} contains a Palworld INI-reserved character")
+    web_password = config.get("PALWORLD_WEB_UI_PASSWORD", "")
+    if web_password and any(character in web_password for character in "\r\n"):
+        errors.append("PALWORLD_WEB_UI_PASSWORD contains a forbidden control character")
     return PreflightReport(errors)
 
 
@@ -402,7 +448,7 @@ def preflight_config(
 ) -> PreflightReport:
     """Check deployment paths, permissions, symlinks, and backup mount safety."""
     paths = validate_config(config)
-    errors = list(preflight_values(config, config_dir=config_dir).errors)
+    errors = list(preflight_values(config, config_dir=config_dir, deployed=True).errors)
 
     def has_mode(path: Path, mask: int) -> bool:
         return bool(stat.S_IMODE(path.stat().st_mode) & mask)
@@ -551,11 +597,18 @@ def env_int(config: dict[str, str], key: str, default: int, minimum: int, maximu
     return value
 
 
-class PalworldAPI:
+class _LegacyNoRedirect(urllib.request.HTTPRedirectHandler):
+    """Keep the legacy transport from forwarding credentials after a redirect."""
+
+    def redirect_request(self, request, fp, code, msg, headers, newurl):
+        return None
+
+
+class _LegacyPalworldAPI:
     def __init__(self, config: dict[str, str]):
         host = config.get("PALWORLD_REST_API_HOST", "127.0.0.1")
-        if host not in {"127.0.0.1", "localhost", "::1"}:
-            raise ConfigError("PALWORLD_REST_API_HOST must be localhost")
+        if host != "127.0.0.1":
+            raise ConfigError("PALWORLD_REST_API_HOST must be 127.0.0.1")
         port = env_int(config, "PALWORLD_REST_API_PORT", 8212, 1, 65535)
         url_host = f"[{host}]" if ":" in host else host
         self.base = f"http://{url_host}:{port}/v1/api"
@@ -564,6 +617,8 @@ class PalworldAPI:
         if not self.password:
             raise ConfigError("ADMIN_PASSWORD is required")
         self.timeout = env_int(config, "PALWORLD_API_TIMEOUT_SECONDS", 5, 1, 30)
+        self.opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}), _LegacyNoRedirect())
 
     def request(self, method: str, endpoint: str, body: dict | None = None, expect_json: bool = False):
         data = None if body is None else json.dumps(body).encode("utf-8")
@@ -575,7 +630,7 @@ class PalworldAPI:
             headers={"Authorization": f"Basic {token}", "Content-Type": "application/json"},
         )
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            with self.opener.open(request, timeout=self.timeout) as response:
                 payload = response.read()
                 if response.status != 200:
                     raise ApiError(f"HTTP {response.status}")
@@ -608,6 +663,54 @@ class PalworldAPI:
 
     def shutdown(self, wait_seconds: int, message: str) -> None:
         self.request("POST", "/shutdown", {"waittime": wait_seconds, "message": message})
+
+
+# A deployed v0.2 installation carries the portable package beside this
+# compatibility entrypoint.  Old single-file installations keep the original
+# implementation until upgraded, so no shell or Python caller breaks.
+try:
+    from palworld_caretaker.errors import ApiError as _CoreApiError, ConfigError as _CoreConfigError
+    from palworld_caretaker.rest import PalworldRESTClient as _CorePalworldAPI
+except ImportError:
+    PalworldAPI = _LegacyPalworldAPI
+else:
+    class PalworldAPI(_CorePalworldAPI):
+        """Keep the historical manager exception types at its public boundary."""
+        def __init__(self, *args, **kwargs):
+            try:
+                super().__init__(*args, **kwargs)
+            except _CoreConfigError as exc:
+                raise ConfigError(str(exc)) from exc
+
+        def request(self, *args, **kwargs):
+            try:
+                return super().request(*args, **kwargs)
+            except _CoreApiError as exc:
+                raise ApiError(str(exc)) from exc
+
+        def player_records(self):
+            try:
+                return super().player_records()
+            except _CoreApiError as exc:
+                raise ApiError(str(exc)) from exc
+
+        def metrics(self):
+            try:
+                return super().metrics()
+            except _CoreApiError as exc:
+                raise ApiError(str(exc)) from exc
+
+        def broadcast(self, message):
+            try:
+                return super().broadcast(message)
+            except _CoreApiError as exc:
+                raise ApiError(str(exc)) from exc
+
+        def shutdown(self, wait_seconds, message):
+            try:
+                return super().shutdown(wait_seconds, message)
+            except _CoreApiError as exc:
+                raise ApiError(str(exc)) from exc
 
 
 def service_property(name: str) -> str:
@@ -667,6 +770,101 @@ def write_state(path: str | Path, state: dict) -> None:
             pass
 
 
+def _core_backup_engine(config: dict[str, str]):
+    if _CoreBackupManager is None:
+        raise ConfigError("Python backup core is not installed beside palworld_manager.py")
+    paths = validate_config(config)
+    return _CoreBackupManager(
+        save_root=paths["server_root"] / "Pal/Saved/SaveGames",
+        config_root=paths["server_root"] / "Pal/Saved/Config",
+        backup_root=paths["backup_dir"], local_backup_root=paths["local_backup_root"],
+        retention_count=env_int(config, "BACKUP_RETENTION_COUNT", 14, 1, 1000),
+        backup_mount=paths["backup_mount"],
+        require_mount=env_bool(config, "PALWORLD_BACKUP_REQUIRE_MOUNT", True),
+    )
+
+
+def _core_backup(config: dict[str, str]) -> Path:
+    """Linux adapter around the portable snapshot engine for the old shell CLI."""
+    if _CoreBackupManager is None:
+        raise ConfigError("Python backup core is not installed beside palworld_manager.py")
+    if hasattr(os, "geteuid") and os.geteuid() != 0:
+        raise ConfigError("run this script with sudo")
+    if (_CoreOperationLock is None and
+            os.environ.get("PALWORLD_OPERATION_LOCK_HELD") != "1"):
+        raise ConfigError("backup locking is unavailable on this platform")
+    try:
+        lock = nullcontext() if os.environ.get("PALWORLD_OPERATION_LOCK_HELD") == "1" else _CoreOperationLock(
+            manager_user=config["PALWORLD_MANAGER_USER"]
+        )
+        with lock:
+            # Maintenance has already acquired this lock and explicitly marks
+            # its child backup.  A standalone backup checks maintenance only
+            # after taking the shared lock, eliminating the TOCTOU window.
+            if os.environ.get("PALWORLD_OPERATION_LOCK_HELD") != "1":
+                result = subprocess.run(
+                    ["systemctl", "is-active", "palworld-maintenance.service"],
+                    text=True, capture_output=True, timeout=15, check=False,
+                )
+                state = result.stdout.strip()
+                if result.returncode not in {0, 3} or state not in {"inactive", "failed"}:
+                    raise ConfigError("maintenance is active or its state cannot be confirmed")
+            engine = _core_backup_engine(config)
+            # Validate storage and source safety before touching a running
+            # server.  In particular, a missing mount or insufficient space
+            # must never result in an otherwise avoidable service stop.
+            engine.preflight_snapshot()
+            initial_state = service_state()
+            if initial_state not in {"active", "inactive", "failed"}:
+                raise ConfigError("Palworld service state cannot be confirmed")
+            was_active = initial_state == "active"
+            try:
+                if was_active:
+                    # A backup may never force-stop an active server until the
+                    # REST API has acknowledged a synchronous save.
+                    PalworldAPI(config).save()
+                    subprocess.run(["systemctl", "stop", "palworld.service"], check=True, timeout=60)
+                return engine.create_snapshot().snapshot
+            finally:
+                final_state = service_state()
+                if final_state == "unknown":
+                    raise ConfigError("Palworld service state cannot be confirmed after backup")
+                if was_active and final_state != "active":
+                    subprocess.run(["systemctl", "start", "palworld.service"], check=True, timeout=60)
+    except _CoreOperationLockBusy as exc:
+        raise ConfigError("another Palworld operation is already running") from exc
+    except _CoreSnapshotError as exc:
+        raise ConfigError(str(exc)) from exc
+    except (ApiError, OSError, subprocess.SubprocessError) as exc:
+        raise ConfigError(f"backup service operation failed: {exc}") from exc
+
+
+def _core_backup_preflight(config: dict[str, str]) -> int:
+    """Validate backup inputs without saving, stopping, or starting Palworld."""
+    if _CoreBackupManager is None:
+        raise ConfigError("Python backup core is not installed beside palworld_manager.py")
+    try:
+        return _core_backup_engine(config).preflight_snapshot()
+    except _CoreSnapshotError as exc:
+        raise ConfigError(str(exc)) from exc
+
+
+def _core_restore(config: dict[str, str], version: str) -> Path:
+    if hasattr(os, "geteuid") and os.geteuid() != 0:
+        raise ConfigError("run this script with sudo")
+    try:
+        return _core_backup_engine(config).restore(version).safety_copy
+    except _CoreSnapshotError as exc:
+        raise ConfigError(str(exc)) from exc
+
+
+def _core_restore_preflight(config: dict[str, str], version: str) -> None:
+    try:
+        _core_backup_engine(config).preflight_restore(version)
+    except _CoreSnapshotError as exc:
+        raise ConfigError(str(exc)) from exc
+
+
 def _main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Validate a Palworld caretaker deployment")
     parser.add_argument("--config-dir", default="/srv/palworld/config")
@@ -676,8 +874,19 @@ def _main(argv: list[str] | None = None) -> int:
                         help="render systemd unit templates into OUTPUT")
     parser.add_argument("--diagnose", action="store_true", help="run read-only deployment diagnostics")
     parser.add_argument("--json", action="store_true", help="emit diagnose results as JSON")
+    parser.add_argument(
+        "--backup-preflight", action="store_true",
+        help="validate backup storage and sources without changing the server",
+    )
+    parser.add_argument("--core-engine", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--backup", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--pre-restore", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--restore-preflight", metavar="VERSION", help=argparse.SUPPRESS)
+    parser.add_argument("--restore", metavar="VERSION", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     try:
+        if args.core_engine:
+            return 0 if _CoreBackupManager is not None else 1
         config = load_config(args.config_dir)
         if args.json and not args.diagnose:
             raise ConfigError("--json requires --diagnose")
@@ -693,6 +902,20 @@ def _main(argv: list[str] | None = None) -> int:
                 print(f"Summary: {totals['pass']} passed, {totals['warn']} warnings, "
                       f"{totals['fail']} failed.")
             return diagnostic_exit_code(checks)
+        if args.backup_preflight:
+            _core_backup_preflight(config)
+            return 0
+        if args.backup:
+            snapshot = _core_backup(config)
+            print(f"Created backup version: {snapshot.name}")
+            return 0
+        if args.restore_preflight:
+            _core_restore_preflight(config, args.restore_preflight)
+            return 0
+        if args.restore:
+            safety_copy = _core_restore(config, args.restore)
+            print(f"Current pre-restore safety copy: {safety_copy}")
+            return 0
         if args.get:
             print(config_value(config, args.get))
             return 0
@@ -700,7 +923,10 @@ def _main(argv: list[str] | None = None) -> int:
             render_systemd_units(config, *args.render_units)
             return 0
         if args.no_filesystem:
-            report = preflight_values(config, config_dir=args.config_dir)
+            # The installer performs this gate before it creates the manager
+            # account or copies configuration into the deployed root.  The
+            # owner/group contract is checked by the later filesystem pass.
+            report = preflight_values(config, config_dir=args.config_dir, deployed=False)
             report.raise_for_errors()
         else:
             report = preflight_config(config, config_dir=args.config_dir)

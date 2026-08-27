@@ -12,7 +12,7 @@ STATE_ROOT="$(python3 "$MANAGER" --config-dir "$CONFIG_DIR" --get PALWORLD_MANAG
 BACKUP_SCRIPT="$SCRIPT_HOME/backup-palworld.sh"
 UPDATE_SCRIPT="$SCRIPT_HOME/update-palworld.sh"
 GRACEFUL_STOP_SCRIPT="$SCRIPT_HOME/graceful-stop-palworld.sh"
-LOCK_FILE='/run/lock/palworld-maintenance.lock'
+LOCK_FILE="${PALWORLD_OPERATION_LOCK_FILE:-/run/palworld-caretaker/operation.lock}"
 STATE_FILE="$STATE_ROOT/maintenance-state.json"
 
 log() {
@@ -39,8 +39,10 @@ write_state() {
 [[ -x "$UPDATE_SCRIPT" ]] || die "update script is missing: $UPDATE_SCRIPT"
 [[ -x "$GRACEFUL_STOP_SCRIPT" ]] || die "graceful stop script is missing: $GRACEFUL_STOP_SCRIPT"
 
-exec 9>"$LOCK_FILE"
-flock -n 9 || die 'another Palworld maintenance operation is already running'
+[[ -f "$LOCK_FILE" && ! -L "$LOCK_FILE" ]] || die "operation lock is unsafe or missing: $LOCK_FILE"
+exec 9<"$LOCK_FILE"
+flock -n 9 || die 'another Palworld operation is already running'
+export PALWORLD_OPERATION_LOCK_HELD=1
 write_state 'starting' '已接受更新要求，正在檢查伺服器狀態。'
 
 was_active=0
@@ -50,17 +52,23 @@ fi
 
 restore_service_state() {
   local rc=$?
-  if (( rc != 0 )); then
-    write_state 'failed' '維護失敗，請查看伺服器紀錄。'
-  fi
   if (( was_active == 1 )) && ! systemctl is-active --quiet "$SERVICE"; then
     write_state 'restarting' '維護中斷，正在恢復伺服器。'
     log 'Restoring the previously running Palworld service.'
     systemctl start "$SERVICE" || log 'ERROR: Palworld could not be restarted automatically.'
   fi
+  # A recovery start is transitional, never the final outcome of a failed
+  # maintenance run.  Consumers poll this file and require a terminal state.
+  if (( rc != 0 )); then
+    write_state 'failed' '維護失敗，請查看伺服器紀錄。'
+  fi
   exit "$rc"
 }
 trap restore_service_state EXIT
+
+write_state 'starting' '正在檢查備份空間與來源資料。'
+log 'Validating backup storage and sources before stopping Palworld.'
+"$MANAGER" --config-dir "$CONFIG_DIR" --backup-preflight
 
 if (( was_active == 1 )); then
   write_state 'stopping' '正在存檔並正常關閉伺服器。'

@@ -92,8 +92,8 @@ replace_discord_values() {
   mv -f -- "$temporary" "$config"
 }
 
-replace_discord_values "$TOKEN_CONFIG" 0600 "DISCORD_BOT_TOKEN='$token'"
-replace_discord_values "$IDS_CONFIG" "$([[ "$IDS_CONFIG" == "$TOKEN_CONFIG" ]] && printf 0600 || printf 0640)" \
+replace_discord_values "$TOKEN_CONFIG" 0640 "DISCORD_BOT_TOKEN='$token'"
+replace_discord_values "$IDS_CONFIG" 0640 \
   "DISCORD_PALWORLD_ALLOWED_GUILD_IDS=$guild_ids" \
   "DISCORD_PALWORLD_ALLOWED_CHANNEL_IDS=$channel_ids" \
   "DISCORD_PALWORLD_ALLOWED_ROLE_IDS=$role_ids" \

@@ -7,7 +7,8 @@ Thank you for helping improve this project.
 Run these checks before opening a pull request:
 
 ```bash
-python3 -m unittest discover -s tests -v
+python3 -m unittest discover -s tests -p 'test_*.py' -v
+PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_*.py' -v
 python3 -m py_compile scripts/*.py tests/*.py
 bash -n install-palworld.sh upgrade-palworld-manager.sh scripts/*.sh
 shellcheck install-palworld.sh upgrade-palworld-manager.sh scripts/*.sh \
@@ -22,7 +23,7 @@ repository and verify archive contents, reproducibility, and checksums.
 To create release artifacts from a clean committed tree:
 
 ```bash
-scripts/package-release.sh --version 0.1.0 --output-dir dist
+scripts/package-release.sh --version 0.2.0 --output-dir dist
 (cd dist && sha256sum --check SHA256SUMS)
 ```
 

@@ -6,6 +6,81 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 - 尚無變更。
 
+## [0.2.0] - 2026-08-28
+
+這個版本把既有 Linux 維運腳本背後的安全決策整理成可測試、可重用的
+Python 核心，並加入僅限本機的 Web 管理介面。systemd、Bash、Discord 與
+idle watcher 仍是平台 adapter／操作入口，但共用相同的 REST、生命週期、
+備份與互斥保護契約。
+
+### Python 核心與跨平台邊界
+
+- 新增 `src/palworld_caretaker` 套件，提供設定解析與驗證、Palworld REST
+  API client、服務生命週期/診斷、SteamCMD adapter，以及 Backup/Restore
+  engine；核心邏輯不依賴 systemd、shell 或第三方套件，平台差異留在入口
+  adapter。
+- REST client 提供型別化的玩家、metrics、save、shutdown 與 announce 操作，
+  嚴格驗證 loopback、redirect、transport error、HTTP 回應與 JSON schema；
+  不確定的玩家狀態不會被當成「無人」。
+- 保留既有 `scripts/palworld_manager.py` 與 Bash CLI 相容入口，讓既有部署
+  可逐步切換至核心而不改變操作參數。
+
+### 全域操作鎖與並行安全
+
+- 新增跨行程 `OperationLock`，所有變更操作共用由 tmpfiles 預建的
+  `/run/palworld-caretaker/operation.lock`。鎖檔以 root ownership、manager
+  group、`0640`、regular-file 與 `O_NOFOLLOW` 契約驗證，再以 non-blocking
+  `flock` 拒絕並行操作。
+- backup、restore、update、graceful stop、maintenance、Web UI、Discord
+  與 idle watcher 都在狀態檢查到實際變更的區段使用同一把鎖，避免 check-then-act
+  race、重複關服或備份/更新交錯。
+- 修復 Web UI restart 與子程序重入同一把 `flock` 所造成的死鎖：停止階段
+  完成後先釋放 Python lock，再交由 root-owned control entry point 取得鎖；
+  maintenance 的子腳本則明確沿用父程序已持有的鎖。
+
+### Web UI 與安全性
+
+- 新增 `scripts/palworld-web-ui.py` 與 `palworld-web-ui.service`，提供
+  `127.0.0.1:8765` 的 service/REST/玩家/metrics 狀態、snapshot 清單、立即
+  備份、正常停止與重啟操作；拒絕非 loopback bind，絕不設計為公開管理入口。
+- 所有頁面與 API 先要求 HTTP Basic Auth；帳號由
+  `PALWORLD_WEB_UI_USERNAME` 指定，密碼支援獨立的
+  `PALWORLD_WEB_UI_PASSWORD`，未設定時相容地使用 `ADMIN_PASSWORD`。
+- 變更請求要求 JSON、同源 `Origin` 與行程內 CSRF token，並加入 no-cache、
+  CSP、`X-Frame-Options` 等瀏覽器防護；錯誤回應不洩漏 secrets 或內部命令。
+
+### 備份、還原與 preflight
+
+- Backup/Restore 移入 Python engine：備份會先驗證來源、symlink、mount、
+  寫入權限與保守可用空間需求，再寫入 `.incomplete-*` staging、fsync 內容，
+  驗證 manifest 後以 atomic rename 發布 snapshot；失敗會清理 staging 並
+  維持原服務狀態。
+- 還原在停止服務或建立 safety copy 前驗證 snapshot 結構、檔案清單、大小、
+  mount 與容量；覆寫 live SaveGames/Config 前建立最新外部 snapshot 及
+  `backups-local/pre-restore-*` safety copy，部分提交失敗時可 rollback。
+- 新增 `python3 scripts/palworld_manager.py --backup-preflight`，可在停止
+  伺服器前獨立檢查備份來源、目的地與容量；daily maintenance 將其置於
+  save/stop 之前，避免 preflight 失敗造成不必要的服務中斷。
+
+### Discord、idle watcher 與維運流程
+
+- Discord Bot 改用共用 Python 核心與生命週期流程，`/pal start|status|players|
+  stop|update` 的安全關服、備份、更新與重啟共用操作鎖，並保留 allowlist、
+  管理員確認與 per-user/command cooldown。
+- idle watcher 在最後一次玩家檢查、save 與 shutdown 之間持有全域鎖；鎖忙碌
+  時延後重試，不會誤觸其他備份、更新或 Web 操作。
+- 安裝器與升級器部署 operation lock/tmpfiles、Web UI 與新的核心檔案；設定
+  preflight、diagnose、服務狀態 fail-closed，並保留非預設路徑與 legacy
+  `palworld.env` 相容性。
+
+### 測試與發布
+
+- 測試套件擴充至 82 個 unit/integration/release tests，涵蓋核心 API、鎖、
+  Web UI、Discord、idle watcher、備份/還原邊界、生命週期、安裝/升級/解除
+  安裝與 reproducible release artifact；`82/82 tests PASS`。
+- `pyproject.toml` 版本更新為 `0.2.0`，release packager 預設版本、文件與
+  archive 命名同步至 `palworld-caretaker-v0.2.0.tar.gz`。
+
 ## [0.1.0] - 2026-08-27
 
 首個公開 Linux release，將既有單機維運腳本整理成可驗證、可升級與可復原的

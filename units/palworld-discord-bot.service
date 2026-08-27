@@ -16,7 +16,7 @@ RestartSec=10s
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict
-ReadWritePaths=@STATE_DIR@ /run/lock
+ReadWritePaths=@STATE_DIR@ /run/palworld-caretaker
 
 [Install]
 WantedBy=multi-user.target

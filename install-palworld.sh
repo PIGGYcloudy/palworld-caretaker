@@ -35,6 +35,8 @@ MANAGER_STATE_DIR="$(config_value PALWORLD_MANAGER_STATE_DIR)"
 SERVICE_USER="$(config_value PALWORLD_SERVICE_USER)"
 MANAGER_USER="$(config_value PALWORLD_MANAGER_USER)"
 VENV_DIR="$BASE_DIR/venv"
+PACKAGE_ROOT="$BASE_DIR/packages"
+TMPFILES_DIR="${PALWORLD_TMPFILES_DIR:-/etc/tmpfiles.d}"
 SETTINGS_FILE="$SERVER_DIR/Pal/Saved/Config/LinuxServer/PalWorldSettings.ini"
 STEAM_APP_ID=2394010
 [[ -f "$SETTINGS_FILE" ]] && HAD_EXISTING_SETTINGS=1 || HAD_EXISTING_SETTINGS=0
@@ -62,6 +64,7 @@ fi
 install -d -o root -g root -m 0755 "$BASE_DIR"
 install -d -o "$SERVICE_USER" -g "$SERVICE_USER" -m 0750 "$SERVER_DIR"
 install -d -o root -g root -m 0755 "$SCRIPT_DIR"
+install -d -o root -g root -m 0755 "$PACKAGE_ROOT"
 install -d -o root -g "$MANAGER_USER" -m 0750 "$CONFIG_DIR"
 install -d -o root -g root -m 0700 "$LOCAL_BACKUP_DIR"
 install -d -o "$MANAGER_USER" -g "$MANAGER_USER" -m 0750 "$MANAGER_STATE_DIR"
@@ -71,7 +74,7 @@ for config_name in palworld.env caretaker.env server.env secrets.env; do
   source_file="$CONFIG_SOURCE_DIR/$config_name"
   [[ -f "$source_file" ]] || continue
   destination="$CONFIG_DIR/$config_name"
-  mode=0640; [[ "$config_name" == secrets.env ]] && mode=0600
+  mode=0640
   if [[ ! "$source_file" -ef "$destination" ]]; then
     install -o root -g "$MANAGER_USER" -m "$mode" "$source_file" "$destination"
   else
@@ -83,14 +86,44 @@ done
 
 for executable in render-settings.sh backup-palworld.sh restore-palworld.sh update-palworld.sh \
   daily-palworld-maintenance.sh graceful-stop-palworld.sh palworld-rest-firewall \
-  palworld-idle-watcher.py palworld-discord-bot.py diagnose-palworld.sh; do
+  palworld-idle-watcher.py palworld-discord-bot.py palworld-web-ui.py diagnose-palworld.sh; do
   install -o root -g root -m 0755 "$STAGING_DIR/scripts/$executable" "$SCRIPT_DIR/$executable"
 done
 install -o root -g root -m 0644 "$MANAGER" "$SCRIPT_DIR/palworld_manager.py"
+deploy_python_package() {
+  [[ -d "$STAGING_DIR/src/palworld_caretaker" ]] || return 0
+  local staging release current_tmp script_tmp
+  staging="$(mktemp -d "$PACKAGE_ROOT/.release.XXXXXX")"
+  install -d -o root -g root -m 0755 "$staging/palworld_caretaker"
+  cp -R --no-preserve=mode,ownership -- "$STAGING_DIR/src/palworld_caretaker/." "$staging/palworld_caretaker/"
+  find "$staging" -type d -name __pycache__ -prune -exec rm -rf -- {} +
+  find "$staging" -type f -name '*.pyc' -delete
+  chown -R root:root "$staging"
+  find "$staging" -type d -exec chmod 0755 {} +
+  find "$staging" -type f -exec chmod 0644 {} +
+  release="$PACKAGE_ROOT/release-$(date +%Y%m%d-%H%M%S)-$$"
+  mv -T -- "$staging" "$release"
+  current_tmp="$PACKAGE_ROOT/.current.$$"
+  ln -s -- "$(basename -- "$release")" "$current_tmp"
+  mv -Tf -- "$current_tmp" "$PACKAGE_ROOT/current"
+  script_tmp="$SCRIPT_DIR/.palworld_caretaker.$$"
+  ln -s -- "$PACKAGE_ROOT/current/palworld_caretaker" "$script_tmp"
+  if [[ -e "$SCRIPT_DIR/palworld_caretaker" && ! -L "$SCRIPT_DIR/palworld_caretaker" ]]; then
+    mv -- "$SCRIPT_DIR/palworld_caretaker" "$PACKAGE_ROOT/legacy-package-$(date +%Y%m%d-%H%M%S)-$$"
+  fi
+  mv -Tf -- "$script_tmp" "$SCRIPT_DIR/palworld_caretaker"
+}
+deploy_python_package
 install -o root -g root -m 0755 "$STAGING_DIR/scripts/palworld-control" /usr/local/sbin/palworld-control
 install -o root -g root -m 0755 "$STAGING_DIR/scripts/palworld-discord-configure" /usr/local/sbin/palworld-discord-configure
 install -o root -g root -m 0755 "$STAGING_DIR/uninstall-palworld.sh" "$BASE_DIR/uninstall-palworld.sh"
 install -o root -g root -m 0644 "$STAGING_DIR/README.md" "$BASE_DIR/README.md"
+sed "s/@MANAGER_USER@/$MANAGER_USER/g" "$STAGING_DIR/config/palworld-caretaker.tmpfiles.conf" > "$PACKAGE_ROOT/.tmpfiles.$$"
+install -o root -g root -m 0644 "$PACKAGE_ROOT/.tmpfiles.$$" "$TMPFILES_DIR/palworld-caretaker.conf"
+rm -f -- "$PACKAGE_ROOT/.tmpfiles.$$"
+if [[ "$TMPFILES_DIR" == /etc/tmpfiles.d ]]; then
+  systemd-tmpfiles --create /etc/tmpfiles.d/palworld-caretaker.conf
+fi
 
 # Now verify permissions, mount safety, and destination writability before
 # installing systemd definitions or changing live server data.
@@ -102,7 +135,7 @@ UPGRADE_BACKUP_DIR="$LOCAL_BACKUP_DIR/config-upgrade-$UPGRADE_STAMP"
 install -d -o root -g root -m 0700 "$UPGRADE_BACKUP_DIR"
 for existing_file in /etc/systemd/system/palworld*.service /etc/systemd/system/palworld*.timer \
   /etc/sudoers.d/palworld-manager; do
-  [[ -f "$existing_file" ]] && cp -a -- "$existing_file" "$UPGRADE_BACKUP_DIR/"
+  [[ -f "$existing_file" ]] && install -o root -g root -m 0644 "$existing_file" "$UPGRADE_BACKUP_DIR/$(basename -- "$existing_file")"
 done
 
 RENDER_DIR="$(mktemp -d)"
@@ -112,7 +145,10 @@ python3 "$MANAGER" --config-dir "$CONFIG_SOURCE_DIR" --render-units "$STAGING_DI
 for unit_file in "$RENDER_DIR"/*; do
   install -o root -g root -m 0644 "$unit_file" "/etc/systemd/system/$(basename -- "$unit_file")"
 done
-sed "s/@MANAGER_USER@/$MANAGER_USER/g" "$STAGING_DIR/config/palworld-manager.sudoers" > "$RENDER_DIR/palworld-manager.sudoers"
+sed_replacement() { printf '%s' "$1" | sed 's/[\\&|]/\\&/g'; }
+SUDOERS_GRACEFUL_STOP="$(sed_replacement "${SCRIPT_DIR// /\\ }/graceful-stop-palworld.sh")"
+sed -e "s|@MANAGER_USER@|$(sed_replacement "$MANAGER_USER")|g" -e "s|@GRACEFUL_STOP_SCRIPT@|$SUDOERS_GRACEFUL_STOP|g" \
+  "$STAGING_DIR/config/palworld-manager.sudoers" > "$RENDER_DIR/palworld-manager.sudoers"
 install -o root -g root -m 0440 "$RENDER_DIR/palworld-manager.sudoers" /etc/sudoers.d/palworld-manager
 visudo -cf /etc/sudoers.d/palworld-manager
 
@@ -145,7 +181,7 @@ fi
 [[ -x "$SERVER_DIR/PalServer.sh" ]] || die 'PalServer.sh was not installed'
 
 systemctl daemon-reload
-systemctl enable palworld.service palworld-rest-firewall.service palworld-idle-watcher.service
+systemctl enable palworld.service palworld-rest-firewall.service palworld-idle-watcher.service palworld-web-ui.service
 log 'Starting Palworld once to create its generated configuration directories.'
 if ! systemctl start palworld.service; then
   journalctl -u palworld.service -n 80 --no-pager >&2 || true
@@ -173,7 +209,7 @@ if [[ "$BACKUP_REQUIRE_MOUNT" == true ]]; then
   mountpoint -q "$BACKUP_MOUNT" || die "backup filesystem is not mounted: $BACKUP_MOUNT"
 fi
 mkdir -p -- "$BACKUP_DIR"
-systemctl enable --now palworld.service palworld-idle-watcher.service palworld-backup.timer
+systemctl enable --now palworld.service palworld-idle-watcher.service palworld-backup.timer palworld-web-ui.service
 DISCORD_TOKEN="$(config_value DISCORD_BOT_TOKEN)"
 if [[ -n "$DISCORD_TOKEN" && "$DISCORD_TOKEN" != CHANGE_ME* ]]; then
   systemctl enable --now palworld-discord-bot.service

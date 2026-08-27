@@ -58,7 +58,7 @@ class UninstallIntegrationTests(unittest.TestCase):
             "SERVER_PASSWORD=server-secret\nADMIN_PASSWORD=admin-secret\n",
             encoding="utf-8",
         )
-        secrets.chmod(0o600)
+        secrets.chmod(0o640)
         (self.server_root / "PalServer.sh").write_text("game binary", encoding="utf-8")
         (self.server_root / "Engine.bin").write_text("engine", encoding="utf-8")
         (self.server_root / "Pal/Binaries").mkdir()
@@ -141,7 +141,7 @@ class UpgradeIntegrationTests(unittest.TestCase):
             base = Path(directory)
             repository = Path(__file__).parents[1]
             staging = base / "release"
-            for name in ("scripts", "units", "config"):
+            for name in ("scripts", "units", "config", "src"):
                 shutil.copytree(repository / name, staging / name)
             shutil.copy2(repository / "requirements.txt", staging)
             shutil.copy2(repository / "uninstall-palworld.sh", staging)
@@ -186,7 +186,7 @@ class UpgradeIntegrationTests(unittest.TestCase):
                 "SERVER_PASSWORD=server-secret\nADMIN_PASSWORD=admin-secret\n",
                 encoding="utf-8",
             )
-            secrets.chmod(0o600)
+            secrets.chmod(0o640)
             original_config = {
                 path.name: path.read_bytes() for path in config_dir.iterdir()
             }
@@ -246,6 +246,7 @@ fi
                 "PALWORLD_SYSTEMD_UNIT_DIR": str(unit_dir),
                 "PALWORLD_SUDOERS_DIR": str(sudoers_dir),
                 "PALWORLD_LOCAL_SBIN_DIR": str(sbin_dir),
+                "PALWORLD_TMPFILES_DIR": str(base / "tmpfiles.d"),
                 "PALWORLD_TEST_BASE_DIR": str(install_root),
             })
             result = subprocess.run(
@@ -261,6 +262,11 @@ fi
             self.assertIn("Custom\\x20Palworld", game_unit)
             self.assertNotIn("/srv/palworld", game_unit)
             self.assertTrue((install_root / "scripts/diagnose-palworld.sh").is_file())
+            package_link = install_root / "packages/current"
+            self.assertTrue(package_link.is_symlink())
+            package = package_link.resolve() / "palworld_caretaker"
+            self.assertEqual(package.stat().st_mode & 0o777, 0o755)
+            self.assertTrue(all(path.stat().st_mode & 0o777 == 0o644 for path in package.rglob("*.py")))
             backups = list((install_root / "backups-local").glob("manager-upgrade-*"))
             self.assertEqual(len(backups), 1)
             self.assertTrue((backups[0] / "secrets.env").is_file())

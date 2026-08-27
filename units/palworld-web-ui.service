@@ -1,5 +1,5 @@
 [Unit]
-Description=Palworld empty-server shutdown watcher
+Description=Palworld Caretaker local web UI (loopback only)
 Wants=network-online.target
 After=network-online.target
 
@@ -8,16 +8,18 @@ Type=simple
 User=@MANAGER_USER@
 Group=@MANAGER_USER@
 Environment=@CONFIG_ENV@
-Environment=@IDLE_STATE_ENV@
-ExecStart=@VENV_PYTHON@ @IDLE_SCRIPT@
+ExecStart=@VENV_PYTHON@ @WEB_UI_SCRIPT@
 Restart=on-failure
 RestartSec=10s
-NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+ReadOnlyPaths=@CONFIG_ROOT@
 ReadOnlyPaths=/run/palworld-caretaker
-ReadWritePaths=@STATE_DIR@
 
 [Install]
 WantedBy=multi-user.target

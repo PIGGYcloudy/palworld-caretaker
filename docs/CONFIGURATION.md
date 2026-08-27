@@ -16,8 +16,15 @@ path relationships fail closed. `$`, backticks, command substitutions, and
 other shell-looking content remain literal text and are never executed.
 
 Copy the matching `.example` files from `config/` and set `secrets.env` to mode
-`0600`. The legacy `/srv/palworld/config/palworld.env` remains supported without
+`0640`（owner 為 root、group 為 `PALWORLD_MANAGER_USER`）。這讓受限的本機管理
+服務可讀取 REST 密碼，但不會向其他帳號開放。The legacy `/srv/palworld/config/palworld.env` remains supported without
 changes.
+
+`PALWORLD_WEB_UI_USERNAME` 位於 `caretaker.env`，預設為
+`palworld-manager`。本機 Web UI 的 HTTP Basic Auth 密碼優先使用
+`secrets.env` 的 `PALWORLD_WEB_UI_PASSWORD`；若留空則使用既有的
+`ADMIN_PASSWORD`，因此任何部署預設仍需要認證。建議在多使用者主機設定獨立的
+`PALWORLD_WEB_UI_PASSWORD`。
 
 ## Paths and backups
 
@@ -57,7 +64,9 @@ python3 scripts/palworld_manager.py --config-dir /path/to/config
 
 Both commands exit with status 2 and a non-secret diagnostic when validation
 fails. Preflight does not create directories, mount filesystems, or modify
-configuration.
+configuration. The deployed filesystem preflight additionally requires
+`secrets.env` to be a regular `0640` file owned by
+`root:<PALWORLD_MANAGER_USER>`.
 
 The installer requires a directory containing the deployment files and runs
 value-only preflight before its first package, account, directory, or systemd

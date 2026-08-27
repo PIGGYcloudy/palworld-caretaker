@@ -9,6 +9,7 @@ MANAGER="$SCRIPT_HOME/palworld_manager.py"
 [[ -r "$MANAGER" ]] || { printf 'ERROR: configuration manager is missing\n' >&2; exit 1; }
 python3 "$MANAGER" --config-dir "$CONFIG_DIR" || exit $?
 config_value() { python3 "$MANAGER" --config-dir "$CONFIG_DIR" --get "$1"; }
+LOCK_FILE="${PALWORLD_OPERATION_LOCK_FILE:-/run/palworld-caretaker/operation.lock}"
 
 log() {
   printf '[%s] %s\n' "$(date --iso-8601=seconds)" "$*"
@@ -20,6 +21,17 @@ die() {
 }
 
 (( EUID == 0 )) || die 'run this script with sudo'
+if [[ "${PALWORLD_OPERATION_LOCK_HELD:-}" != 1 ]]; then
+  [[ -f "$LOCK_FILE" && ! -L "$LOCK_FILE" ]] || die "operation lock is unsafe or missing: $LOCK_FILE"
+  exec 9<"$LOCK_FILE"
+  flock -n 9 || die 'another Palworld operation is already running'
+  export PALWORLD_OPERATION_LOCK_HELD=1
+  maintenance_state="$(systemctl is-active palworld-maintenance.service 2>/dev/null || true)"
+  case "$maintenance_state" in
+    inactive|failed) ;;
+    *) die 'maintenance is active or its state cannot be confirmed' ;;
+  esac
+fi
 if ! systemctl is-active --quiet "$SERVICE"; then
   log 'Palworld is already stopped.'
   exit 0

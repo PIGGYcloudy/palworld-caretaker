@@ -1,11 +1,12 @@
 # Palworld Server Caretaker
 
 以 SteamCMD、systemd 與官方 REST API 管理 Palworld Dedicated Server 的
-Linux 維運工具，重點是安全關服、可恢復備份、閒置自動關服與 Discord
-遠端操作，不需要常駐公開的 Web 管理面板。
+Linux 維運工具，重點是安全關服、可恢復備份、閒置自動關服、Discord
+遠端操作與本機 Web 管理面板；不提供公開 Web 管理介面。
 
 > [!IMPORTANT]
-> v0.1.0 支援 Ubuntu 24.04 LTS amd64 的原生 systemd 部署。部署設定契約、
+> v0.2.0 支援 Ubuntu 24.04 LTS amd64 的原生 systemd 部署，並提供可測試的
+> Python 核心與僅限本機的 Web UI。部署設定契約、
 > 安裝器、備份/還原/更新腳本與 systemd unit 支援任意安全的絕對安裝與備份
 > 路徑。正式存檔仍建議先在測試主機完成安裝、備份與還原演練。
 
@@ -16,6 +17,7 @@ Linux 維運工具，重點是安全關服、可恢復備份、閒置自動關�
 - 安全存檔、正常關服、可設定目的地的版本化備份與互動式還原。
 - 無玩家逾時後再次確認，再執行存檔與正常關服。
 - Discord `/pal` 指令、guild/channel/role allowlist 與管理員確認。
+- Local Web UI：僅綁定 `127.0.0.1:8765` 的狀態、快照與安全操作面板。
 - 每日維護保留原本開關服狀態，失敗時避免強制關服或無聲資料損失。
 
 從零部署請見 [`docs/INSTALL.md`](docs/INSTALL.md)，既有 `/srv/palworld` 部署
@@ -29,11 +31,11 @@ token 安全流程見 [`docs/DISCORD_SETUP.md`](docs/DISCORD_SETUP.md)。後續�
 palworld.service（遊戲，Restart=on-failure）
   └─ localhost:8212 官方 REST API
        ↑                         ↑
-idle watcher（永久在線）      Discord Bot（永久在線）
-  └─ 無人逾時→再查詢→save→shutdown  └─ /pal start|status|players|stop
+idle watcher（永久在線）      Discord Bot（永久在線）      Local Web UI（loopback）
+  └─ 無人逾時→再查詢→save→shutdown  └─ /pal start|status|players|stop  └─ 127.0.0.1:8765
 ```
 
-三個服務彼此獨立。遊戲正常關閉不會停止 Bot 或 watcher；Bot 的 `/pal start` 只會透過 root 擁有、參數固定的 `/usr/local/sbin/palworld-control start` 啟動 `palworld.service`，不會執行 Discord 訊息或任意 shell 指令。
+各管理服務彼此獨立。遊戲正常關閉不會停止 Bot、watcher 或 Web UI；啟動只會透過 root 擁有、參數固定的 `/usr/local/sbin/palworld-control start` 執行，絕不執行瀏覽器或 Discord 訊息中的任意 shell 指令。
 
 ## 安全與設定
 
@@ -68,6 +70,12 @@ DISCORD_PALWORLD_ALLOWED_CHANNEL_IDS=101112
 ID 清單可用逗號分隔。`DISCORD_PALWORLD_ALLOWED_CHANNEL_IDS=*` 表示指定 guild 內所有頻道；guild 與角色仍必須明確指定。allow list 為空時採 fail-closed，所有指令都拒絕；私訊一律拒絕。`start`、`status`、`players` 需要允許角色或管理員角色，`stop` 只接受管理員角色且必須 `confirm:true`。權限只比較 Discord guild/channel/role 的數字 ID。
 
 官方 REST API 會由 renderer 設為 `RESTAPIEnabled=True` 和指定連接埠。`palworld-rest-firewall.service` 同時以 IPv4/IPv6 firewall 阻擋非 loopback 對 REST TCP port 的連線；切勿在路由器、雲端防火牆或其他 proxy 公開 8212。遊戲 UDP 8211 的既有映射不變。
+
+## Local Web UI
+
+安裝或升級後 `palworld-web-ui.service` 會常駐於 `127.0.0.1:8765`；在伺服器本機瀏覽器開啟 `http://127.0.0.1:8765/`。它顯示 service/REST/玩家與 REST 可提供的 CPU、記憶體摘要，以及安全驗證過的 snapshot 清單。立即備份會先發送固定公告，再啟動既有的 systemd 備份服務；安全關閉與重啟必先由 REST 成功存檔。
+
+所有變更操作共用 `/run/palworld-caretaker/operation.lock`；它由 tmpfiles 以 `root:<manager>` 預建，runtime 目錄為 manager 不可寫入的 `0750`。Web、Discord、timer、idle watcher 與 maintenance 皆在取得這把跨行程鎖後才做狀態檢查與執行。無法判定 maintenance 或服務狀態時一律拒絕。備份若伺服器運行，必須先收到 REST `POST /save` 的成功回應，否則絕不停止服務。面板拒絕非 loopback 綁定，所有頁面與 API 都先要求 HTTP Basic Auth（`PALWORLD_WEB_UI_USERNAME` 加 `PALWORLD_WEB_UI_PASSWORD`；未設定後者時使用 `ADMIN_PASSWORD`），再要求 JSON + 行程內 CSRF token，並設有同源、無快取與禁止嵌入的瀏覽器防護。它不是遠端管理入口：不要以 nginx、SSH port forwarding 以外的 proxy、或任何防火牆規則對外公開此埠。
 
 ## 無人自動關服
 
@@ -113,7 +121,7 @@ cp config/{caretaker,server,secrets}.env.example ./deployment-config/
 mv ./deployment-config/caretaker.env.example ./deployment-config/caretaker.env
 mv ./deployment-config/server.env.example ./deployment-config/server.env
 mv ./deployment-config/secrets.env.example ./deployment-config/secrets.env
-chmod 0600 ./deployment-config/secrets.env
+chmod 0640 ./deployment-config/secrets.env
 # 編輯 deployment-config/*.env 後：
 sudo bash ./install-palworld.sh --config-dir "$PWD/deployment-config"
 sudo "<PALWORLD_INSTALL_ROOT>/scripts/render-settings.sh"
@@ -196,10 +204,10 @@ sudo "<PALWORLD_INSTALL_ROOT>/scripts/restore-palworld.sh" restore palworld-YYYY
 提交變更前請閱讀 [`CONTRIBUTING.md`](CONTRIBUTING.md)，安全邊界與漏洞回報
 方式見 [`SECURITY.md`](SECURITY.md)。GitHub Actions 會執行 Python 測試、Python
 編譯、Bash 語法檢查、ShellCheck 與 release 產物驗證。從乾淨且已提交的
-v0.1.0 source tree 建立 tarball 與 checksum：
+v0.2.0 source tree 建立 tarball 與 checksum：
 
 ```bash
-scripts/package-release.sh --version 0.1.0 --output-dir dist
+scripts/package-release.sh --version 0.2.0 --output-dir dist
 (cd dist && sha256sum --check SHA256SUMS)
 ```
 

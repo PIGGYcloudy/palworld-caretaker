@@ -32,6 +32,8 @@ LOCAL_BACKUPS="$(config_value PALWORLD_LOCAL_BACKUP_ROOT)"
 STATE_DIR="$(config_value PALWORLD_MANAGER_STATE_DIR)"
 MANAGER_USER="$(config_value PALWORLD_MANAGER_USER)"
 VENV_DIR="$INSTALL_ROOT/venv"
+PACKAGE_ROOT="$INSTALL_ROOT/packages"
+TMPFILES_DIR="${PALWORLD_TMPFILES_DIR:-/etc/tmpfiles.d}"
 SETTINGS_FILE="$SERVER_ROOT/Pal/Saved/Config/LinuxServer/PalWorldSettings.ini"
 SYSTEMD_UNIT_DIR="${PALWORLD_SYSTEMD_UNIT_DIR:-/etc/systemd/system}"
 SUDOERS_DIR="${PALWORLD_SUDOERS_DIR:-/etc/sudoers.d}"
@@ -60,7 +62,7 @@ done
 install -o root -g root -m 0600 "$SETTINGS_FILE" "$backup/PalWorldSettings.ini"
 for path in "$SYSTEMD_UNIT_DIR"/palworld*.service "$SYSTEMD_UNIT_DIR"/palworld*.timer \
   "$SUDOERS_DIR/palworld-manager"; do
-  [[ -f "$path" ]] && cp -a -- "$path" "$backup/"
+  [[ -f "$path" ]] && install -o root -g root -m 0644 "$path" "$backup/$(basename -- "$path")"
 done
 log "Configuration and manager backup created at $backup"
 
@@ -69,6 +71,7 @@ if ! id -u "$MANAGER_USER" >/dev/null 2>&1; then
 fi
 install -d -o "$MANAGER_USER" -g "$MANAGER_USER" -m 0750 "$STATE_DIR"
 install -d -o root -g root -m 0755 "$SCRIPTS_ROOT"
+install -d -o root -g root -m 0755 "$PACKAGE_ROOT"
 install -d -o root -g "$MANAGER_USER" -m 0750 "$DEPLOYED_CONFIG"
 for config_name in palworld.env caretaker.env server.env; do
   if [[ -f "$DEPLOYED_CONFIG/$config_name" ]]; then
@@ -78,21 +81,51 @@ for config_name in palworld.env caretaker.env server.env; do
 done
 if [[ -f "$DEPLOYED_CONFIG/secrets.env" ]]; then
   chown root:"$MANAGER_USER" "$DEPLOYED_CONFIG/secrets.env"
-  chmod 0600 "$DEPLOYED_CONFIG/secrets.env"
+  chmod 0640 "$DEPLOYED_CONFIG/secrets.env"
 fi
 
 executables=(
   render-settings.sh backup-palworld.sh restore-palworld.sh update-palworld.sh
   daily-palworld-maintenance.sh graceful-stop-palworld.sh palworld-rest-firewall
-  palworld-idle-watcher.py palworld-discord-bot.py diagnose-palworld.sh
+  palworld-idle-watcher.py palworld-discord-bot.py palworld-web-ui.py diagnose-palworld.sh
 )
 for executable in "${executables[@]}"; do
   install -o root -g root -m 0755 "$STAGING_DIR/scripts/$executable" "$SCRIPTS_ROOT/$executable"
 done
 install -o root -g root -m 0644 "$MANAGER" "$SCRIPTS_ROOT/palworld_manager.py"
+deploy_python_package() {
+  [[ -d "$STAGING_DIR/src/palworld_caretaker" ]] || return 0
+  local staging release current_tmp script_tmp
+  staging="$(mktemp -d "$PACKAGE_ROOT/.release.XXXXXX")"
+  install -d -o root -g root -m 0755 "$staging/palworld_caretaker"
+  cp -R --no-preserve=mode,ownership -- "$STAGING_DIR/src/palworld_caretaker/." "$staging/palworld_caretaker/"
+  find "$staging" -type d -name __pycache__ -prune -exec rm -rf -- {} +
+  find "$staging" -type f -name '*.pyc' -delete
+  chown -R root:root "$staging"
+  find "$staging" -type d -exec chmod 0755 {} +
+  find "$staging" -type f -exec chmod 0644 {} +
+  release="$PACKAGE_ROOT/release-$(date +%Y%m%d-%H%M%S)-$$"
+  mv -T -- "$staging" "$release"
+  current_tmp="$PACKAGE_ROOT/.current.$$"
+  ln -s -- "$(basename -- "$release")" "$current_tmp"
+  mv -Tf -- "$current_tmp" "$PACKAGE_ROOT/current"
+  script_tmp="$SCRIPTS_ROOT/.palworld_caretaker.$$"
+  ln -s -- "$PACKAGE_ROOT/current/palworld_caretaker" "$script_tmp"
+  if [[ -e "$SCRIPTS_ROOT/palworld_caretaker" && ! -L "$SCRIPTS_ROOT/palworld_caretaker" ]]; then
+    mv -- "$SCRIPTS_ROOT/palworld_caretaker" "$PACKAGE_ROOT/legacy-package-$(date +%Y%m%d-%H%M%S)-$$"
+  fi
+  mv -Tf -- "$script_tmp" "$SCRIPTS_ROOT/palworld_caretaker"
+}
+deploy_python_package
 install -o root -g root -m 0755 "$STAGING_DIR/scripts/palworld-control" "$LOCAL_SBIN_DIR/palworld-control"
 install -o root -g root -m 0755 "$STAGING_DIR/scripts/palworld-discord-configure" "$LOCAL_SBIN_DIR/palworld-discord-configure"
 install -o root -g root -m 0755 "$STAGING_DIR/uninstall-palworld.sh" "$INSTALL_ROOT/uninstall-palworld.sh"
+sed "s/@MANAGER_USER@/$MANAGER_USER/g" "$STAGING_DIR/config/palworld-caretaker.tmpfiles.conf" > "$PACKAGE_ROOT/.tmpfiles.$$"
+install -o root -g root -m 0644 "$PACKAGE_ROOT/.tmpfiles.$$" "$TMPFILES_DIR/palworld-caretaker.conf"
+rm -f -- "$PACKAGE_ROOT/.tmpfiles.$$"
+if [[ "$TMPFILES_DIR" == /etc/tmpfiles.d ]]; then
+  systemd-tmpfiles --create /etc/tmpfiles.d/palworld-caretaker.conf
+fi
 
 # The existing filesystem must satisfy the same contract as a fresh install
 # before any live systemd definition is replaced.
@@ -106,7 +139,9 @@ python3 "$MANAGER" --config-dir "$CONFIG_DIR" --render-units "$STAGING_DIR/units
 for unit_file in "$render_dir"/*; do
   install -o root -g root -m 0644 "$unit_file" "$SYSTEMD_UNIT_DIR/$(basename -- "$unit_file")"
 done
-sed "s/@MANAGER_USER@/$MANAGER_USER/g" "$STAGING_DIR/config/palworld-manager.sudoers" \
+sed_replacement() { printf '%s' "$1" | sed 's/[\\&|]/\\&/g'; }
+SUDOERS_GRACEFUL_STOP="$(sed_replacement "${SCRIPTS_ROOT// /\\ }/graceful-stop-palworld.sh")"
+sed -e "s|@MANAGER_USER@|$(sed_replacement "$MANAGER_USER")|g" -e "s|@GRACEFUL_STOP_SCRIPT@|$SUDOERS_GRACEFUL_STOP|g" "$STAGING_DIR/config/palworld-manager.sudoers" \
   > "$render_dir/palworld-manager.sudoers"
 install -o root -g root -m 0440 "$render_dir/palworld-manager.sudoers" "$SUDOERS_DIR/palworld-manager"
 visudo -cf "$SUDOERS_DIR/palworld-manager" >/dev/null
@@ -118,12 +153,13 @@ PALWORLD_CONFIG_DIR="$DEPLOYED_CONFIG" "$SCRIPTS_ROOT/render-settings.sh"
 was_active=false
 systemctl is-active --quiet palworld.service && was_active=true
 systemctl daemon-reload
-systemctl enable palworld-rest-firewall.service palworld-idle-watcher.service palworld-backup.timer >/dev/null
+systemctl enable palworld-rest-firewall.service palworld-idle-watcher.service palworld-backup.timer palworld-web-ui.service >/dev/null
 if [[ "$was_active" == true ]]; then
   log 'Restarting the running game service to apply the rendered service and REST settings.'
   systemctl restart palworld.service
 fi
 systemctl enable --now palworld-idle-watcher.service >/dev/null
+systemctl enable --now palworld-web-ui.service >/dev/null
 
 discord_token="$(config_value DISCORD_BOT_TOKEN)"
 if [[ -n "$discord_token" && "$discord_token" != CHANGE_ME* ]]; then

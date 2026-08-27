@@ -1,4 +1,4 @@
-# 從既有 `/srv/palworld` 升級至 v0.1.0
+# 從既有 `/srv/palworld` 升級至 v0.2.0
 
 升級器只更新 caretaker 管理程式、Python 環境、sudoers 與動態渲染的 systemd
 units；不下載遊戲、不改寫設定層、不刪除世界存檔，也不碰外部備份目的地。
@@ -23,7 +23,7 @@ units；不下載遊戲、不改寫設定層、不刪除世界存檔，也不碰
    ```
 
 3. 另行保存目前 release 原始檔或版本號。若升級後要完整回到舊管理程式，必須
-   重新執行舊 release 的升級器；v0.1.0 的自動 safety copy 保存設定、
+   重新執行舊 release 的升級器；v0.2.0 的自動 safety copy 保存設定、
    `PalWorldSettings.ini`、systemd units 與 sudoers，但不是舊程式碼封包。
 
 請先確認備份目的地已掛載且最新 snapshot 含有 `savegames/`、`config/` 與
@@ -31,7 +31,7 @@ units；不下載遊戲、不改寫設定層、不刪除世界存檔，也不碰
 
 ## 驗證既有設定
 
-下載並解壓 v0.1.0 release，從解壓目錄執行只讀驗證：
+下載並解壓 v0.2.0 release，從解壓目錄執行只讀驗證：
 
 ```bash
 python3 scripts/palworld_manager.py \
@@ -54,8 +54,8 @@ sudo bash ./upgrade-palworld-manager.sh \
 升級器會先在
 `/srv/palworld/backups-local/manager-upgrade-YYYYMMDD-HHMMSS/` 建立 mode
 `0700` safety copy，之後才替換管理工具與 units。若遊戲原本運行，套用新的
-unit 與 REST 設定後會重新啟動；原本關閉則保持關閉。Discord token 未設定時
-Bot 會保持停用。
+unit 與 REST 設定後會重新啟動；原本關閉則保持關閉。Local Web UI 會啟用並只
+綁定 `127.0.0.1:8765`。Discord token 未設定時 Bot 會保持停用。
 
 非預設安裝路徑必須改傳實際部署設定目錄；升級器會拒絕 staging 設定或推測
 路徑：
@@ -70,7 +70,7 @@ sudo bash ./upgrade-palworld-manager.sh \
 ```bash
 sudo /srv/palworld/scripts/diagnose-palworld.sh
 sudo systemctl status palworld.service palworld-rest-firewall.service \
-  palworld-idle-watcher.service palworld-backup.timer --no-pager
+  palworld-idle-watcher.service palworld-backup.timer palworld-web-ui.service --no-pager
 sudo journalctl -u palworld.service -n 100 --no-pager
 sudo /srv/palworld/scripts/backup-palworld.sh
 sudo /srv/palworld/scripts/restore-palworld.sh list
@@ -79,6 +79,15 @@ sudo /srv/palworld/scripts/restore-palworld.sh list
 確認以下事項：設定檔內容與權限未變、世界仍可載入、REST port 只監聽
 localhost、備份可建立且服務回到升級前的開關狀態。Discord 使用者另以
 `/pal status` 驗證 allowlist；閒置 watcher 先維持 dry-run 觀察一個 lifecycle。
+
+升級後的 backup、restore、update、Web UI、Discord 與 idle watcher 會共用
+`/run/palworld-caretaker/operation.lock`。若升級或另一項維護正在進行，並行
+操作會拒絕；請等前一項操作完成後再重試。可先執行以下不會中斷服務的檢查：
+
+```bash
+sudo python3 /srv/palworld/scripts/palworld_manager.py \
+  --config-dir /srv/palworld/config --backup-preflight
+```
 
 ## 失敗復原
 
@@ -116,13 +125,13 @@ localhost、備份可建立且服務回到升級前的開關狀態。Discord 使
    ```
 
    三層部署應以相同方式逐一還原 safety copy 中實際存在的 `caretaker.env`、
-   `server.env`、`secrets.env`；`secrets.env` 使用 mode `0600`。若某個 glob 或檔案
+   `server.env`、`secrets.env`；`secrets.env` 使用 root:`PALWORLD_MANAGER_USER`、mode `0640`。若某個 glob 或檔案
    不存在就跳過，不要自行從其他 snapshot 猜測補入。
 
 3. 使用先前保存的舊 release 重新執行其升級/安裝管理元件流程，恢復相符的腳本
    與 Python dependencies。不要把新 unit 與舊腳本混用。
 
-4. 若世界資料本身無法載入，使用 v0.1.0 還原工具列出 snapshot，再以精確確認
+4. 若世界資料本身無法載入，使用 v0.2.0 還原工具列出 snapshot，再以精確確認
    字串執行還原：
 
    ```bash

@@ -49,20 +49,4 @@ jobs:
       - name: Run unit tests
         env:
           PYTHONDONTWRITEBYTECODE: "1"
-        run: python -m unittest discover -s tests -p 'test_palworld_manager.py' -v
-      - name: Run backup and restore integration tests
-        env:
-          PYTHONDONTWRITEBYTECODE: "1"
-        run: python -m unittest discover -s tests -p 'test_backup_restore_integration.py' -v
-      - name: Run lifecycle integration tests
-        env:
-          PYTHONDONTWRITEBYTECODE: "1"
-        run: python -m unittest discover -s tests -p 'test_lifecycle_integration.py' -v
-      - name: Run Discord configuration integration tests
-        env:
-          PYTHONDONTWRITEBYTECODE: "1"
-        run: python -m unittest discover -s tests -p 'test_discord_configure.py' -v
-      - name: Validate release artifacts
-        env:
-          PYTHONDONTWRITEBYTECODE: "1"
-        run: python -m unittest discover -s tests -p 'test_release_package.py' -v
+        run: python -m unittest discover -s tests -p 'test_*.py' -v

@@ -21,10 +21,27 @@ Palworld Dedicated Server 變更與社群回饋調整。
 | 階段 | 預估範圍 | 主要目標 | 里程碑 |
 | --- | --- | --- | --- |
 | 短期 | 約 2–4 週 | 從個人部署整理成通用 Linux 工具 | v0.1.0 |
-| 中期 | 約 1–3 個月 | 建立產品化核心、診斷能力與本機 Web UI | v0.2–v0.4 |
+| 中期 | 約 1–3 個月 | 建立產品化核心、診斷能力與本機 Web UI | v0.2.0–v0.4 |
 | 長期 | 約 3–9 個月 | Docker、Windows、發佈與升級生態 | v1.0+ |
 
 時間僅供安排工作量，不代表發布保證。
+
+## v0.2.0 狀態
+
+v0.2.0 已完成中期里程碑的第一批核心工作：
+
+- `src/palworld_caretaker` 可測試的 Python 核心，將 REST、生命週期、設定、
+  SteamCMD 與 Backup/Restore 決策從 Linux shell 入口分離。
+- `OperationLock` 與 `/run/palworld-caretaker/operation.lock` 的跨行程互斥，
+  已整合 Web UI、Discord、idle watcher、timer 與 maintenance，並修復
+  restart 子程序重入造成的死鎖。
+- loopback-only Web UI、HTTP Basic Auth、CSRF、同源與瀏覽器安全 headers。
+- Backup/Restore 原子發布、manifest/容量/mount preflight，以及
+  `--backup-preflight` 維護前檢查。
+- 82 個測試全數通過，包含核心、整合流程與可重現 release artifact 驗證。
+
+後續 v0.3–v0.4 聚焦於設定 schema/migration、診斷與 audit 可觀察性、Web UI
+的設定與 log 體驗，以及更多 Discord 操作；Docker 與 Windows 仍屬長期目標。
 
 ## 短期：Linux v0.1
 
@@ -123,17 +140,15 @@ v0.1 文件至少涵蓋：
 - 文件足以讓未參與開發的人獨立完成基本部署。
 - 建立 `v0.1.0` tag、GitHub Release、checksum 與 release notes。
 
-## 中期：產品化核心與操作體驗
+## 中期：產品化核心與操作體驗（v0.2.0 已完成首批）
 
-### 1. 建立 Python 共用核心
+### 1. 建立 Python 共用核心（v0.2.0 第一批已完成）
 
-逐步將可跨平台的邏輯從 Bash 移入可測試的 Python 模組：
+v0.2.0 已完成第一批移轉；後續持續擴充核心與 adapter 邊界：
 
-- 設定讀取、驗證與 migration。
-- SteamCMD 安裝及更新。
-- 備份、還原與保留策略。
-- 伺服器狀態與 Palworld REST API 操作。
-- 診斷報告與排程任務定義。
+- 已完成：設定讀取與驗證、SteamCMD adapter、備份/還原與保留策略、
+  伺服器狀態、Palworld REST API client、診斷資料模型。
+- 後續：設定 migration、診斷報告與排程任務的通用模型，以及更多平台 adapter。
 
 Bash 保留為 Linux 安裝、權限及 systemd adapter。
 
@@ -143,35 +158,36 @@ Bash 保留為 Linux 安裝、權限及 systemd adapter。
 Discord Bot 與平台 adapter 必須共用同一設定模型，不直接各自修改 env 或
 `PalWorldSettings.ini`。
 
-### 3. 本機 Web 管理面板
+### 3. 本機 Web 管理面板（v0.2.0 已完成安全最小版）
 
-初期使用 FastAPI 搭配簡單的 server-rendered UI／HTMX，預設只監聽
-`127.0.0.1`。第一版功能包含：
+目前版本使用無第三方依賴的 server-rendered UI，預設只監聽
+`127.0.0.1:8765`。v0.2.0 已提供狀態、玩家、metrics、snapshot、備份、
+安全停止與重啟；後續面板工作包括：
 
-- 伺服器啟動、停止、更新及狀態。
-- 在線玩家清單。
+- 伺服器更新操作與更完整的維護進度呈現。
 - 世界參數分類表單、搜尋、預設值與輸入驗證。
 - 安裝及備份路徑設定。
 - 自動更新、閒置關服與 Discord Bot 功能開關。
-- 備份清單、立即備份及還原。
+- 還原流程與更完整的備份管理。
 - Log 與診斷結果。
 - 套用前差異預覽及自動備份。
 
-### 4. 可觀察性與安全性
+### 4. 可觀察性與安全性（部分於 v0.2.0 完成）
 
 - 結構化 log 與管理操作 audit log，不加入遙測。
 - secrets 遮蔽及診斷資料匯出預覽。
 - 設定修改歷史。
 - snapshot checksum 與定期還原驗證。
-- Web UI session、CSRF 與權限防護。
+- Web UI Basic Auth、CSRF、同源、no-cache 與禁止嵌入防護；後續再補 session、
+  audit log 與更細緻的權限模型。
 - 遠端存取另行提供 HTTPS、認證與防火牆指引，不預設開放公網。
 
-### 5. Discord 操作體驗
+### 5. Discord 操作體驗（部分於 v0.2.0 完成）
 
 - 加入 `/pal backup`、`/pal backups` 與 `/pal diagnose`。
 - 維護開始、完成與失敗通知。
 - 更新前在線玩家警告。
-- 指令冷卻、操作鎖與重複請求保護。
+- 指令冷卻、全域操作鎖與重複請求保護已完成；備份、診斷與維護通知仍待後續。
 - Discord、CLI 與 Web UI 共用相同的操作核心與授權判斷。
 
 ## 長期：跨平台與 v1.0
@@ -227,11 +243,11 @@ Docker 可以作為 Windows 的過渡選項，但不等同完整 Windows 原生�
 2. 將 NAS 專用備份改成可設定目的地。
 3. 讓 install 與 upgrade 可安全重複執行。
 4. 加入 diagnose 與分級 uninstall。
-5. 擴充測試並發布 `v0.1.0`。
+5. 發布 `v0.2.0` 後，依實機回饋進入 schema/migration、audit 與 adapter 測試。
 
 Web UI、Docker 與 Windows 先以 milestone 追蹤，避免 v0.1 範圍失控。
 
-目前 repository 已完成前三項與第 4 項的首版：通用路徑／三層設定契約、可
-設定且 fail-closed 的備份目的地、可重複執行的安裝／升級流程，以及唯讀
-diagnose 與保護備份的分級 uninstall。下一批以實機 Ubuntu 升級／解除安裝
-驗證、失敗 rollback 與 v0.1.0 發佈文件為主。
+目前 repository 已完成 v0.2.0 發布所需的通用路徑／三層設定契約、可設定且
+fail-closed 的備份目的地、可重複執行的安裝／升級流程、唯讀 diagnose、分級
+uninstall、可測試 Python 核心、全域操作鎖與最小 Web UI。下一批以實機 Ubuntu
+升級／解除安裝驗證、設定 migration、audit log 與更完整的跨平台 adapter 為主。

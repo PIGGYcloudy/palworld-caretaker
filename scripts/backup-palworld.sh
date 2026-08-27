@@ -18,7 +18,11 @@ BACKUP_ROOT="$(config_value PALWORLD_BACKUP_DIR)"
 BACKUP_MOUNT="$(config_value PALWORLD_BACKUP_MOUNT)"
 BACKUP_REQUIRE_MOUNT="$(config_value PALWORLD_BACKUP_REQUIRE_MOUNT)"
 BACKUP_RETENTION_COUNT="$(config_value BACKUP_RETENTION_COUNT)"
-LOCK_FILE='/run/lock/palworld-backup.lock'
+ADMIN_PASSWORD="$(config_value ADMIN_PASSWORD)"
+REST_HOST="$(config_value PALWORLD_REST_API_HOST)"
+REST_PORT="$(config_value PALWORLD_REST_API_PORT)"
+REST_USERNAME="$(config_value PALWORLD_REST_API_USERNAME)"
+LOCK_FILE="${PALWORLD_OPERATION_LOCK_FILE:-/run/palworld-caretaker/operation.lock}"
 
 log() {
   printf '[%s] %s\n' "$(date --iso-8601=seconds)" "$*"
@@ -30,8 +34,21 @@ die() {
 }
 
 (( EUID == 0 )) || die 'run this script with sudo'
-exec 9>"$LOCK_FILE"
-flock -n 9 || die 'another Palworld backup is already running'
+if [[ "${PALWORLD_OPERATION_LOCK_HELD:-}" != 1 ]]; then
+  [[ -f "$LOCK_FILE" && ! -L "$LOCK_FILE" ]] || die "operation lock is unsafe or missing: $LOCK_FILE"
+  exec 9<"$LOCK_FILE"
+  flock -n 9 || die 'another Palworld operation is already running'
+  export PALWORLD_OPERATION_LOCK_HELD=1
+fi
+if python3 "$MANAGER" --core-engine >/dev/null 2>&1; then
+  # v0.2 keeps this CLI and its arguments stable while moving snapshot
+  # decisions into the portable Python engine.  Old single-file deployments
+  # retain the implementation below until they are upgraded.
+  exec python3 "$MANAGER" --config-dir "$CONFIG_DIR" --backup "$@"
+fi
+
+# The legacy implementation remains usable for old installations, but shares
+# the same deployment-wide lock as the portable core.
 
 if [[ "$BACKUP_REQUIRE_MOUNT" == true ]]; then
   # This check intentionally happens before mkdir. A missing mount must never
@@ -88,8 +105,23 @@ cleanup() {
 }
 trap cleanup EXIT
 
-if systemctl is-active --quiet "$SERVICE"; then
-  was_active=1
+SERVICE_STATE="$(systemctl is-active "$SERVICE" 2>/dev/null || true)"
+case "$SERVICE_STATE" in
+  active) was_active=1 ;;
+  inactive|failed) ;;
+  *) die 'Palworld service state cannot be confirmed; refusing backup' ;;
+esac
+if (( was_active == 1 )); then
+  command -v curl >/dev/null || die 'curl is required to save an active server before backup'
+  if [[ "$REST_HOST" == '::1' ]]; then
+    REST_URL="http://[$REST_HOST]:$REST_PORT/v1/api"
+  else
+    REST_URL="http://$REST_HOST:$REST_PORT/v1/api"
+  fi
+  log 'Requesting a Palworld save through the local REST API before backup.'
+  curl --fail --silent --show-error --max-time 15 \
+    --user "$REST_USERNAME:$ADMIN_PASSWORD" --request POST "$REST_URL/save" >/dev/null ||
+    die 'Palworld save request failed; refusing to stop the server for backup'
   log 'Stopping Palworld for a consistent snapshot.'
   systemctl stop "$SERVICE"
 fi

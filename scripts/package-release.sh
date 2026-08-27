@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-VERSION=0.1.0
+VERSION=0.2.0
 OUTPUT_DIR=dist
 SOURCE_REF=HEAD
 

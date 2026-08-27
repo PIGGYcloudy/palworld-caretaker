@@ -92,7 +92,7 @@ sudo journalctl -u palworld-discord-bot.service -n 100 --no-pager
 
 ## Token 安全與輪替
 
-- `secrets.env` 必須為 root 擁有、mode `0600`；不要提交、備份到公開位置、貼入
+- `secrets.env` 必須為 root 擁有、群組為 `PALWORLD_MANAGER_USER`、mode `0640`；不要提交、備份到公開位置、貼入
   issue、聊天、終端截圖或 log。
 - 不要把 token 放在 shell 環境變數、命令列參數或自動化輸出。設定工具的隱藏
   prompt 是建議入口。

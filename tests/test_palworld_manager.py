@@ -5,10 +5,12 @@ import tempfile
 import threading
 import unittest
 import subprocess
+from unittest.mock import Mock, patch
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "scripts"))
+import palworld_manager as manager
 from palworld_manager import (
     ApiError, ConfigError, DEFAULT_CONFIG, PalworldAPI, config_value, diagnose_deployment,
     diagnostic_exit_code, env_bool,
@@ -93,6 +95,57 @@ class ManagerTests(unittest.TestCase):
         with self.assertRaises(ApiError):
             self.api.save()
         self.assertFalse(any(path.endswith("/shutdown") for _, path, _ in Handler.requests))
+
+    def test_core_backup_refuses_to_stop_when_rest_save_fails(self):
+        class FailingAPI:
+            def __init__(self, _config): pass
+            def save(self): raise ApiError("save failed")
+
+        with patch.object(manager, "_CoreBackupManager", object), \
+             patch.object(manager, "_core_backup_engine"), \
+             patch.object(manager, "PalworldAPI", FailingAPI), \
+             patch.object(manager, "service_state", side_effect=("active", "active")), \
+             patch.object(manager.os, "geteuid", return_value=0), \
+             patch.object(manager.subprocess, "run") as run, \
+             patch.dict(manager.os.environ, {"PALWORLD_OPERATION_LOCK_HELD": "1"}, clear=False):
+            with self.assertRaisesRegex(ConfigError, "backup service operation failed"):
+                manager._core_backup(dict(DEFAULT_CONFIG))
+        self.assertFalse(any(call.args[0][:2] == ["systemctl", "stop"] for call in run.call_args_list))
+
+    def test_core_backup_preflight_failure_never_saves_or_stops_an_active_service(self):
+        class UnsafeEngine:
+            def __init__(self, message): self.message = message
+            def preflight_snapshot(self):
+                raise manager._CoreSnapshotError(self.message)
+
+        class UnexpectedAPI:
+            def __init__(self, _config):
+                raise AssertionError("REST save must not be attempted after preflight failure")
+
+        for message in ("backup free space is insufficient", "backup_mount is not mounted"):
+            with self.subTest(message=message), \
+                 patch.object(manager, "_CoreBackupManager", object), \
+                 patch.object(manager, "_core_backup_engine", return_value=UnsafeEngine(message)), \
+                 patch.object(manager, "PalworldAPI", UnexpectedAPI), \
+                 patch.object(manager, "service_state") as service_state, \
+                 patch.object(manager.os, "geteuid", return_value=0), \
+                 patch.object(manager.subprocess, "run") as run, \
+                 patch.dict(manager.os.environ, {"PALWORLD_OPERATION_LOCK_HELD": "1"}, clear=False):
+                with self.assertRaisesRegex(ConfigError, message):
+                    manager._core_backup(dict(DEFAULT_CONFIG))
+            service_state.assert_not_called()
+            run.assert_not_called()
+
+    def test_backup_preflight_cli_validates_only_snapshot_inputs(self):
+        engine = Mock()
+        engine.preflight_snapshot.return_value = 123
+
+        with patch.object(manager, "_CoreBackupManager", object), \
+             patch.object(manager, "load_config", return_value=dict(DEFAULT_CONFIG)), \
+             patch.object(manager, "_core_backup_engine", return_value=engine):
+            self.assertEqual(manager._main(["--backup-preflight"]), 0)
+
+        engine.preflight_snapshot.assert_called_once_with()
 
     def test_save_then_shutdown_payload(self):
         self.api.save()
@@ -240,7 +293,7 @@ class ManagerTests(unittest.TestCase):
         })
         with tempfile.TemporaryDirectory() as directory:
             rendered = render_systemd_units(config, repository / "units", directory)
-            self.assertEqual(len(rendered), 7)
+            self.assertEqual(len(rendered), 8)
             game = (Path(directory) / "palworld.service").read_text(encoding="utf-8")
             bot = (Path(directory) / "palworld-discord-bot.service").read_text(encoding="utf-8")
             timer = (Path(directory) / "palworld-backup.timer").read_text(encoding="utf-8")
@@ -289,6 +342,19 @@ class ManagerTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_runtime_lock_is_precreated_and_direct_update_holds_it(self):
+        repository = Path(__file__).parents[1]
+        tmpfiles = (repository / "config/palworld-caretaker.tmpfiles.conf").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("d /run/palworld-caretaker 0750 root @MANAGER_USER@ -", tmpfiles)
+        self.assertIn("f /run/palworld-caretaker/operation.lock 0640 root @MANAGER_USER@ -", tmpfiles)
+
+        update = (repository / "scripts/update-palworld.sh").read_text(encoding="utf-8")
+        self.assertIn('exec 9<"$LOCK_FILE"', update)
+        self.assertIn("PALWORLD_OPERATION_LOCK_HELD", update)
+        self.assertLess(update.index('exec 9<"$LOCK_FILE"'), update.index('runuser -u "$SERVICE_USER"'))
+
     def test_mount_contract_can_be_explicitly_disabled(self):
         config = dict(DEFAULT_CONFIG)
         config.update({
@@ -324,7 +390,7 @@ class ManagerTests(unittest.TestCase):
             self.assertFalse(report.ok)
             self.assertTrue(any("not mounted" in error for error in report.errors))
             self.assertTrue(any("permissions" in error for error in report.errors))
-            secrets.chmod(0o600)
+            secrets.chmod(0o640)
             report = preflight_config(config, config_dir=install / "config", mount_checker=lambda _p: True)
             self.assertTrue(report.ok, report.errors)
 
@@ -339,6 +405,23 @@ class ManagerTests(unittest.TestCase):
             self.assertFalse(report.ok)
             self.assertTrue(any("SERVER_PASSWORD" in error for error in report.errors))
             self.assertTrue(any("permissions" in error for error in report.errors))
+
+    def test_deployed_preflight_requires_root_manager_secret_ownership(self):
+        with tempfile.TemporaryDirectory() as directory:
+            secrets = Path(directory) / "secrets.env"
+            secrets.write_text("SERVER_PASSWORD=server\nADMIN_PASSWORD=admin\n")
+            secrets.chmod(0o640)
+            config = dict(DEFAULT_CONFIG)
+            config.update({"SERVER_PASSWORD": "server", "ADMIN_PASSWORD": "admin"})
+
+            class Account:
+                pw_gid = 4242
+
+            with patch.object(manager.os, "geteuid", return_value=0), \
+                 patch.object(manager.pwd, "getpwnam", return_value=Account()):
+                report = preflight_values(config, config_dir=directory)
+            self.assertFalse(report.ok)
+            self.assertTrue(any("owner/group" in error for error in report.errors))
 
     def test_preflight_rejects_missing_and_unwritable_paths(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -385,7 +468,7 @@ class ManagerTests(unittest.TestCase):
                 path.write_text("fixture", encoding="utf-8")
             secrets = config_dir / "secrets.env"
             secrets.write_text("SERVER_PASSWORD=server-secret\nADMIN_PASSWORD=top-secret\n")
-            secrets.chmod(0o600)
+            secrets.chmod(0o640)
             config = dict(DEFAULT_CONFIG)
             config.update({
                 "PALWORLD_INSTALL_ROOT": str(install),

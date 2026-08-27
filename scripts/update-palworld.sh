@@ -14,6 +14,7 @@ SERVER_DIR="$(config_value PALWORLD_SERVER_ROOT)"
 SERVICE_USER="$(config_value PALWORLD_SERVICE_USER)"
 STEAM_APP_ID=2394010
 GRACEFUL_STOP_SCRIPT="$SCRIPT_HOME/graceful-stop-palworld.sh"
+LOCK_FILE="${PALWORLD_OPERATION_LOCK_FILE:-/run/palworld-caretaker/operation.lock}"
 
 die() {
   printf 'ERROR: %s\n' "$*" >&2
@@ -28,6 +29,16 @@ fi
 [[ -n "$STEAMCMD" && -x "$STEAMCMD" ]] || die 'steamcmd is not installed'
 [[ -x "$SERVER_DIR/PalServer.sh" ]] || die 'PalServer.sh is missing'
 [[ -x "$GRACEFUL_STOP_SCRIPT" ]] || die 'graceful stop script is missing'
+
+# tmpfiles pre-creates this root-owned lock in a manager-non-writable runtime
+# directory.  A read-only descriptor is sufficient for flock and cannot
+# truncate or create a replacement inode.
+if [[ "${PALWORLD_OPERATION_LOCK_HELD:-}" != 1 ]]; then
+  [[ -f "$LOCK_FILE" && ! -L "$LOCK_FILE" ]] || die "operation lock is unsafe or missing: $LOCK_FILE"
+  exec 9<"$LOCK_FILE"
+  flock -n 9 || die 'another Palworld operation is already running'
+  export PALWORLD_OPERATION_LOCK_HELD=1
+fi
 
 was_active=0
 cleanup() {
