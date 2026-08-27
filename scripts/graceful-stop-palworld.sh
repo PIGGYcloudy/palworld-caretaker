@@ -32,8 +32,12 @@ REST_USERNAME="${PALWORLD_REST_API_USERNAME:-admin}"
 SHUTDOWN_WAIT="${PALWORLD_SHUTDOWN_WAIT_SECONDS:-30}"
 
 [[ "$REST_HOST" == '127.0.0.1' || "$REST_HOST" == 'localhost' || "$REST_HOST" == '::1' ]] || die 'REST API host must be localhost'
-[[ "$REST_PORT" =~ ^[1-9][0-9]*$ ]] && (( REST_PORT <= 65535 )) || die 'REST API port is invalid'
-[[ "$SHUTDOWN_WAIT" =~ ^[1-9][0-9]*$ ]] && (( SHUTDOWN_WAIT <= 300 )) || die 'shutdown wait is invalid'
+if [[ ! "$REST_PORT" =~ ^[1-9][0-9]*$ ]] || (( REST_PORT > 65535 )); then
+  die 'REST API port is invalid'
+fi
+if [[ ! "$SHUTDOWN_WAIT" =~ ^[1-9][0-9]*$ ]] || (( SHUTDOWN_WAIT > 300 )); then
+  die 'shutdown wait is invalid'
+fi
 command -v curl >/dev/null || die 'curl is required'
 
 if [[ "$REST_HOST" == '::1' ]]; then

@@ -91,11 +91,13 @@ rsync -a --delete "$SAVE_ROOT/" "$STAGING_DIR/savegames/"
 log "Syncing server configuration with rsync."
 rsync -a --delete "$CONFIG_ROOT/" "$STAGING_DIR/config/"
 
-printf 'created_at=%s\n' "$(date --iso-8601=seconds)" > "$STAGING_DIR/metadata/manifest.txt"
-printf 'source_save_dir=%s\n' "$SAVE_ROOT" >> "$STAGING_DIR/metadata/manifest.txt"
-printf 'source_config_dir=%s\n' "$CONFIG_ROOT" >> "$STAGING_DIR/metadata/manifest.txt"
-printf 'built_in_backup_dir=%s\n' "${BUILTIN_BACKUP_DIR#"$SAVE_ROOT"/}" >> "$STAGING_DIR/metadata/manifest.txt"
-printf 'retention_count=%s\n' "$BACKUP_RETENTION_COUNT" >> "$STAGING_DIR/metadata/manifest.txt"
+{
+  printf 'created_at=%s\n' "$(date --iso-8601=seconds)"
+  printf 'source_save_dir=%s\n' "$SAVE_ROOT"
+  printf 'source_config_dir=%s\n' "$CONFIG_ROOT"
+  printf 'built_in_backup_dir=%s\n' "${BUILTIN_BACKUP_DIR#"$SAVE_ROOT"/}"
+  printf 'retention_count=%s\n' "$BACKUP_RETENTION_COUNT"
+} > "$STAGING_DIR/metadata/manifest.txt"
 
 [[ -f "$STAGING_DIR/config/LinuxServer/PalWorldSettings.ini" ]] || die 'staged settings file is missing'
 find "$STAGING_DIR/savegames" -type d -name backup -print -quit | grep -q . || die 'staged built-in backup directory is missing'
