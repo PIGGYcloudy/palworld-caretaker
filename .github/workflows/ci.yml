@@ -3,13 +3,20 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
-  test:
+  static-analysis:
+    name: Static analysis
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
@@ -27,5 +34,27 @@ jobs:
           shellcheck scripts/palworld-control scripts/palworld-rest-firewall scripts/palworld-discord-configure
       - name: Compile Python
         run: python -m py_compile scripts/*.py tests/*.py
-      - name: Run tests
-        run: python -m unittest discover -s tests -v
+
+  tests:
+    name: Unit and workflow integration tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install workflow test dependencies
+        run: sudo apt-get update && sudo apt-get install -y rsync
+      - name: Run unit tests
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python -m unittest discover -s tests -p 'test_palworld_manager.py' -v
+      - name: Run backup and restore integration tests
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python -m unittest discover -s tests -p 'test_backup_restore_integration.py' -v
+      - name: Run lifecycle integration tests
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python -m unittest discover -s tests -p 'test_lifecycle_integration.py' -v

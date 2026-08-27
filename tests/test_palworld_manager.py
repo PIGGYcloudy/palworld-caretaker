@@ -9,7 +9,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "scripts"))
-from palworld_manager import ApiError, PalworldAPI, env_bool, load_env, read_state, write_state
+from palworld_manager import (
+    ApiError, ConfigError, DEFAULT_CONFIG, PalworldAPI, config_value, diagnose_deployment,
+    diagnostic_exit_code, env_bool,
+    load_config, load_env, load_runtime_config, preflight_config, read_state,
+    preflight_values, render_systemd_units, validate_config, write_state,
+)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -111,6 +116,308 @@ class ManagerTests(unittest.TestCase):
             parsed = load_env(path)
             self.assertEqual(parsed["TOKEN"], "safe value")
             self.assertTrue(env_bool(parsed, "FLAG"))
+
+    def test_env_parser_treats_shell_syntax_as_literal_data(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            marker = base / "must-not-exist"
+            path = base / "env"
+            path.write_text(
+                f"COMMAND='$(touch {marker})'\n"
+                "HASH=abc#literal\n"
+                "COMMENTED=value # ignored\n"
+                "QUOTED=\"backslash\\\\and\\\"quote\" # ignored\n",
+                encoding="utf-8",
+            )
+            parsed = load_env(path)
+            self.assertEqual(parsed["COMMAND"], f"$(touch {marker})")
+            self.assertFalse(marker.exists())
+            self.assertEqual(parsed["HASH"], "abc#literal")
+            self.assertEqual(parsed["COMMENTED"], "value")
+            self.assertEqual(parsed["QUOTED"], 'backslash\\and"quote')
+
+    def test_env_parser_rejects_malformed_and_duplicate_lines(self):
+        invalid_documents = (
+            "export KEY=value\n",
+            "lower=value\n",
+            "KEY='unterminated\n",
+            "KEY='value' trailing\n",
+            "KEY=one\nKEY=two\n",
+            "KEY=unquoted value\n",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "env"
+            for document in invalid_documents:
+                path.write_text(document, encoding="utf-8")
+                with self.subTest(document=document), self.assertRaises(ConfigError):
+                    load_env(path)
+
+    def test_config_layers_override_defaults_and_legacy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_dir = Path(directory)
+            (config_dir / "palworld.env").write_text("MAX_PLAYERS=8\nSERVER_NAME=legacy\n")
+            (config_dir / "server.env").write_text("MAX_PLAYERS=12\n")
+            (config_dir / "secrets.env").write_text("ADMIN_PASSWORD='safe value'\n")
+            config = load_config(config_dir)
+            self.assertEqual(config["MAX_PLAYERS"], "12")
+            self.assertEqual(config["SERVER_NAME"], "legacy")
+            self.assertEqual(config["ADMIN_PASSWORD"], "safe value")
+            self.assertEqual(config["PALWORLD_INSTALL_ROOT"], "/srv/palworld")
+
+    def test_config_loader_fails_when_no_contract_file_exists(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(ConfigError, "no deployment configuration"):
+                load_config(directory)
+
+    def test_legacy_runtime_entrypoint_falls_back_to_split_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_dir = Path(directory)
+            (config_dir / "server.env").write_text("MAX_PLAYERS=17\n")
+            config = load_runtime_config(config_dir / "palworld.env")
+            self.assertEqual(config["MAX_PLAYERS"], "17")
+
+    def test_shipped_split_templates_match_the_contract(self):
+        repository = Path(__file__).parents[1]
+        with tempfile.TemporaryDirectory() as directory:
+            config_dir = Path(directory)
+            for name in ("caretaker", "server", "secrets"):
+                source = repository / f"config/{name}.env.example"
+                (config_dir / f"{name}.env").write_text(source.read_text(encoding="utf-8"))
+            config = load_config(config_dir)
+            paths = validate_config(config)
+            self.assertEqual(paths["install_root"], Path("/srv/palworld"))
+
+    def test_config_rejects_unknown_keys_and_port_conflict(self):
+        config = dict(DEFAULT_CONFIG)
+        config["TYPOED_SETTING"] = "true"
+        with self.assertRaisesRegex(ConfigError, "unknown configuration"):
+            validate_config(config)
+        config = dict(DEFAULT_CONFIG)
+        config["PALWORLD_REST_API_PORT"] = config["PUBLIC_PORT"]
+        with self.assertRaisesRegex(ConfigError, "must be different"):
+            validate_config(config)
+
+    def test_config_rejects_relative_root_and_overlapping_backup(self):
+        config = dict(DEFAULT_CONFIG)
+        config["PALWORLD_INSTALL_ROOT"] = "relative/path"
+        with self.assertRaisesRegex(ConfigError, "absolute path"):
+            validate_config(config)
+        config = dict(DEFAULT_CONFIG)
+        config["PALWORLD_BACKUP_REQUIRE_MOUNT"] = "false"
+        config["PALWORLD_BACKUP_DIR"] = "/srv/palworld/server/backups"
+        with self.assertRaisesRegex(ConfigError, "must not overlap"):
+            validate_config(config)
+
+    def test_custom_unicode_and_space_paths_are_derived(self):
+        config = dict(DEFAULT_CONFIG)
+        config.update({
+            "PALWORLD_INSTALL_ROOT": "/opt/Pal World/伺服器",
+            "PALWORLD_BACKUP_DIR": "/data/NAS saves/帕魯",
+            "PALWORLD_BACKUP_MOUNT": "/data/NAS saves",
+        })
+        paths = validate_config(config)
+        self.assertEqual(paths["server_root"], Path("/opt/Pal World/伺服器/server"))
+        self.assertEqual(paths["backup_dir"], Path("/data/NAS saves/帕魯"))
+
+    def test_config_value_exposes_validated_derived_paths(self):
+        config = dict(DEFAULT_CONFIG)
+        config["PALWORLD_INSTALL_ROOT"] = "/opt/Pal World"
+        self.assertEqual(config_value(config, "PALWORLD_SCRIPTS_ROOT"), "/opt/Pal World/scripts")
+        with self.assertRaisesRegex(ConfigError, "unknown configuration value"):
+            config_value(config, "NOT_A_SETTING")
+
+    def test_systemd_units_are_rendered_from_custom_config(self):
+        repository = Path(__file__).parents[1]
+        config = dict(DEFAULT_CONFIG)
+        config.update({
+            "PALWORLD_INSTALL_ROOT": "/opt/Pal World/%instance",
+            "PALWORLD_BACKUP_DIR": "/data/backups/palworld",
+            "PALWORLD_BACKUP_MOUNT": "/data/backups",
+            "PALWORLD_MANAGER_STATE_DIR": "/var/lib/custom caretaker",
+            "PALWORLD_SERVICE_USER": "pal-service",
+            "PALWORLD_MANAGER_USER": "pal-manager",
+            "BACKUP_TIME": "03:17",
+        })
+        with tempfile.TemporaryDirectory() as directory:
+            rendered = render_systemd_units(config, repository / "units", directory)
+            self.assertEqual(len(rendered), 7)
+            game = (Path(directory) / "palworld.service").read_text(encoding="utf-8")
+            bot = (Path(directory) / "palworld-discord-bot.service").read_text(encoding="utf-8")
+            timer = (Path(directory) / "palworld-backup.timer").read_text(encoding="utf-8")
+            self.assertIn(r'WorkingDirectory=/opt/Pal\x20World/%%instance/server', game)
+            self.assertIn('User=pal-service', game)
+            self.assertIn('PALWORLD_CONFIG=/opt/Pal World/%%instance/config', bot)
+            self.assertIn(r'ReadWritePaths=/var/lib/custom\x20caretaker', bot)
+            self.assertIn('OnCalendar=*-*-* 03:17:00', timer)
+            self.assertFalse(any("@" in path.read_text(encoding="utf-8") for path in rendered))
+
+    def test_deployment_scripts_and_units_have_no_legacy_deployment_paths(self):
+        repository = Path(__file__).parents[1]
+        targets = [
+            repository / "install-palworld.sh",
+            repository / "scripts/backup-palworld.sh",
+            repository / "scripts/restore-palworld.sh",
+            repository / "scripts/update-palworld.sh",
+            *sorted((repository / "units").glob("palworld*")),
+        ]
+        for path in targets:
+            text = path.read_text(encoding="utf-8")
+            with self.subTest(path=path.name):
+                self.assertNotIn("/srv/palworld", text)
+                self.assertNotIn("/mnt/qnap", text)
+                self.assertNotRegex(text, r"(?m)^\s*source\s+")
+
+    def test_installer_preflight_precedes_system_mutations(self):
+        installer = (Path(__file__).parents[1] / "install-palworld.sh").read_text(encoding="utf-8")
+        preflight = installer.index('--no-filesystem')
+        for mutation in ("dpkg --add-architecture", "apt-get update", "useradd --system",
+                         'install -d ', 'systemctl daemon-reload'):
+            with self.subTest(mutation=mutation):
+                self.assertLess(preflight, installer.index(mutation))
+
+    def test_all_bash_entrypoints_pass_syntax_check(self):
+        repository = Path(__file__).parents[1]
+        scripts = sorted(repository.glob("*.sh"))
+        scripts.extend(sorted((repository / "scripts").glob("*.sh")))
+        scripts.extend(path for path in (
+            repository / "scripts/palworld-control",
+            repository / "scripts/palworld-discord-configure",
+            repository / "scripts/palworld-rest-firewall",
+        ) if path.exists())
+        result = subprocess.run(
+            ["/bin/bash", "-n", *map(str, scripts)], text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_mount_contract_can_be_explicitly_disabled(self):
+        config = dict(DEFAULT_CONFIG)
+        config.update({
+            "PALWORLD_BACKUP_REQUIRE_MOUNT": "false",
+            "PALWORLD_BACKUP_MOUNT": "",
+            "PALWORLD_BACKUP_DIR": "/var/backups/palworld",
+        })
+        paths = validate_config(config)
+        self.assertIsNone(paths["backup_mount"])
+
+    def test_preflight_checks_mount_and_secret_permissions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            install = base / "custom install"
+            backup_mount = base / "mounted storage"
+            backup = backup_mount / "snapshots"
+            state = base / "state"
+            for path in (install / "server", install / "config", install / "scripts", backup, state):
+                path.mkdir(parents=True, exist_ok=True)
+            secrets = install / "config/secrets.env"
+            secrets.write_text("ADMIN_PASSWORD=secret\n")
+            secrets.chmod(0o644)
+            config = dict(DEFAULT_CONFIG)
+            config.update({
+                "PALWORLD_INSTALL_ROOT": str(install),
+                "PALWORLD_BACKUP_DIR": str(backup),
+                "PALWORLD_BACKUP_MOUNT": str(backup_mount),
+                "PALWORLD_MANAGER_STATE_DIR": str(state),
+                "SERVER_PASSWORD": "server-secret",
+                "ADMIN_PASSWORD": "admin-secret",
+            })
+            report = preflight_config(config, config_dir=install / "config", mount_checker=lambda _p: False)
+            self.assertFalse(report.ok)
+            self.assertTrue(any("not mounted" in error for error in report.errors))
+            self.assertTrue(any("permissions" in error for error in report.errors))
+            secrets.chmod(0o600)
+            report = preflight_config(config, config_dir=install / "config", mount_checker=lambda _p: True)
+            self.assertTrue(report.ok, report.errors)
+
+    def test_value_only_preflight_rejects_placeholders_and_weak_secret_mode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            secrets = Path(directory) / "secrets.env"
+            secrets.write_text("SERVER_PASSWORD=CHANGE_ME\nADMIN_PASSWORD=valid\n")
+            secrets.chmod(0o644)
+            config = dict(DEFAULT_CONFIG)
+            config["ADMIN_PASSWORD"] = "valid"
+            report = preflight_values(config, config_dir=directory)
+            self.assertFalse(report.ok)
+            self.assertTrue(any("SERVER_PASSWORD" in error for error in report.errors))
+            self.assertTrue(any("permissions" in error for error in report.errors))
+
+    def test_preflight_rejects_missing_and_unwritable_paths(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            install = base / "install"
+            backup = base / "backup"
+            state = base / "missing-state"
+            for path in (install / "server", install / "config", backup):
+                path.mkdir(parents=True, exist_ok=True)
+            (install / "server").chmod(0o500)
+            config = dict(DEFAULT_CONFIG)
+            config.update({
+                "PALWORLD_INSTALL_ROOT": str(install),
+                "PALWORLD_BACKUP_DIR": str(backup),
+                "PALWORLD_BACKUP_MOUNT": "",
+                "PALWORLD_BACKUP_REQUIRE_MOUNT": "false",
+                "PALWORLD_MANAGER_STATE_DIR": str(state),
+                "SERVER_PASSWORD": "server-secret",
+                "ADMIN_PASSWORD": "admin-secret",
+            })
+            report = preflight_config(config)
+            self.assertTrue(any("scripts_root does not exist" in error for error in report.errors))
+            self.assertTrue(any("state_dir does not exist" in error for error in report.errors))
+            self.assertTrue(any("server_root is not writable" in error for error in report.errors))
+            (install / "server").chmod(0o700)
+
+    def test_diagnose_reports_assets_and_inactive_services_without_secrets(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            install = base / "custom install"
+            config_dir = install / "config"
+            server = install / "server"
+            scripts = install / "scripts"
+            backup = base / "external backups"
+            state = base / "state"
+            for path in (config_dir, server / "Pal/Saved/Config/LinuxServer", scripts, backup, state):
+                path.mkdir(parents=True, exist_ok=True)
+            for path in (
+                server / "PalServer.sh",
+                server / "Pal/Saved/Config/LinuxServer/PalWorldSettings.ini",
+                scripts / "palworld_manager.py", scripts / "backup-palworld.sh",
+                scripts / "restore-palworld.sh",
+            ):
+                path.write_text("fixture", encoding="utf-8")
+            secrets = config_dir / "secrets.env"
+            secrets.write_text("SERVER_PASSWORD=server-secret\nADMIN_PASSWORD=top-secret\n")
+            secrets.chmod(0o600)
+            config = dict(DEFAULT_CONFIG)
+            config.update({
+                "PALWORLD_INSTALL_ROOT": str(install),
+                "PALWORLD_BACKUP_DIR": str(backup),
+                "PALWORLD_BACKUP_MOUNT": "",
+                "PALWORLD_BACKUP_REQUIRE_MOUNT": "false",
+                "PALWORLD_MANAGER_STATE_DIR": str(state),
+                "SERVER_PASSWORD": "server-secret",
+                "ADMIN_PASSWORD": "top-secret",
+            })
+
+            def inactive_runner(*_args, **_kwargs):
+                return subprocess.CompletedProcess([], 0, "loaded\ninactive\nenabled\n", "")
+
+            checks = diagnose_deployment(
+                config, config_dir=config_dir, command_runner=inactive_runner,
+            )
+            self.assertEqual(diagnostic_exit_code(checks), 0)
+            self.assertTrue(any(check.name == "preflight" and check.status == "pass" for check in checks))
+            output = "\n".join(check.message for check in checks)
+            self.assertNotIn("top-secret", output)
+            self.assertNotIn("server-secret", output)
+
+    def test_upgrade_uses_only_the_layered_contract_for_deployment_paths(self):
+        upgrade = (Path(__file__).parents[1] / "upgrade-palworld-manager.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("/srv/palworld", upgrade)
+        self.assertIn('--config-dir', upgrade)
+        self.assertIn('config_value PALWORLD_INSTALL_ROOT', upgrade)
+        self.assertIn('--render-units', upgrade)
+        self.assertNotIn('palworld.env.example', upgrade)
 
     def test_settings_renderer_preserves_values_and_enables_rest(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as directory:

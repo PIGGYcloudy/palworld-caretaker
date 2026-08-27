@@ -6,7 +6,7 @@ import os
 import signal
 import time
 
-from palworld_manager import ApiError, PalworldAPI, env_bool, env_int, load_env, read_state, service_active, service_lifecycle, write_state
+from palworld_manager import ApiError, PalworldAPI, env_bool, env_int, load_runtime_config, read_state, service_active, service_lifecycle, write_state
 
 CONFIG = os.environ.get("PALWORLD_CONFIG", "/srv/palworld/config/palworld.env")
 STATE = os.environ.get("PALWORLD_STATE", "/var/lib/palworld-manager/idle-state.json")
@@ -20,7 +20,7 @@ def stop_handler(*_args):
 
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    config = load_env(CONFIG)
+    config = load_runtime_config(CONFIG)
     enabled = env_bool(config, "PALWORLD_IDLE_SHUTDOWN_ENABLED", True)
     dry_run = env_bool(config, "PALWORLD_IDLE_WATCHER_DRY_RUN", False)
     timeout = env_int(config, "PALWORLD_IDLE_TIMEOUT_MINUTES", 10, 1, 10080) * 60

@@ -2,13 +2,22 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-BASE_DIR='/srv/palworld'
-SERVER_ROOT="$BASE_DIR/server"
+SCRIPT_HOME="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG_DIR="${PALWORLD_CONFIG_DIR:-$(dirname -- "$SCRIPT_HOME")/config}"
+MANAGER="$SCRIPT_HOME/palworld_manager.py"
+[[ -r "$MANAGER" ]] || { printf 'ERROR: configuration manager is missing: %s\n' "$MANAGER" >&2; exit 1; }
+python3 "$MANAGER" --config-dir "$CONFIG_DIR" || exit $?
+config_value() {
+  python3 "$MANAGER" --config-dir "$CONFIG_DIR" --get "$1"
+}
+SERVER_ROOT="$(config_value PALWORLD_SERVER_ROOT)"
 SAVE_ROOT="$SERVER_ROOT/Pal/Saved/SaveGames"
 CONFIG_ROOT="$SERVER_ROOT/Pal/Saved/Config"
-NAS_MOUNT='/mnt/qnap-tyt'
-BACKUP_ROOT="$NAS_MOUNT/palworld-backups"
-LOCAL_ROOT="$BASE_DIR/backups-local"
+BACKUP_ROOT="$(config_value PALWORLD_BACKUP_DIR)"
+BACKUP_MOUNT="$(config_value PALWORLD_BACKUP_MOUNT)"
+BACKUP_REQUIRE_MOUNT="$(config_value PALWORLD_BACKUP_REQUIRE_MOUNT)"
+LOCAL_ROOT="$(config_value PALWORLD_LOCAL_BACKUP_ROOT)"
+SERVICE_USER="$(config_value PALWORLD_SERVICE_USER)"
 
 die() {
   printf 'ERROR: %s\n' "$*" >&2
@@ -16,8 +25,9 @@ die() {
 }
 
 (( EUID == 0 )) || die 'run this script with sudo'
-mountpoint -q "$NAS_MOUNT" || die "NAS is not mounted: $NAS_MOUNT"
-[[ "$BACKUP_ROOT" == "$NAS_MOUNT/palworld-backups" ]] || die 'backup path safety check failed'
+if [[ "$BACKUP_REQUIRE_MOUNT" == true ]]; then
+  mountpoint -q "$BACKUP_MOUNT" || die "backup filesystem is not mounted: $BACKUP_MOUNT"
+fi
 
 list_backups() {
   if [[ ! -d "$BACKUP_ROOT" ]]; then
@@ -74,7 +84,7 @@ if systemctl is-active --quiet palworld.service; then
 fi
 
 # The backup script sees the service stopped and therefore leaves it stopped.
-/srv/palworld/scripts/backup-palworld.sh --pre-restore
+"$SCRIPT_HOME/backup-palworld.sh" --pre-restore
 
 install -d -o root -g root -m 0700 "$local_snapshot"
 rsync -a "$SAVE_ROOT/" "$local_snapshot/savegames/"
@@ -83,7 +93,7 @@ rsync -a "$CONFIG_ROOT/" "$local_snapshot/config/"
 rsync -a --delete "$BACKUP_DIR/savegames/" "$SAVE_ROOT/"
 rsync -a --delete "$BACKUP_DIR/config/" "$CONFIG_ROOT/"
 
-chown -R palworld:palworld "$SAVE_ROOT" "$CONFIG_ROOT"
+chown -R "$SERVICE_USER:$SERVICE_USER" "$SAVE_ROOT" "$CONFIG_ROOT"
 find "$SAVE_ROOT" "$CONFIG_ROOT" -type d -exec chmod 0750 {} +
 find "$SAVE_ROOT" "$CONFIG_ROOT" -type f -exec chmod 0640 {} +
 

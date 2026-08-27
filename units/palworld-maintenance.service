@@ -5,7 +5,8 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/srv/palworld/scripts/daily-palworld-maintenance.sh
+Environment=@CONFIG_DIR_ENV@
+ExecStart=@MAINTENANCE_SCRIPT@
 TimeoutStartSec=90min
 Nice=10
 IOSchedulingClass=best-effort

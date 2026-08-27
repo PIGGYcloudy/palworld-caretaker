@@ -4,8 +4,9 @@ Before=palworld.service
 
 [Service]
 Type=oneshot
-ExecStart=/srv/palworld/scripts/palworld-rest-firewall start
-ExecStop=/srv/palworld/scripts/palworld-rest-firewall stop
+Environment=@CONFIG_DIR_ENV@
+ExecStart=@FIREWALL_SCRIPT@ start
+ExecStop=@FIREWALL_SCRIPT@ stop
 RemainAfterExit=yes
 
 [Install]

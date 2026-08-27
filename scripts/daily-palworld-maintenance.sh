@@ -2,13 +2,18 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-BASE_DIR='/srv/palworld'
 SERVICE='palworld.service'
-BACKUP_SCRIPT="$BASE_DIR/scripts/backup-palworld.sh"
-UPDATE_SCRIPT="$BASE_DIR/scripts/update-palworld.sh"
-GRACEFUL_STOP_SCRIPT="$BASE_DIR/scripts/graceful-stop-palworld.sh"
+SCRIPT_HOME="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG_DIR="${PALWORLD_CONFIG_DIR:-$(dirname -- "$SCRIPT_HOME")/config}"
+MANAGER="$SCRIPT_HOME/palworld_manager.py"
+[[ -r "$MANAGER" ]] || { printf 'ERROR: configuration manager is missing\n' >&2; exit 1; }
+python3 "$MANAGER" --config-dir "$CONFIG_DIR" || exit $?
+STATE_ROOT="$(python3 "$MANAGER" --config-dir "$CONFIG_DIR" --get PALWORLD_MANAGER_STATE_DIR)"
+BACKUP_SCRIPT="$SCRIPT_HOME/backup-palworld.sh"
+UPDATE_SCRIPT="$SCRIPT_HOME/update-palworld.sh"
+GRACEFUL_STOP_SCRIPT="$SCRIPT_HOME/graceful-stop-palworld.sh"
 LOCK_FILE='/run/lock/palworld-maintenance.lock'
-STATE_FILE='/var/lib/palworld-manager/maintenance-state.json'
+STATE_FILE="$STATE_ROOT/maintenance-state.json"
 
 log() {
   printf '[%s] %s\n' "$(date --iso-8601=seconds)" "$*"

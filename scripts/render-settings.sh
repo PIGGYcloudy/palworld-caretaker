@@ -2,14 +2,21 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-BASE_DIR="${PALWORLD_TEST_BASE_DIR:-/srv/palworld}"
+SCRIPT_HOME="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -n "${PALWORLD_TEST_BASE_DIR:-}" ]]; then
+  BASE_DIR="$PALWORLD_TEST_BASE_DIR"
   [[ "$BASE_DIR" == /tmp/* ]] || { printf 'ERROR: test base must be under /tmp\n' >&2; exit 1; }
   TEST_MODE=1
+  CONFIG_DIR="$BASE_DIR/config"
 else
   TEST_MODE=0
+  CONFIG_DIR="${PALWORLD_CONFIG_DIR:-$(dirname -- "$SCRIPT_HOME")/config}"
 fi
-ENV_FILE="$BASE_DIR/config/palworld.env"
+MANAGER="$SCRIPT_HOME/palworld_manager.py"
+[[ -r "$MANAGER" ]] || { printf 'ERROR: configuration manager is missing\n' >&2; exit 1; }
+python3 "$MANAGER" --config-dir "$CONFIG_DIR" --no-filesystem || exit $?
+config_value() { python3 "$MANAGER" --config-dir "$CONFIG_DIR" --get "$1"; }
+if (( TEST_MODE == 0 )); then BASE_DIR="$(config_value PALWORLD_INSTALL_ROOT)"; fi
 SETTINGS_FILE="$BASE_DIR/server/Pal/Saved/Config/LinuxServer/PalWorldSettings.ini"
 
 die() {
@@ -18,28 +25,17 @@ die() {
 }
 
 (( EUID == 0 || TEST_MODE == 1 )) || die 'run this script with sudo'
-[[ -r "$ENV_FILE" ]] || die 'configuration file is missing'
 [[ -f "$SETTINGS_FILE" ]] || die 'PalWorldSettings.ini is missing; start the server once first'
 
-# shellcheck disable=SC1090
-source "$ENV_FILE"
-: "${MAX_PLAYERS:?MAX_PLAYERS is required}"
-: "${BASE_CAMP_MAX_NUM_IN_GUILD:?BASE_CAMP_MAX_NUM_IN_GUILD is required}"
-: "${SERVER_PASSWORD:?SERVER_PASSWORD is required}"
-: "${ADMIN_PASSWORD:?ADMIN_PASSWORD is required}"
-: "${SERVER_NAME:?SERVER_NAME is required}"
-: "${SERVER_DESCRIPTION:?SERVER_DESCRIPTION is required}"
-: "${PUBLIC_PORT:?PUBLIC_PORT is required}"
-: "${PALWORLD_REST_API_PORT:?PALWORLD_REST_API_PORT is required}"
-
-[[ "$MAX_PLAYERS" =~ ^[1-9][0-9]*$ ]] || die 'MAX_PLAYERS must be a positive integer'
-(( MAX_PLAYERS <= 32 )) || die 'MAX_PLAYERS must be 32 or less'
-[[ "$BASE_CAMP_MAX_NUM_IN_GUILD" =~ ^[1-9][0-9]*$ ]] || die 'BASE_CAMP_MAX_NUM_IN_GUILD must be a positive integer'
-(( BASE_CAMP_MAX_NUM_IN_GUILD <= 10 )) || die 'BASE_CAMP_MAX_NUM_IN_GUILD must be 10 or less'
-[[ "$PUBLIC_PORT" =~ ^[1-9][0-9]*$ ]] || die 'PUBLIC_PORT must be a positive integer'
-(( PUBLIC_PORT <= 65535 )) || die 'PUBLIC_PORT is out of range'
-[[ "$PALWORLD_REST_API_PORT" =~ ^[1-9][0-9]*$ ]] || die 'PALWORLD_REST_API_PORT must be a positive integer'
-(( PALWORLD_REST_API_PORT <= 65535 )) || die 'PALWORLD_REST_API_PORT is out of range'
+MAX_PLAYERS="$(config_value MAX_PLAYERS)"
+BASE_CAMP_MAX_NUM_IN_GUILD="$(config_value BASE_CAMP_MAX_NUM_IN_GUILD)"
+SERVER_PASSWORD="$(config_value SERVER_PASSWORD)"
+ADMIN_PASSWORD="$(config_value ADMIN_PASSWORD)"
+SERVER_NAME="$(config_value SERVER_NAME)"
+SERVER_DESCRIPTION="$(config_value SERVER_DESCRIPTION)"
+PUBLIC_PORT="$(config_value PUBLIC_PORT)"
+PALWORLD_REST_API_PORT="$(config_value PALWORLD_REST_API_PORT)"
+SERVICE_USER="$(config_value PALWORLD_SERVICE_USER)"
 
 validate_ini_value() {
   local name="$1"
@@ -127,9 +123,9 @@ grep -q "RESTAPIPort=$PALWORLD_REST_API_PORT" "$tmp_file" || die 'rendered setti
 grep -q "BaseCampMaxNumInGuild=$BASE_CAMP_MAX_NUM_IN_GUILD" "$tmp_file" || die 'rendered settings missing guild base camp limit'
 
 if (( TEST_MODE == 0 )); then
-  chown palworld:palworld "$tmp_file"
+  chown "$SERVICE_USER:$SERVICE_USER" "$tmp_file"
 fi
 chmod 0640 "$tmp_file"
 mv -f -- "$tmp_file" "$SETTINGS_FILE"
 trap - EXIT
-printf 'PalWorldSettings.ini rendered from %s (password values were not displayed).\n' "$ENV_FILE"
+printf 'PalWorldSettings.ini rendered from %s (password values were not displayed).\n' "$CONFIG_DIR"

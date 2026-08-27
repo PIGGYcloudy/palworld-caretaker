@@ -9,12 +9,14 @@ import time
 import discord
 from discord import app_commands
 
-from palworld_manager import ApiError, PalworldAPI, env_bool, env_int, load_env, read_state, service_active, service_state, service_uptime_seconds
+from palworld_manager import ApiError, PalworldAPI, env_bool, env_int, load_runtime_config, read_state, service_active, service_state, service_uptime_seconds
 
 CONFIG = os.environ.get("PALWORLD_CONFIG", "/srv/palworld/config/palworld.env")
 STATE = os.environ.get("PALWORLD_STATE", "/var/lib/palworld-manager/idle-state.json")
-MAINTENANCE_STATE = "/var/lib/palworld-manager/maintenance-state.json"
-config = load_env(CONFIG)
+MAINTENANCE_STATE = os.environ.get(
+    "PALWORLD_MAINTENANCE_STATE", "/var/lib/palworld-manager/maintenance-state.json"
+)
+config = load_runtime_config(CONFIG)
 api = PalworldAPI(config)
 start_lock = asyncio.Lock()
 maintenance_lock = asyncio.Lock()

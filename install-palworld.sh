@@ -2,186 +2,156 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-(( EUID == 0 )) || {
-  printf 'Run this installer with sudo, for example: sudo bash %s\n' "$0" >&2
-  exit 1
-}
+log() { printf '[%s] %s\n' "$(date --iso-8601=seconds)" "$*"; }
+die() { log "ERROR: $*"; exit 1; }
+
+(( EUID == 0 )) || die "run this installer with sudo: sudo bash $0 --config-dir /path/to/config"
 
 STAGING_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-DEFAULT_CONFIG="$STAGING_DIR/config/palworld.env.example"
-BASE_DIR='/srv/palworld'
-SERVER_DIR="$BASE_DIR/server"
-CONFIG_DIR="$BASE_DIR/config"
-SCRIPT_DIR="$BASE_DIR/scripts"
-LOCAL_BACKUP_DIR="$BASE_DIR/backups-local"
-MANAGER_STATE_DIR='/var/lib/palworld-manager'
+MANAGER="$STAGING_DIR/scripts/palworld_manager.py"
+CONFIG_SOURCE_DIR="${PALWORLD_CONFIG_DIR:-$STAGING_DIR/config}"
+if [[ $# -gt 0 ]]; then
+  [[ $# -eq 2 && "$1" == --config-dir ]] || die "usage: $0 [--config-dir DIRECTORY]"
+  CONFIG_SOURCE_DIR="$2"
+fi
+[[ -r "$MANAGER" ]] || die "configuration manager is missing: $MANAGER"
+
+# This must remain before dpkg, apt, useradd, install, mkdir, or writes to /etc.
+# A fresh deployment has no target directories, so this gate validates values.
+log 'Validating deployment configuration before making system changes.'
+python3 "$MANAGER" --config-dir "$CONFIG_SOURCE_DIR" --no-filesystem ||
+  die 'configuration preflight failed; no system changes were made'
+
+config_value() { python3 "$MANAGER" --config-dir "$CONFIG_SOURCE_DIR" --get "$1"; }
+BASE_DIR="$(config_value PALWORLD_INSTALL_ROOT)"
+SERVER_DIR="$(config_value PALWORLD_SERVER_ROOT)"
+CONFIG_DIR="$(config_value PALWORLD_CONFIG_ROOT)"
+SCRIPT_DIR="$(config_value PALWORLD_SCRIPTS_ROOT)"
+LOCAL_BACKUP_DIR="$(config_value PALWORLD_LOCAL_BACKUP_ROOT)"
+BACKUP_DIR="$(config_value PALWORLD_BACKUP_DIR)"
+BACKUP_MOUNT="$(config_value PALWORLD_BACKUP_MOUNT)"
+BACKUP_REQUIRE_MOUNT="$(config_value PALWORLD_BACKUP_REQUIRE_MOUNT)"
+MANAGER_STATE_DIR="$(config_value PALWORLD_MANAGER_STATE_DIR)"
+SERVICE_USER="$(config_value PALWORLD_SERVICE_USER)"
+MANAGER_USER="$(config_value PALWORLD_MANAGER_USER)"
 VENV_DIR="$BASE_DIR/venv"
-NAS_MOUNT='/mnt/qnap-tyt'
-NAS_BACKUP_DIR="$NAS_MOUNT/palworld-backups"
 SETTINGS_FILE="$SERVER_DIR/Pal/Saved/Config/LinuxServer/PalWorldSettings.ini"
 STEAM_APP_ID=2394010
-if [[ -f "$SETTINGS_FILE" ]]; then
-  HAD_EXISTING_SETTINGS=1
-else
-  HAD_EXISTING_SETTINGS=0
-fi
-
-log() {
-  printf '[%s] %s\n' "$(date --iso-8601=seconds)" "$*"
-}
-
-die() {
-  log "ERROR: $*"
-  exit 1
-}
+[[ -f "$SETTINGS_FILE" ]] && HAD_EXISTING_SETTINGS=1 || HAD_EXISTING_SETTINGS=0
 
 log 'Enabling the i386 architecture required by Ubuntu SteamCMD.'
-if ! dpkg --print-foreign-architectures | grep -qx i386; then
-  dpkg --add-architecture i386
-fi
+if ! dpkg --print-foreign-architectures | grep -qx i386; then dpkg --add-architecture i386; fi
 log 'Installing SteamCMD package.'
 apt-get update
-# Keep debconf interactive so the operator can explicitly accept Valve's
-# Steam License Agreement instead of silently accepting it here.
+# Keep debconf interactive so the operator explicitly accepts Valve's license.
 apt-get install -y steamcmd:i386 python3-venv iptables
 
 STEAMCMD="$(command -v steamcmd || true)"
-if [[ -z "$STEAMCMD" && -x /usr/games/steamcmd ]]; then
-  STEAMCMD='/usr/games/steamcmd'
-fi
+[[ -n "$STEAMCMD" ]] || STEAMCMD='/usr/games/steamcmd'
 [[ -x "$STEAMCMD" ]] || die 'steamcmd executable was not found after installation'
 
-if ! id -u palworld >/dev/null 2>&1; then
-  log 'Creating system user palworld.'
-  useradd --system --home-dir "$BASE_DIR" --shell /usr/sbin/nologin palworld
+if ! id -u "$SERVICE_USER" >/dev/null 2>&1; then
+  log "Creating system user $SERVICE_USER."
+  useradd --system --home-dir "$BASE_DIR" --shell /usr/sbin/nologin "$SERVICE_USER"
 fi
-if ! id -u palworld-manager >/dev/null 2>&1; then
-  log 'Creating restricted Palworld manager user.'
-  useradd --system --home-dir "$MANAGER_STATE_DIR" --shell /usr/sbin/nologin palworld-manager
+if ! id -u "$MANAGER_USER" >/dev/null 2>&1; then
+  log "Creating restricted manager user $MANAGER_USER."
+  useradd --system --home-dir "$MANAGER_STATE_DIR" --shell /usr/sbin/nologin "$MANAGER_USER"
 fi
 
 install -d -o root -g root -m 0755 "$BASE_DIR"
-install -d -o palworld -g palworld -m 0750 "$SERVER_DIR"
+install -d -o "$SERVICE_USER" -g "$SERVICE_USER" -m 0750 "$SERVER_DIR"
 install -d -o root -g root -m 0755 "$SCRIPT_DIR"
-install -d -o root -g palworld-manager -m 0750 "$CONFIG_DIR"
+install -d -o root -g "$MANAGER_USER" -m 0750 "$CONFIG_DIR"
 install -d -o root -g root -m 0700 "$LOCAL_BACKUP_DIR"
-install -d -o palworld-manager -g palworld-manager -m 0750 "$MANAGER_STATE_DIR"
+install -d -o "$MANAGER_USER" -g "$MANAGER_USER" -m 0750 "$MANAGER_STATE_DIR"
+
+copied_config=0
+for config_name in palworld.env caretaker.env server.env secrets.env; do
+  source_file="$CONFIG_SOURCE_DIR/$config_name"
+  [[ -f "$source_file" ]] || continue
+  destination="$CONFIG_DIR/$config_name"
+  mode=0640; [[ "$config_name" == secrets.env ]] && mode=0600
+  if [[ ! "$source_file" -ef "$destination" ]]; then
+    install -o root -g "$MANAGER_USER" -m "$mode" "$source_file" "$destination"
+  else
+    chown root:"$MANAGER_USER" "$destination"; chmod "$mode" "$destination"
+  fi
+  copied_config=1
+done
+(( copied_config == 1 )) || die "no deployment configuration files found in $CONFIG_SOURCE_DIR"
+
+for executable in render-settings.sh backup-palworld.sh restore-palworld.sh update-palworld.sh \
+  daily-palworld-maintenance.sh graceful-stop-palworld.sh palworld-rest-firewall \
+  palworld-idle-watcher.py palworld-discord-bot.py diagnose-palworld.sh; do
+  install -o root -g root -m 0755 "$STAGING_DIR/scripts/$executable" "$SCRIPT_DIR/$executable"
+done
+install -o root -g root -m 0644 "$MANAGER" "$SCRIPT_DIR/palworld_manager.py"
+install -o root -g root -m 0755 "$STAGING_DIR/scripts/palworld-control" /usr/local/sbin/palworld-control
+install -o root -g root -m 0755 "$STAGING_DIR/scripts/palworld-discord-configure" /usr/local/sbin/palworld-discord-configure
+install -o root -g root -m 0755 "$STAGING_DIR/uninstall-palworld.sh" "$BASE_DIR/uninstall-palworld.sh"
+install -o root -g root -m 0644 "$STAGING_DIR/README.md" "$BASE_DIR/README.md"
+
+# Now verify permissions, mount safety, and destination writability before
+# installing systemd definitions or changing live server data.
+python3 "$SCRIPT_DIR/palworld_manager.py" --config-dir "$CONFIG_DIR" ||
+  die 'filesystem preflight failed; systemd was not modified'
 
 UPGRADE_STAMP="$(date +%Y%m%d-%H%M%S)"
 UPGRADE_BACKUP_DIR="$LOCAL_BACKUP_DIR/config-upgrade-$UPGRADE_STAMP"
 install -d -o root -g root -m 0700 "$UPGRADE_BACKUP_DIR"
-for existing_file in \
-  /etc/systemd/system/palworld.service \
-  /etc/systemd/system/palworld-backup.service \
-  /etc/systemd/system/palworld-backup.timer \
-  /etc/systemd/system/palworld-maintenance.service \
-  /etc/systemd/system/palworld-idle-watcher.service \
-  /etc/systemd/system/palworld-discord-bot.service \
-  /etc/systemd/system/palworld-rest-firewall.service \
+for existing_file in /etc/systemd/system/palworld*.service /etc/systemd/system/palworld*.timer \
   /etc/sudoers.d/palworld-manager; do
-  if [[ -f "$existing_file" ]]; then
-    cp -a -- "$existing_file" "$UPGRADE_BACKUP_DIR/"
-  fi
+  [[ -f "$existing_file" ]] && cp -a -- "$existing_file" "$UPGRADE_BACKUP_DIR/"
 done
 
-install -o root -g root -m 0755 "$STAGING_DIR/scripts/render-settings.sh" "$SCRIPT_DIR/render-settings.sh"
-install -o root -g root -m 0755 "$STAGING_DIR/scripts/backup-palworld.sh" "$SCRIPT_DIR/backup-palworld.sh"
-install -o root -g root -m 0755 "$STAGING_DIR/scripts/restore-palworld.sh" "$SCRIPT_DIR/restore-palworld.sh"
-install -o root -g root -m 0755 "$STAGING_DIR/scripts/update-palworld.sh" "$SCRIPT_DIR/update-palworld.sh"
-install -o root -g root -m 0755 "$STAGING_DIR/scripts/daily-palworld-maintenance.sh" "$SCRIPT_DIR/daily-palworld-maintenance.sh"
-install -o root -g root -m 0755 "$STAGING_DIR/scripts/graceful-stop-palworld.sh" "$SCRIPT_DIR/graceful-stop-palworld.sh"
-install -o root -g root -m 0755 "$STAGING_DIR/scripts/palworld-control" /usr/local/sbin/palworld-control
-install -o root -g root -m 0755 "$STAGING_DIR/scripts/palworld-discord-configure" /usr/local/sbin/palworld-discord-configure
-install -o root -g root -m 0755 "$STAGING_DIR/scripts/palworld-rest-firewall" "$SCRIPT_DIR/palworld-rest-firewall"
-install -o root -g root -m 0644 "$STAGING_DIR/scripts/palworld_manager.py" "$SCRIPT_DIR/palworld_manager.py"
-install -o root -g root -m 0755 "$STAGING_DIR/scripts/palworld-idle-watcher.py" "$SCRIPT_DIR/palworld-idle-watcher.py"
-install -o root -g root -m 0755 "$STAGING_DIR/scripts/palworld-discord-bot.py" "$SCRIPT_DIR/palworld-discord-bot.py"
-if [[ -f "$CONFIG_DIR/palworld.env" ]]; then
-  config_backup="$CONFIG_DIR/palworld.env.pre-idle-discord-$(date +%Y%m%d-%H%M%S)"
-  install -o root -g root -m 0640 "$CONFIG_DIR/palworld.env" "$config_backup"
-  log "Preserved existing configuration and created $(basename "$config_backup")."
-  upgrade_header_written=0
-  while IFS= read -r default_line; do
-    [[ "$default_line" =~ ^([A-Z][A-Z0-9_]*)= ]] || continue
-    default_key="${BASH_REMATCH[1]}"
-    if ! grep -q "^${default_key}=" "$CONFIG_DIR/palworld.env"; then
-      if (( upgrade_header_written == 0 )); then
-        printf '\n# Added by idle watcher / Discord Bot upgrade.\n' >> "$CONFIG_DIR/palworld.env"
-        upgrade_header_written=1
-      fi
-      printf '%s\n' "$default_line" >> "$CONFIG_DIR/palworld.env"
-    fi
-done < "$DEFAULT_CONFIG"
-else
-  install -o root -g palworld-manager -m 0640 "$DEFAULT_CONFIG" "$CONFIG_DIR/palworld.env"
-fi
-chown root:palworld-manager "$CONFIG_DIR/palworld.env"
-chmod 0640 "$CONFIG_DIR/palworld.env"
-chown root:palworld-manager "$CONFIG_DIR"
-chmod 0750 "$CONFIG_DIR"
-install -o root -g root -m 0644 "$STAGING_DIR/README.md" "$BASE_DIR/README.md"
-install -o root -g root -m 0644 "$STAGING_DIR/units/palworld.service" /etc/systemd/system/palworld.service
-install -o root -g root -m 0644 "$STAGING_DIR/units/palworld-backup.service" /etc/systemd/system/palworld-backup.service
-install -o root -g root -m 0644 "$STAGING_DIR/units/palworld-backup.timer" /etc/systemd/system/palworld-backup.timer
-install -o root -g root -m 0644 "$STAGING_DIR/units/palworld-maintenance.service" /etc/systemd/system/palworld-maintenance.service
-install -o root -g root -m 0644 "$STAGING_DIR/units/palworld-idle-watcher.service" /etc/systemd/system/palworld-idle-watcher.service
-install -o root -g root -m 0644 "$STAGING_DIR/units/palworld-discord-bot.service" /etc/systemd/system/palworld-discord-bot.service
-install -o root -g root -m 0644 "$STAGING_DIR/units/palworld-rest-firewall.service" /etc/systemd/system/palworld-rest-firewall.service
-install -o root -g root -m 0440 "$STAGING_DIR/config/palworld-manager.sudoers" /etc/sudoers.d/palworld-manager
+RENDER_DIR="$(mktemp -d)"
+cleanup_render() { rm -rf -- "$RENDER_DIR"; }
+trap cleanup_render EXIT
+python3 "$MANAGER" --config-dir "$CONFIG_SOURCE_DIR" --render-units "$STAGING_DIR/units" "$RENDER_DIR"
+for unit_file in "$RENDER_DIR"/*; do
+  install -o root -g root -m 0644 "$unit_file" "/etc/systemd/system/$(basename -- "$unit_file")"
+done
+sed "s/@MANAGER_USER@/$MANAGER_USER/g" "$STAGING_DIR/config/palworld-manager.sudoers" > "$RENDER_DIR/palworld-manager.sudoers"
+install -o root -g root -m 0440 "$RENDER_DIR/palworld-manager.sudoers" /etc/sudoers.d/palworld-manager
 visudo -cf /etc/sudoers.d/palworld-manager
 
-if [[ ! -x "$VENV_DIR/bin/python" ]]; then
-  python3 -m venv "$VENV_DIR"
-fi
+[[ -x "$VENV_DIR/bin/python" ]] || python3 -m venv "$VENV_DIR"
 "$VENV_DIR/bin/pip" install --disable-pip-version-check --requirement "$STAGING_DIR/requirements.txt"
 
 refresh_steam_metadata() {
-  log 'Refreshing Steam app metadata as palworld.'
-  runuser -u palworld -- env HOME="$SERVER_DIR" "$STEAMCMD" \
-    +@sSteamCmdForcePlatformType linux \
-    +login anonymous \
-    +app_info_update 1 \
-    +app_info_print "$STEAM_APP_ID" \
-    +quit || log 'Steam metadata refresh returned a non-zero status; continuing to app update.'
+  log "Refreshing Steam app metadata as $SERVICE_USER."
+  runuser -u "$SERVICE_USER" -- env HOME="$SERVER_DIR" "$STEAMCMD" \
+    +@sSteamCmdForcePlatformType linux +login anonymous +app_info_update 1 \
+    +app_info_print "$STEAM_APP_ID" +quit ||
+    log 'Steam metadata refresh returned non-zero; continuing to app update.'
 }
-
 install_palworld_app() {
-  log 'Downloading/updating Palworld Dedicated Server as palworld.'
-  runuser -u palworld -- env HOME="$SERVER_DIR" "$STEAMCMD" \
-    +@sSteamCmdForcePlatformType linux \
-    +force_install_dir "$SERVER_DIR" \
-    +login anonymous \
-    +app_update "$STEAM_APP_ID" validate \
-    +quit
+  log 'Downloading/updating Palworld Dedicated Server.'
+  runuser -u "$SERVICE_USER" -- env HOME="$SERVER_DIR" "$STEAMCMD" \
+    +@sSteamCmdForcePlatformType linux +force_install_dir "$SERVER_DIR" \
+    +login anonymous +app_update "$STEAM_APP_ID" validate +quit
 }
 
 refresh_steam_metadata
 install_palworld_app || log 'Initial Steam app update returned a non-zero status.'
-
 if [[ ! -x "$SERVER_DIR/PalServer.sh" ]]; then
-  log 'PalServer.sh is still missing; clearing only Palworld SteamCMD metadata cache and retrying.'
+  log 'PalServer.sh is missing; clearing only Palworld SteamCMD metadata and retrying.'
   CACHE_DIR="$SERVER_DIR/.local/share/Steam/appcache"
   [[ "$CACHE_DIR" == "$SERVER_DIR/.local/share/Steam/appcache" ]] || die 'Steam cache safety check failed'
   rm -f -- "$CACHE_DIR/appinfo.vdf" "$CACHE_DIR/packageinfo.vdf"
-  refresh_steam_metadata
-  install_palworld_app
+  refresh_steam_metadata; install_palworld_app
 fi
-
 [[ -x "$SERVER_DIR/PalServer.sh" ]] || die 'PalServer.sh was not installed'
 
 systemctl daemon-reload
-systemctl enable palworld.service
-systemctl enable palworld-rest-firewall.service palworld-idle-watcher.service
-
+systemctl enable palworld.service palworld-rest-firewall.service palworld-idle-watcher.service
 log 'Starting Palworld once to create its generated configuration directories.'
 if ! systemctl start palworld.service; then
   journalctl -u palworld.service -n 80 --no-pager >&2 || true
   die 'Palworld service failed to start during initial setup'
 fi
-for _ in $(seq 1 120); do
-  [[ -f "$SETTINGS_FILE" ]] && break
-  sleep 1
-done
+for _ in $(seq 1 120); do [[ -f "$SETTINGS_FILE" ]] && break; sleep 1; done
 if [[ ! -f "$SETTINGS_FILE" ]]; then
   journalctl -u palworld.service -n 80 --no-pager >&2 || true
   systemctl stop palworld.service || true
@@ -194,27 +164,23 @@ if (( HAD_EXISTING_SETTINGS == 1 )); then
   log 'Preserving existing PalWorldSettings.ini and enabling REST API in place.'
 else
   log 'Copying the official default settings for a new installation.'
-  install -o palworld -g palworld -m 0640 "$SERVER_DIR/DefaultPalWorldSettings.ini" "$SETTINGS_FILE"
+  install -o "$SERVICE_USER" -g "$SERVICE_USER" -m 0640 \
+    "$SERVER_DIR/DefaultPalWorldSettings.ini" "$SETTINGS_FILE"
 fi
-"$SCRIPT_DIR/render-settings.sh"
+PALWORLD_CONFIG_DIR="$CONFIG_DIR" "$SCRIPT_DIR/render-settings.sh"
 
-if ! mountpoint -q "$NAS_MOUNT"; then
-  die "NAS is not mounted; refusing to create $NAS_BACKUP_DIR"
+if [[ "$BACKUP_REQUIRE_MOUNT" == true ]]; then
+  mountpoint -q "$BACKUP_MOUNT" || die "backup filesystem is not mounted: $BACKUP_MOUNT"
 fi
-[[ -w "$NAS_MOUNT" ]] || die 'NAS mount is not writable'
-[[ "$NAS_BACKUP_DIR" == "$NAS_MOUNT/palworld-backups" ]] || die 'NAS backup path safety check failed'
-mkdir -p -- "$NAS_BACKUP_DIR"
-
-systemctl enable --now palworld.service
-systemctl enable --now palworld-idle-watcher.service
-systemctl enable --now palworld-backup.timer
-
-if grep -q '^DISCORD_BOT_TOKEN=' "$CONFIG_DIR/palworld.env" &&
-   ! grep -q "^DISCORD_BOT_TOKEN='\?CHANGE_ME" "$CONFIG_DIR/palworld.env"; then
+mkdir -p -- "$BACKUP_DIR"
+systemctl enable --now palworld.service palworld-idle-watcher.service palworld-backup.timer
+DISCORD_TOKEN="$(config_value DISCORD_BOT_TOKEN)"
+if [[ -n "$DISCORD_TOKEN" && "$DISCORD_TOKEN" != CHANGE_ME* ]]; then
   systemctl enable --now palworld-discord-bot.service
 else
   log 'Discord token is not configured; bot service was installed but not started.'
 fi
 
+trap - EXIT; cleanup_render
 log 'Palworld installation and service setup completed.'
-log 'The configured passwords are placeholders and were not displayed.'
+log 'Configured secrets were not displayed.'

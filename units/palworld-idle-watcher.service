@@ -5,18 +5,18 @@ After=network-online.target
 
 [Service]
 Type=simple
-User=palworld-manager
-Group=palworld-manager
-Environment=PALWORLD_CONFIG=/srv/palworld/config/palworld.env
-Environment=PALWORLD_STATE=/var/lib/palworld-manager/idle-state.json
-ExecStart=/srv/palworld/venv/bin/python /srv/palworld/scripts/palworld-idle-watcher.py
+User=@MANAGER_USER@
+Group=@MANAGER_USER@
+Environment=@CONFIG_ENV@
+Environment=@IDLE_STATE_ENV@
+ExecStart=@VENV_PYTHON@ @IDLE_SCRIPT@
 Restart=on-failure
 RestartSec=10s
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict
-ReadWritePaths=/var/lib/palworld-manager
+ReadWritePaths=@STATE_DIR@
 
 [Install]
 WantedBy=multi-user.target

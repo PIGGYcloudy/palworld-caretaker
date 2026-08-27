@@ -5,8 +5,8 @@ Linux 維運工具，重點是安全關服、可恢復備份、閒置自動關�
 遠端操作，不需要常駐公開的 Web 管理面板。
 
 > [!IMPORTANT]
-> 專案目前是準備公開的早期版本，僅驗證於現有 Ubuntu 部署。安裝路徑
-> `/srv/palworld` 與 NAS 備份路徑目前仍為固定值，尚未達到通用一鍵安裝。
+> 專案目前是準備公開的早期版本，僅驗證於現有 Ubuntu 部署。部署設定契約、
+> 安裝器、備份/還原/更新腳本與 systemd unit 已支援任意絕對安裝與備份路徑。
 > 請先閱讀安裝腳本，並在測試主機驗證後再用於重要存檔。
 
 ## 目前功能
@@ -36,10 +36,14 @@ idle watcher（永久在線）      Discord Bot（永久在線）
 
 ## 安全與設定
 
-設定範本是 `config/palworld.env.example`，安裝後的正式設定來源為
-`/srv/palworld/config/palworld.env`。正式設定檔已由 Git 排除，不可提交。
-安裝器升級既有部署時會先建立
-`palworld.env.pre-idle-discord-YYYYMMDD-HHMMSS`，保留原值，只補上缺少的鍵。
+新設定範本依用途拆成 `config/caretaker.env.example`、
+`config/server.env.example` 與 `config/secrets.env.example`，規範與 preflight
+用法見 [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md)。既有
+`/srv/palworld/config/palworld.env` 仍是完整支援的相容來源。正式設定檔已由
+Git 排除，不可提交。
+升級器會先在 `<PALWORLD_INSTALL_ROOT>/backups-local/manager-upgrade-*` 建立受保護
+的設定與 manager safety copy。它不會改寫或追加任何設定層，也不會碰觸存檔與
+外部備份。
 
 ```env
 PALWORLD_REST_API_HOST=127.0.0.1
@@ -97,21 +101,29 @@ sudo /usr/local/sbin/palworld-discord-configure
 
 ## 安裝、啟停與紀錄
 
-目前安裝器以 Ubuntu、systemd、SteamCMD 套件及已掛載的
-`/mnt/qnap-tyt` 為前提。先 clone 或下載專案，在專案根目錄執行：
+安裝器以 Ubuntu、systemd 與 SteamCMD 套件為前提。先複製三個設定範本、
+填入實際值並保護 secrets，再在專案根目錄執行：
 
 ```bash
-sudo bash ./install-palworld.sh
-sudoedit /srv/palworld/config/palworld.env
-sudo /srv/palworld/scripts/render-settings.sh
+mkdir -p ./deployment-config
+cp config/{caretaker,server,secrets}.env.example ./deployment-config/
+mv ./deployment-config/caretaker.env.example ./deployment-config/caretaker.env
+mv ./deployment-config/server.env.example ./deployment-config/server.env
+mv ./deployment-config/secrets.env.example ./deployment-config/secrets.env
+chmod 0600 ./deployment-config/secrets.env
+# 編輯 deployment-config/*.env 後：
+sudo bash ./install-palworld.sh --config-dir "$PWD/deployment-config"
+sudo "<PALWORLD_INSTALL_ROOT>/scripts/render-settings.sh"
 sudo systemctl restart palworld.service palworld-idle-watcher.service
 sudo systemctl enable --now palworld-discord-bot.service
 ```
 
-升級既有 `/srv/palworld` 管理元件而不重新下載遊戲，可使用：
+升級既有管理元件而不重新下載遊戲時，必須明確提供已部署的設定目錄；安裝
+根目錄、帳號、state 與所有衍生路徑都從三層設定契約解析：
 
 ```bash
-sudo bash ./upgrade-palworld-manager.sh
+sudo bash ./upgrade-palworld-manager.sh \
+  --config-dir "<PALWORLD_INSTALL_ROOT>/config"
 ```
 
 常用操作：
@@ -123,8 +135,39 @@ sudo systemctl restart palworld-idle-watcher.service palworld-discord-bot.servic
 sudo journalctl -u palworld.service -f
 sudo journalctl -u palworld-idle-watcher.service -f
 sudo journalctl -u palworld-discord-bot.service -f
-sudo /srv/palworld/scripts/backup-palworld.sh
+sudo "<PALWORLD_INSTALL_ROOT>/scripts/backup-palworld.sh"
 ```
+
+## 診斷與安全解除安裝
+
+診斷是唯讀操作，會檢查設定／權限／備份 mount policy、必要檔案、systemd
+unit 狀態，並在遊戲運行時測試 localhost REST API。輸出不包含密碼或 token：
+
+```bash
+sudo "<PALWORLD_INSTALL_ROOT>/scripts/diagnose-palworld.sh"
+sudo "<PALWORLD_INSTALL_ROOT>/scripts/diagnose-palworld.sh" --json
+```
+
+解除安裝必須指定已部署的設定目錄與層級：
+
+```bash
+# 移除 caretaker、systemd units、venv 與管理腳本；保留遊戲、設定、世界與備份
+sudo "<PALWORLD_INSTALL_ROOT>/uninstall-palworld.sh" \
+  --config-dir "<PALWORLD_INSTALL_ROOT>/config" --level manager
+
+# 再移除遊戲程式；仍保留 Pal/Saved、設定與所有備份
+sudo "<PALWORLD_INSTALL_ROOT>/uninstall-palworld.sh" \
+  --config-dir "<PALWORLD_INSTALL_ROOT>/config" --level game
+
+# 移除設定與世界資料；精確確認字串為必要條件
+sudo "<PALWORLD_INSTALL_ROOT>/uninstall-palworld.sh" \
+  --config-dir "<PALWORLD_INSTALL_ROOT>/config" --level all \
+  --confirm 'DELETE PALWORLD DATA'
+```
+
+三個層級都不刪除 `PALWORLD_BACKUP_DIR`，也保留安裝根目錄內的
+`backups-local`。解除安裝不會自行刪除設定中命名的系統帳號，避免誤刪原本就
+存在或仍由其他服務共用的帳號。
 
 暫停自動關服：將 `PALWORLD_IDLE_SHUTDOWN_ENABLED=false`，再重啟 watcher。只觀察不動作：改為 `PALWORLD_IDLE_WATCHER_DRY_RUN=true`。
 
@@ -132,11 +175,15 @@ API 不通時，先查看遊戲 log、確認 `RESTAPIEnabled=True`、8212 loopba
 
 ## 備份與還原
 
-每日 04:30 的維護會先透過本機 REST API 存檔並要求正常關服，才取得一致 snapshot，以 rsync 保存 `SaveGames` 與 `Config` 到 `/mnt/qnap-tyt/palworld-backups`，再以 SteamCMD 驗證並更新伺服器，預設保留 14 版。若正常關服失敗，維護會中止，不會以強制終止取代。若維護開始前伺服器正在運行，完成後才會重新啟動；開始前已關閉則維持關閉。還原仍使用：
+維護時間、備份目的地與保留版本數分別由 `BACKUP_TIME`、
+`PALWORLD_BACKUP_DIR` 與 `BACKUP_RETENTION_COUNT` 決定。維護會先透過本機
+REST API 存檔並要求正常關服，才取得一致 snapshot，再以 SteamCMD 驗證並
+更新伺服器。若正常關服失敗，維護會中止，不會以強制終止取代。若維護開始
+前伺服器正在運行，完成後才會重新啟動；開始前已關閉則維持關閉。還原使用：
 
 ```bash
-sudo /srv/palworld/scripts/restore-palworld.sh
-sudo /srv/palworld/scripts/restore-palworld.sh restore palworld-YYYYMMDD-HHMMSS
+sudo "<PALWORLD_INSTALL_ROOT>/scripts/restore-palworld.sh"
+sudo "<PALWORLD_INSTALL_ROOT>/scripts/restore-palworld.sh" restore palworld-YYYYMMDD-HHMMSS
 ```
 
 `palworld.service` 維持 `Restart=on-failure` 並將正常結束碼 0、130、143 視為成功。官方 graceful shutdown 正常退出時不會被拉起；crash 才有限度重啟。若實機版本的 API shutdown 產生其他 exit code，先保持 dry-run 並以 journal 驗證，必要時將該已確認的正常碼加入 `SuccessExitStatus`。

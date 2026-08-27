@@ -5,17 +5,18 @@ After=network-online.target
 
 [Service]
 Type=simple
-User=palworld-manager
-Group=palworld-manager
-Environment=PALWORLD_CONFIG=/srv/palworld/config/palworld.env
-Environment=PALWORLD_STATE=/var/lib/palworld-manager/idle-state.json
-ExecStart=/srv/palworld/venv/bin/python /srv/palworld/scripts/palworld-discord-bot.py
+User=@MANAGER_USER@
+Group=@MANAGER_USER@
+Environment=@CONFIG_ENV@
+Environment=@IDLE_STATE_ENV@
+Environment=@MAINTENANCE_STATE_ENV@
+ExecStart=@VENV_PYTHON@ @DISCORD_SCRIPT@
 Restart=always
 RestartSec=10s
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict
-ReadWritePaths=/var/lib/palworld-manager /run/lock
+ReadWritePaths=@STATE_DIR@ /run/lock
 
 [Install]
 WantedBy=multi-user.target

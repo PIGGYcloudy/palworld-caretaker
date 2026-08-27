@@ -2,7 +2,7 @@
 config/palworld.env
 *.env
 !.env.example
-!config/palworld.env.example
+!config/*.env.example
 
 # Local backups and pre-upgrade snapshots
 .local-backups/

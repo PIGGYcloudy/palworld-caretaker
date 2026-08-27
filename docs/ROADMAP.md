@@ -230,3 +230,8 @@ Docker 可以作為 Windows 的過渡選項，但不等同完整 Windows 原生�
 5. 擴充測試並發布 `v0.1.0`。
 
 Web UI、Docker 與 Windows 先以 milestone 追蹤，避免 v0.1 範圍失控。
+
+目前 repository 已完成前三項與第 4 項的首版：通用路徑／三層設定契約、可
+設定且 fail-closed 的備份目的地、可重複執行的安裝／升級流程，以及唯讀
+diagnose 與保護備份的分級 uninstall。下一批以實機 Ubuntu 升級／解除安裝
+驗證、失敗 rollback 與 v0.1.0 發佈文件為主。

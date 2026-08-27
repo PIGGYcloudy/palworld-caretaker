@@ -9,11 +9,11 @@ StartLimitBurst=3
 
 [Service]
 Type=simple
-User=palworld
-Group=palworld
-WorkingDirectory=/srv/palworld/server
-Environment=HOME=/srv/palworld/server
-ExecStart=/srv/palworld/server/PalServer.sh
+User=@SERVICE_USER@
+Group=@SERVICE_USER@
+WorkingDirectory=@SERVER_ROOT@
+Environment=@HOME_ENV@
+ExecStart=@PALSERVER@
 Restart=on-failure
 RestartSec=15s
 SuccessExitStatus=0 130 143
@@ -33,7 +33,7 @@ ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true
-ReadWritePaths=/srv/palworld/server
+ReadWritePaths=@SERVER_ROOT@
 
 [Install]
 WantedBy=multi-user.target

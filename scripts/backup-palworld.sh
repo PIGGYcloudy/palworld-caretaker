@@ -3,13 +3,21 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 SERVICE='palworld.service'
-BASE_DIR='/srv/palworld'
-SERVER_ROOT="$BASE_DIR/server"
+SCRIPT_HOME="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG_DIR="${PALWORLD_CONFIG_DIR:-$(dirname -- "$SCRIPT_HOME")/config}"
+MANAGER="$SCRIPT_HOME/palworld_manager.py"
+[[ -r "$MANAGER" ]] || { printf 'ERROR: configuration manager is missing: %s\n' "$MANAGER" >&2; exit 1; }
+python3 "$MANAGER" --config-dir "$CONFIG_DIR" || exit $?
+config_value() {
+  python3 "$MANAGER" --config-dir "$CONFIG_DIR" --get "$1"
+}
+SERVER_ROOT="$(config_value PALWORLD_SERVER_ROOT)"
 SAVE_ROOT="$SERVER_ROOT/Pal/Saved/SaveGames"
 CONFIG_ROOT="$SERVER_ROOT/Pal/Saved/Config"
-ENV_FILE="$BASE_DIR/config/palworld.env"
-NAS_MOUNT='/mnt/qnap-tyt'
-BACKUP_ROOT="$NAS_MOUNT/palworld-backups"
+BACKUP_ROOT="$(config_value PALWORLD_BACKUP_DIR)"
+BACKUP_MOUNT="$(config_value PALWORLD_BACKUP_MOUNT)"
+BACKUP_REQUIRE_MOUNT="$(config_value PALWORLD_BACKUP_REQUIRE_MOUNT)"
+BACKUP_RETENTION_COUNT="$(config_value BACKUP_RETENTION_COUNT)"
 LOCK_FILE='/run/lock/palworld-backup.lock'
 
 log() {
@@ -22,22 +30,23 @@ die() {
 }
 
 (( EUID == 0 )) || die 'run this script with sudo'
-[[ -r "$ENV_FILE" ]] || die 'configuration file is missing'
-# shellcheck disable=SC1090
-source "$ENV_FILE"
-: "${BACKUP_RETENTION_COUNT:?BACKUP_RETENTION_COUNT is required}"
-[[ "$BACKUP_RETENTION_COUNT" =~ ^[1-9][0-9]*$ ]] || die 'BACKUP_RETENTION_COUNT must be a positive integer'
-(( BACKUP_RETENTION_COUNT <= 1000 )) || die 'BACKUP_RETENTION_COUNT is unreasonably large'
-
-[[ "$BACKUP_ROOT" == "$NAS_MOUNT/palworld-backups" ]] || die 'backup path safety check failed'
 exec 9>"$LOCK_FILE"
 flock -n 9 || die 'another Palworld backup is already running'
 
-# This check intentionally happens before mkdir. A missing NAS mount must never
-# turn the mountpoint directory into a local backup destination.
-mountpoint -q "$NAS_MOUNT" || die "NAS is not mounted: $NAS_MOUNT"
-[[ -d "$NAS_MOUNT" ]] || die 'NAS mount path is not a directory'
-[[ -w "$NAS_MOUNT" ]] || die 'NAS mount is not writable'
+if [[ "$BACKUP_REQUIRE_MOUNT" == true ]]; then
+  # This check intentionally happens before mkdir. A missing mount must never
+  # turn the mountpoint directory into a local backup destination.
+  mountpoint -q "$BACKUP_MOUNT" || die "backup filesystem is not mounted: $BACKUP_MOUNT"
+  [[ -d "$BACKUP_MOUNT" ]] || die 'backup mount path is not a directory'
+  [[ -w "$BACKUP_MOUNT" ]] || die 'backup mount is not writable'
+  SPACE_ROOT="$BACKUP_MOUNT"
+else
+  SPACE_ROOT="$BACKUP_ROOT"
+  while [[ ! -e "$SPACE_ROOT" ]]; do
+    SPACE_ROOT="$(dirname -- "$SPACE_ROOT")"
+  done
+  [[ -d "$SPACE_ROOT" && -w "$SPACE_ROOT" ]] || die 'local backup destination is not writable'
+fi
 
 [[ -d "$SERVER_ROOT" ]] || die 'Palworld server directory is missing'
 [[ -d "$SAVE_ROOT" ]] || die 'Palworld save directory is missing'
@@ -51,10 +60,10 @@ BUILTIN_BACKUP_DIR="$(find "$SAVE_ROOT" -type d -name backup -print -quit)"
 mapfile -t source_sizes < <(du -sx --bytes "$SAVE_ROOT" "$CONFIG_ROOT" | awk '{print $1}')
 (( ${#source_sizes[@]} == 2 )) || die 'could not measure Palworld source size'
 SOURCE_BYTES=$(( source_sizes[0] + source_sizes[1] ))
-AVAILABLE_KIB="$(df -Pk "$NAS_MOUNT" | awk 'NR == 2 {print $4}')"
-[[ "$AVAILABLE_KIB" =~ ^[0-9]+$ ]] || die 'could not measure NAS free space'
+AVAILABLE_KIB="$(df -Pk "$SPACE_ROOT" | awk 'NR == 2 {print $4}')"
+[[ "$AVAILABLE_KIB" =~ ^[0-9]+$ ]] || die 'could not measure backup free space'
 REQUIRED_BYTES=$(( SOURCE_BYTES * 2 + 1073741824 ))
-(( AVAILABLE_KIB * 1024 >= REQUIRED_BYTES )) || die 'NAS free space is insufficient'
+(( AVAILABLE_KIB * 1024 >= REQUIRED_BYTES )) || die 'backup free space is insufficient'
 
 mkdir -p -- "$BACKUP_ROOT"
 

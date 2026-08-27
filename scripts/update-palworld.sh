@@ -2,10 +2,18 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-BASE_DIR='/srv/palworld'
-SERVER_DIR="$BASE_DIR/server"
+SCRIPT_HOME="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG_DIR="${PALWORLD_CONFIG_DIR:-$(dirname -- "$SCRIPT_HOME")/config}"
+MANAGER="$SCRIPT_HOME/palworld_manager.py"
+[[ -r "$MANAGER" ]] || { printf 'ERROR: configuration manager is missing: %s\n' "$MANAGER" >&2; exit 1; }
+python3 "$MANAGER" --config-dir "$CONFIG_DIR" || exit $?
+config_value() {
+  python3 "$MANAGER" --config-dir "$CONFIG_DIR" --get "$1"
+}
+SERVER_DIR="$(config_value PALWORLD_SERVER_ROOT)"
+SERVICE_USER="$(config_value PALWORLD_SERVICE_USER)"
 STEAM_APP_ID=2394010
-GRACEFUL_STOP_SCRIPT="$BASE_DIR/scripts/graceful-stop-palworld.sh"
+GRACEFUL_STOP_SCRIPT="$SCRIPT_HOME/graceful-stop-palworld.sh"
 
 die() {
   printf 'ERROR: %s\n' "$*" >&2
@@ -38,17 +46,17 @@ if systemctl is-active --quiet palworld.service; then
   printf '[%s] Saving and gracefully stopping Palworld before update.\n' "$(date --iso-8601=seconds)"
   "$GRACEFUL_STOP_SCRIPT"
   printf '[%s] Creating a safety backup before update.\n' "$(date --iso-8601=seconds)"
-  "$BASE_DIR/scripts/backup-palworld.sh" --pre-update
+  "$SCRIPT_HOME/backup-palworld.sh" --pre-update
 fi
 
 printf '[%s] Updating Palworld Dedicated Server with SteamCMD.\n' "$(date --iso-8601=seconds)"
-runuser -u palworld -- env HOME="$SERVER_DIR" "$STEAMCMD" \
+runuser -u "$SERVICE_USER" -- env HOME="$SERVER_DIR" "$STEAMCMD" \
   +@sSteamCmdForcePlatformType linux \
   +login anonymous \
   +app_info_update 1 \
   +app_info_print "$STEAM_APP_ID" \
   +quit || true
-runuser -u palworld -- env HOME="$SERVER_DIR" "$STEAMCMD" \
+runuser -u "$SERVICE_USER" -- env HOME="$SERVER_DIR" "$STEAMCMD" \
   +@sSteamCmdForcePlatformType linux \
   +force_install_dir "$SERVER_DIR" \
   +login anonymous \

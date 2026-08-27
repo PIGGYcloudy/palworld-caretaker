@@ -2,9 +2,13 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-BASE_DIR='/srv/palworld'
 SERVICE='palworld.service'
-ENV_FILE="$BASE_DIR/config/palworld.env"
+SCRIPT_HOME="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG_DIR="${PALWORLD_CONFIG_DIR:-$(dirname -- "$SCRIPT_HOME")/config}"
+MANAGER="$SCRIPT_HOME/palworld_manager.py"
+[[ -r "$MANAGER" ]] || { printf 'ERROR: configuration manager is missing\n' >&2; exit 1; }
+python3 "$MANAGER" --config-dir "$CONFIG_DIR" || exit $?
+config_value() { python3 "$MANAGER" --config-dir "$CONFIG_DIR" --get "$1"; }
 
 log() {
   printf '[%s] %s\n' "$(date --iso-8601=seconds)" "$*"
@@ -21,23 +25,12 @@ if ! systemctl is-active --quiet "$SERVICE"; then
   exit 0
 fi
 
-[[ -r "$ENV_FILE" ]] || die 'configuration file is missing'
-# This root-owned configuration is also used by the existing backup tooling.
-# shellcheck disable=SC1090
-source "$ENV_FILE"
-: "${ADMIN_PASSWORD:?ADMIN_PASSWORD is required}"
-REST_HOST="${PALWORLD_REST_API_HOST:-127.0.0.1}"
-REST_PORT="${PALWORLD_REST_API_PORT:-8212}"
-REST_USERNAME="${PALWORLD_REST_API_USERNAME:-admin}"
-SHUTDOWN_WAIT="${PALWORLD_SHUTDOWN_WAIT_SECONDS:-30}"
+ADMIN_PASSWORD="$(config_value ADMIN_PASSWORD)"
+REST_HOST="$(config_value PALWORLD_REST_API_HOST)"
+REST_PORT="$(config_value PALWORLD_REST_API_PORT)"
+REST_USERNAME="$(config_value PALWORLD_REST_API_USERNAME)"
+SHUTDOWN_WAIT="$(config_value PALWORLD_SHUTDOWN_WAIT_SECONDS)"
 
-[[ "$REST_HOST" == '127.0.0.1' || "$REST_HOST" == 'localhost' || "$REST_HOST" == '::1' ]] || die 'REST API host must be localhost'
-if [[ ! "$REST_PORT" =~ ^[1-9][0-9]*$ ]] || (( REST_PORT > 65535 )); then
-  die 'REST API port is invalid'
-fi
-if [[ ! "$SHUTDOWN_WAIT" =~ ^[1-9][0-9]*$ ]] || (( SHUTDOWN_WAIT > 300 )); then
-  die 'shutdown wait is invalid'
-fi
 command -v curl >/dev/null || die 'curl is required'
 
 if [[ "$REST_HOST" == '::1' ]]; then

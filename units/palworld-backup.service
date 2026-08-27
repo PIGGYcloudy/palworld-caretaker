@@ -1,11 +1,12 @@
 [Unit]
-Description=Backup Palworld Dedicated Server to QNAP NAS
+Description=Backup Palworld Dedicated Server
 Wants=network-online.target
 After=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/srv/palworld/scripts/backup-palworld.sh
+Environment=@CONFIG_DIR_ENV@
+ExecStart=@BACKUP_SCRIPT@
 TimeoutStartSec=30min
 Nice=10
 IOSchedulingClass=best-effort

@@ -1,14 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-CONFIG='/srv/palworld/config/palworld.env'
-[[ -r "$CONFIG" ]] || exit 1
-# shellcheck disable=SC1090
-source "$CONFIG"
-PORT="${PALWORLD_REST_API_PORT:-8212}"
-if [[ ! "$PORT" =~ ^[1-9][0-9]*$ ]] || (( PORT > 65535 )); then
-  exit 1
-fi
+SCRIPT_HOME="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG_DIR="${PALWORLD_CONFIG_DIR:-$(dirname -- "$SCRIPT_HOME")/config}"
+MANAGER="$SCRIPT_HOME/palworld_manager.py"
+[[ -r "$MANAGER" ]] || exit 1
+python3 "$MANAGER" --config-dir "$CONFIG_DIR" || exit $?
+PORT="$(python3 "$MANAGER" --config-dir "$CONFIG_DIR" --get PALWORLD_REST_API_PORT)"
 action="${1:-}"
 [[ "$action" == start || "$action" == stop ]] || exit 2
 
