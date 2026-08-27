@@ -16,9 +16,10 @@ idle watcher 仍是平台 adapter／操作入口，但共用相同的 REST、生
 ### Python 核心與跨平台邊界
 
 - 新增 `src/palworld_caretaker` 套件，提供設定解析與驗證、Palworld REST
-  API client、服務生命週期/診斷、SteamCMD adapter，以及 Backup/Restore
-  engine；核心邏輯不依賴 systemd、shell 或第三方套件，平台差異留在入口
-  adapter。
+  API client、服務生命週期、診斷、SteamCMD adapter，以及 Backup/Restore
+  engine；`config.py`、`rest.py`、`backup.py`、`diagnostics.py`、
+  `operations.py` 與 `web.py` 都不依賴第三方套件，systemd、shell 與 Discord
+  差異留在入口 adapter。
 - REST client 提供型別化的玩家、metrics、save、shutdown 與 announce 操作，
   嚴格驗證 loopback、redirect、transport error、HTTP 回應與 JSON schema；
   不確定的玩家狀態不會被當成「無人」。
@@ -48,6 +49,8 @@ idle watcher 仍是平台 adapter／操作入口，但共用相同的 REST、生
   `PALWORLD_WEB_UI_PASSWORD`，未設定時相容地使用 `ADMIN_PASSWORD`。
 - 變更請求要求 JSON、同源 `Origin` 與行程內 CSRF token，並加入 no-cache、
   CSP、`X-Frame-Options` 等瀏覽器防護；錯誤回應不洩漏 secrets 或內部命令。
+- `secrets.env` 在安裝/升級時標準化為 `root:<PALWORLD_MANAGER_USER>`、
+  `0640`；Web UI 帳密仍必須透過 Basic Auth 驗證，無密碼時拒絕啟動。
 
 ### 備份、還原與 preflight
 
@@ -64,13 +67,17 @@ idle watcher 仍是平台 adapter／操作入口，但共用相同的 REST、生
 
 ### Discord、idle watcher 與維運流程
 
-- Discord Bot 改用共用 Python 核心與生命週期流程，`/pal start|status|players|
-  stop|update` 的安全關服、備份、更新與重啟共用操作鎖，並保留 allowlist、
-  管理員確認與 per-user/command cooldown。
+- Discord Bot 改用共用 Python 核心與生命週期流程，新增 `/pal backup`、
+  `/pal backups` 與 `/pal diagnose`；`/pal start|status|players|stop|update`
+  的安全關服、備份、更新與重啟共用操作鎖，並保留 allowlist、管理員確認與
+  per-user/command cooldown。每個變更指令同時以全域 `flock` 與
+  `systemd is-active` 維護狀態檢查保護。
 - idle watcher 在最後一次玩家檢查、save 與 shutdown 之間持有全域鎖；鎖忙碌
   時延後重試，不會誤觸其他備份、更新或 Web 操作。
-- 安裝器與升級器部署 operation lock/tmpfiles、Web UI 與新的核心檔案；設定
-  preflight、diagnose、服務狀態 fail-closed，並保留非預設路徑與 legacy
+- 安裝器與升級器部署 operation lock/tmpfiles、Web UI 與新的核心檔案；Python
+  核心以 root:root 的受控 release 發布到 `<install>/packages`，目錄/套件檔案
+  維持 `0755`/`0644`，再以原子 symlink 切換 `packages/current`，避免半套更新。
+  設定 preflight、diagnose、服務狀態 fail-closed，並保留非預設路徑與 legacy
   `palworld.env` 相容性。
 
 ### 測試與發布
@@ -140,4 +147,5 @@ Ubuntu 24.04 systemd 部署工具鏈。
   Bash syntax 與 ShellCheck；涵蓋設定/路徑契約、systemd renderer、生命週期、
   備份/還原失敗邊界、升級、解除安裝及 release 封包潔淨度。
 
+[0.2.0]: https://github.com/PIGGYcloudy/palworld-caretaker/releases/tag/v0.2.0
 [0.1.0]: https://github.com/PIGGYcloudy/palworld-caretaker/releases/tag/v0.1.0

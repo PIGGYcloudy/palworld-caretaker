@@ -58,6 +58,11 @@ Web UI 一律使用 HTTP Basic Auth。帳號由 `caretaker.env` 的
 `PALWORLD_WEB_UI_PASSWORD` 留空時會使用 `ADMIN_PASSWORD`。多使用者主機建議
 設定獨立 Web UI 密碼。
 
+安裝器會把 Python 核心放在 `<PALWORLD_INSTALL_ROOT>/packages` 的 root-owned
+受控 release 中：release 目錄與套件目錄為 `0755`，Python 檔案為 `0644`，
+`packages/current` 以原子 symlink 指向完整 release。入口腳本維持固定路徑，
+因此升級不會讓執行中的程序看到半套套件。
+
 ### 備份目的地
 
 一般本機磁碟可設定為：
@@ -138,6 +143,30 @@ Palworld client 連線測試 UDP port。接著手動建立並列出第一份備�
 ```bash
 sudo "<PALWORLD_INSTALL_ROOT>/scripts/backup-palworld.sh"
 sudo "<PALWORLD_INSTALL_ROOT>/scripts/restore-palworld.sh" list
+```
+
+### 開啟 Local Web UI
+
+確認服務為 `active (running)` 後，在遊戲主機本機瀏覽器開啟
+[`http://127.0.0.1:8765/`](http://127.0.0.1:8765/)：
+
+```bash
+sudo systemctl enable --now palworld-web-ui.service
+sudo systemctl status palworld-web-ui.service --no-pager
+```
+
+瀏覽器會要求 HTTP Basic Auth。帳號是 `PALWORLD_WEB_UI_USERNAME`（預設
+`palworld-manager`），密碼是 `PALWORLD_WEB_UI_PASSWORD`；若該欄位留空，
+才會 fallback 到 `ADMIN_PASSWORD`。Basic Auth 失敗時不會洩漏頁面或 CSRF
+token。建議使用獨立的 `PALWORLD_WEB_UI_PASSWORD`，修改 `secrets.env` 後以
+`root:<PALWORLD_MANAGER_USER>`、`0640` 保存並重啟 Web UI。
+
+Web UI 永遠只監聽 IPv4 loopback，不能直接從其他主機連線，也不可用 reverse
+proxy 或防火牆公開。若需要遠端維運，先從管理者電腦建立 SSH tunnel，再在
+管理者瀏覽器開啟同一個 URL，並照常輸入 Basic Auth：
+
+```bash
+ssh -N -L 8765:127.0.0.1:8765 user@palworld-host
 ```
 
 正式維護前可先只檢查備份來源、mount 與可用空間，不會存檔、停止或啟動服務：

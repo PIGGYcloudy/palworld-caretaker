@@ -5,6 +5,11 @@ units；不下載遊戲、不改寫設定層、不刪除世界存檔，也不碰
 本指南假設既有部署的設定位於 `/srv/palworld/config`，包括舊式單一
 `palworld.env` 或新的三層設定檔。
 
+v0.2.0 將 REST、備份/還原、診斷、跨行程鎖與 loopback Web UI 的安全決策
+集中在 `src/palworld_caretaker/` Python 核心；systemd、Bash 與 Discord 只作為
+平台入口與 adapter。升級會保留既有設定與世界資料，並讓所有入口共用同一套
+fail-closed 契約。
+
 ## 升級前備份
 
 1. 確認目前服務與設定位置：
@@ -55,7 +60,10 @@ sudo bash ./upgrade-palworld-manager.sh \
 `/srv/palworld/backups-local/manager-upgrade-YYYYMMDD-HHMMSS/` 建立 mode
 `0700` safety copy，之後才替換管理工具與 units。若遊戲原本運行，套用新的
 unit 與 REST 設定後會重新啟動；原本關閉則保持關閉。Local Web UI 會啟用並只
-綁定 `127.0.0.1:8765`。Discord token 未設定時 Bot 會保持停用。
+綁定 `127.0.0.1:8765`。Python 核心會先完整發布到
+`/srv/palworld/packages/release-*`，再以原子 symlink 切換
+`/srv/palworld/packages/current`；release 由 `root:root` 擁有，目錄/檔案權限
+為 `0755`/`0644`。Discord token 未設定時 Bot 會保持停用。
 
 非預設安裝路徑必須改傳實際部署設定目錄；升級器會拒絕 staging 設定或推測
 路徑：
@@ -79,6 +87,37 @@ sudo /srv/palworld/scripts/restore-palworld.sh list
 確認以下事項：設定檔內容與權限未變、世界仍可載入、REST port 只監聽
 localhost、備份可建立且服務回到升級前的開關狀態。Discord 使用者另以
 `/pal status` 驗證 allowlist；閒置 watcher 先維持 dry-run 觀察一個 lifecycle。
+
+### 升級後使用 Local Web UI
+
+確認 `palworld-web-ui.service` 為 active 後，在伺服器本機瀏覽器開啟
+[`http://127.0.0.1:8765/`](http://127.0.0.1:8765/)：
+
+```bash
+sudo systemctl status palworld-web-ui.service --no-pager
+```
+
+頁面與 `/api/*` 都先要求 HTTP Basic Auth。帳號由
+`PALWORLD_WEB_UI_USERNAME`（預設 `palworld-manager`）指定，密碼由
+`PALWORLD_WEB_UI_PASSWORD` 指定；legacy 設定或留空時會相容地使用
+`ADMIN_PASSWORD`。若要在升級後切換成獨立密碼，編輯已部署的
+`/srv/palworld/config/secrets.env`，保持 `root:<PALWORLD_MANAGER_USER>`、`0640`，再執行：
+
+```bash
+sudo systemctl restart palworld-web-ui.service
+```
+
+備份、啟動、安全關閉與重啟按鈕都會受全域 operation `flock` 保護，並在實際
+變更前再次確認 maintenance service 狀態；save 或狀態檢查失敗時會拒絕操作。
+Web UI 固定只監聽 `127.0.0.1`，不可用 reverse proxy、公開防火牆或 DNS 對外
+暴露。遠端管理請使用 SSH tunnel 後仍開啟同一個 URL 並輸入 Basic Auth：
+
+```bash
+ssh -N -L 8765:127.0.0.1:8765 user@palworld-host
+```
+
+Discord v0.2.0 另提供 `/pal backup`、`/pal backups` 與管理員限定的
+`/pal diagnose`；這些指令也會遵守相同的 maintenance guard 與全域操作鎖。
 
 升級後的 backup、restore、update、Web UI、Discord 與 idle watcher 會共用
 `/run/palworld-caretaker/operation.lock`。若升級或另一項維護正在進行，並行

@@ -4,7 +4,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 import subprocess
-import time
 from typing import Callable, Protocol
 
 from .errors import ApiError
@@ -41,14 +40,6 @@ class ServerStatus:
     @property
     def running(self) -> bool:
         return self.service == ServiceState.ACTIVE or self.process_running is True
-
-
-@dataclass(frozen=True)
-class ServerDiagnostic:
-    """One timestamped, secret-free observation of server health."""
-    observed_at: float
-    status: ServerStatus
-    detail: str
 
 
 class SystemdServiceController:
@@ -117,17 +108,10 @@ class ServerLifecycle:
     def stop(self) -> None: self.service.stop()
 
 
-class ServerDiagnostics:
-    """Collect state once, with all platform concerns supplied as adapters."""
-    def __init__(self, lifecycle: ServerLifecycle, *, clock: Callable[[], float] = time.time):
-        self.lifecycle, self.clock = lifecycle, clock
+def __getattr__(name: str) -> object:
+    """Keep the historical service import path compatible."""
+    if name in {"ServerDiagnostic", "ServerDiagnostics"}:
+        from .diagnostics import ServerDiagnostic, ServerDiagnostics
 
-    def collect(self) -> ServerDiagnostic:
-        status = self.lifecycle.status()
-        if status.api_reachable:
-            detail = f"REST reachable; {len(status.players or ())} player(s) online"
-        elif status.running:
-            detail = "server appears running but REST is unavailable"
-        else:
-            detail = "server is not running"
-        return ServerDiagnostic(self.clock(), status, detail)
+        return {"ServerDiagnostic": ServerDiagnostic, "ServerDiagnostics": ServerDiagnostics}[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

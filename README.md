@@ -37,6 +37,14 @@ idle watcher（永久在線）      Discord Bot（永久在線）      Local Web
 
 各管理服務彼此獨立。遊戲正常關閉不會停止 Bot、watcher 或 Web UI；啟動只會透過 root 擁有、參數固定的 `/usr/local/sbin/palworld-control start` 執行，絕不執行瀏覽器或 Discord 訊息中的任意 shell 指令。
 
+v0.2.0 的共用核心位於 `src/palworld_caretaker/`：`rest.py` 負責
+loopback-only、禁止 proxy/redirect 的強型別 REST；`backup.py` 負責 mount、
+容量、manifest SHA-256 與原子兩階段 commit；`diagnostics.py` 收集服務、程序、
+REST 與玩家狀態；`operations.py` 提供跨行程 `flock`；`web.py` 提供零第三方
+依賴的本機面板。`service.py`、`config.py` 與 `steamcmd.py` 提供生命週期、設定
+與外部 adapter 邊界。Bash、systemd、Discord 與 Web 入口只組合這些契約，不在
+各入口重複安全決策。
+
 ## 安全與設定
 
 新設定範本依用途拆成 `config/caretaker.env.example`、
@@ -60,6 +68,8 @@ PALWORLD_STARTUP_GRACE_SECONDS=600
 PALWORLD_SHUTDOWN_WAIT_SECONDS=30
 PALWORLD_IDLE_WATCHER_DRY_RUN=true
 PALWORLD_START_READY_TIMEOUT_SECONDS=180
+PALWORLD_WEB_UI_USERNAME=palworld-manager
+PALWORLD_WEB_UI_PASSWORD=''
 DISCORD_BOT_TOKEN='...'
 DISCORD_PALWORLD_ALLOWED_GUILD_IDS=123
 DISCORD_PALWORLD_ALLOWED_ROLE_IDS=456
@@ -73,7 +83,15 @@ ID 清單可用逗號分隔。`DISCORD_PALWORLD_ALLOWED_CHANNEL_IDS=*` 表示指
 
 ## Local Web UI
 
-安裝或升級後 `palworld-web-ui.service` 會常駐於 `127.0.0.1:8765`；在伺服器本機瀏覽器開啟 `http://127.0.0.1:8765/`。它顯示 service/REST/玩家與 REST 可提供的 CPU、記憶體摘要，以及安全驗證過的 snapshot 清單。立即備份會先發送固定公告，再啟動既有的 systemd 備份服務；安全關閉與重啟必先由 REST 成功存檔。
+安裝或升級後 `palworld-web-ui.service` 會常駐於 `127.0.0.1:8765`；在伺服器本機瀏覽器開啟 [`http://127.0.0.1:8765/`](http://127.0.0.1:8765/)。瀏覽器跳出的 HTTP Basic Auth 帳號是 `PALWORLD_WEB_UI_USERNAME`（預設 `palworld-manager`），密碼是 `PALWORLD_WEB_UI_PASSWORD`；後者留空時相容地使用 `ADMIN_PASSWORD`。建議正式部署設定獨立的 `PALWORLD_WEB_UI_PASSWORD`，不要把密碼放進 URL、shell history 或聊天。通過 Basic Auth 後，頁面才會提供行程內 CSRF token。
+
+面板顯示 service/REST/玩家與 REST 可提供的 CPU、記憶體摘要，以及安全驗證過的 snapshot 清單。立即備份會先發送固定公告，再啟動既有的 systemd 備份服務；安全關閉與重啟必先由 REST 成功存檔。若從管理者電腦操作，可先建立 SSH tunnel，再仍以相同 URL 與 Basic Auth 登入：
+
+```bash
+ssh -N -L 8765:127.0.0.1:8765 user@palworld-host
+```
+
+面板固定拒絕非 loopback bind；不要用反向 proxy、防火牆或公開 DNS 對外暴露 `8765`。
 
 所有變更操作共用 `/run/palworld-caretaker/operation.lock`；它由 tmpfiles 以 `root:<manager>` 預建，runtime 目錄為 manager 不可寫入的 `0750`。Web、Discord、timer、idle watcher 與 maintenance 皆在取得這把跨行程鎖後才做狀態檢查與執行。無法判定 maintenance 或服務狀態時一律拒絕。備份若伺服器運行，必須先收到 REST `POST /save` 的成功回應，否則絕不停止服務。面板拒絕非 loopback 綁定，所有頁面與 API 都先要求 HTTP Basic Auth（`PALWORLD_WEB_UI_USERNAME` 加 `PALWORLD_WEB_UI_PASSWORD`；未設定後者時使用 `ADMIN_PASSWORD`），再要求 JSON + 行程內 CSRF token，並設有同源、無快取與禁止嵌入的瀏覽器防護。它不是遠端管理入口：不要以 nginx、SSH port forwarding 以外的 proxy、或任何防火牆規則對外公開此埠。
 
@@ -96,9 +114,15 @@ timeout、認證失敗、連線錯誤、非 200、JSON 無法解析、缺少 `pl
 - `/pal status`：顯示服務/API、玩家數、uptime、idle 開關與剩餘時間。
 - `/pal players`：顯示玩家數與名稱；API 異常顯示未知。
 - `/pal stop confirm:true`：管理員限定，成功 save 後才送出 graceful shutdown。
+- `/pal backup`：管理員限定，透過 systemd 備份服務建立並驗證一份新 snapshot。
+- `/pal backups`：列出最近可用的備份快照與大小。
+- `/pal diagnose`：管理員限定，顯示不含 secrets 的服務、REST 與玩家健康摘要。
 - `/pal update confirm:true`：啟動備份與 SteamCMD 更新。Bot 會以同一則嵌入式訊息顯示安全關服、備份、更新與重啟進度；會保留更新開始前的開關服狀態。
 
-Bot 採 slash command，不會重複註冊文字指令。全域 slash command 初次同步可能需要 Discord 一段時間顯示。
+Bot 採 slash command，不會重複註冊文字指令。所有變更指令都先取得
+`/run/palworld-caretaker/operation.lock`，再確認 `palworld-maintenance.service`
+不是 active/activating/deactivating；任一狀態無法確認就拒絕操作。全域 slash
+command 初次同步可能需要 Discord 一段時間顯示。
 
 互動式設定（token 輸入不顯示，也不會出現在 shell history）：
 
@@ -147,6 +171,7 @@ sudo journalctl -u palworld.service -f
 sudo journalctl -u palworld-idle-watcher.service -f
 sudo journalctl -u palworld-discord-bot.service -f
 sudo "<PALWORLD_INSTALL_ROOT>/scripts/backup-palworld.sh"
+sudo systemctl status palworld-web-ui.service --no-pager
 ```
 
 ## 診斷與安全解除安裝

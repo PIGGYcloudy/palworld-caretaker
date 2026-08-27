@@ -6,9 +6,10 @@ filesystem mount checks, and command execution are injected adapters.
 
 from .backup import BackupEngine, BackupManager, BackupResult, RestoreResult, SnapshotError
 from .config import CaretakerConfig, ConfigError, ConfigSchema, load_config, load_env
+from .diagnostics import ServerDiagnostic, ServerDiagnostics
 from .rest import ActionResult, ApiError, Metrics, PalworldRESTClient, Player, RESTClient
 from .service import (
-    RestCommandChannel, ServerDiagnostic, ServerDiagnostics, ServerLifecycle,
+    RestCommandChannel, ServerLifecycle,
     ServerStatus, ServiceState, SystemdServiceController,
 )
 from .steamcmd import SteamCMD, SteamCMDError
