@@ -7,20 +7,24 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
+import logging
+import math
 import os
 from pathlib import Path
 import re
 import subprocess
+import tempfile
 import time
-from typing import AsyncIterator, Callable
+from typing import AsyncIterator, Callable, Mapping
 
 import discord
 from discord import app_commands
+from discord.ext import tasks
 
 from palworld_caretaker import (
     ApiError, AuditLog, BackupEngine, CaretakerConfig, RESTClient, RestCommandChannel,
     ServerDiagnostics, ServerLifecycle, ServiceState, SnapshotError,
-    SystemdServiceController, load_config,
+    SystemMetrics, SystemdServiceController, collect_system_metrics, load_config,
 )
 
 
@@ -29,7 +33,12 @@ STATE = Path(os.environ.get("PALWORLD_STATE", "/var/lib/palworld-manager/idle-st
 MAINTENANCE_STATE = Path(os.environ.get(
     "PALWORLD_MAINTENANCE_STATE", "/var/lib/palworld-manager/maintenance-state.json"
 ))
+ALERT_STATE = Path(os.environ.get(
+    "PALWORLD_ALERT_STATE", "/var/lib/palworld-manager/alert-state.json"
+))
 OPERATION_COOLDOWN_SECONDS = 30
+_MAX_ALERT_TIMESTAMP_FUTURE_SECONDS = 24 * 60 * 60
+LOGGER = logging.getLogger(__name__)
 
 
 class OperationBusy(RuntimeError):
@@ -75,6 +84,91 @@ def read_state(path: Path) -> dict[str, object]:
         return {}
 
 
+def write_state(path: Path, state: dict[str, object]) -> None:
+    """Atomically persist non-secret bot state; a failed write is harmless."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                json.dump(state, handle, separators=(",", ":"))
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, path)
+        except Exception:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+            raise
+    except OSError:
+        pass
+
+
+@dataclass
+class MemoryAlertTracker:
+    """Threshold-crossing alerts with recovery hysteresis and persistent cooldown."""
+
+    threshold_percent: int
+    cooldown_seconds: int
+    state_path: Path = ALERT_STATE
+    clock: Callable[[], float] = time.time
+    above_threshold: bool = False
+    last_alert_at: float | None = None
+
+    def __post_init__(self) -> None:
+        state = read_state(self.state_path)
+        self.above_threshold = state.get("above_threshold") is True
+        last = state.get("last_alert_at")
+        self.last_alert_at = None
+        if last is None:
+            return
+        try:
+            timestamp = float(last) if not isinstance(last, bool) else float("nan")
+            now = float(self.clock())
+        except (TypeError, ValueError, OverflowError):
+            timestamp, now = float("nan"), 0.0
+        if (math.isfinite(timestamp) and timestamp >= 0
+                and math.isfinite(now) and timestamp - now <= _MAX_ALERT_TIMESTAMP_FUTURE_SECONDS):
+            self.last_alert_at = timestamp
+            return
+        # A stale or non-finite timestamp must not suppress future alerts.
+        self.last_alert_at = 0.0
+        self._save()
+
+    def _save(self) -> None:
+        write_state(self.state_path, {
+            "above_threshold": self.above_threshold,
+            "last_alert_at": self.last_alert_at,
+        })
+
+    def observe(self, memory_percent: float | None) -> bool:
+        """Return true only for a reportable crossing into high memory use.
+
+        A value below the threshold re-arms the alert.  A quick recovery and
+        re-crossing remains suppressed until the configured cooldown expires.
+        """
+        if memory_percent is None:
+            return False
+        if memory_percent < self.threshold_percent:
+            if self.above_threshold:
+                self.above_threshold = False
+                self._save()
+            return False
+        if self.above_threshold:
+            return False
+        self.above_threshold = True
+        now = self.clock()
+        if self.last_alert_at is not None and now - self.last_alert_at < self.cooldown_seconds:
+            self._save()
+            return False
+        self.last_alert_at = now
+        self._save()
+        return True
+
+
 def config_from(source: str | Path) -> CaretakerConfig:
     path = Path(source)
     return load_config(path if path.is_dir() else path.parent)
@@ -100,6 +194,20 @@ def format_bytes(size: int) -> str:
     raise AssertionError("unreachable")
 
 
+def format_duration(seconds: float | None) -> str:
+    if seconds is None:
+        return "未知"
+    seconds = max(0, int(seconds))
+    days, remainder = divmod(seconds, 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes, _seconds = divmod(remainder, 60)
+    if days:
+        return f"{days} 天 {hours} 小時"
+    if hours:
+        return f"{hours} 小時 {minutes} 分鐘"
+    return f"{minutes} 分鐘"
+
+
 def snapshot_timestamp(name: str) -> str:
     try:
         return datetime.strptime(name.removeprefix("palworld-"), "%Y%m%d-%H%M%S").replace(
@@ -117,6 +225,71 @@ def redact_secrets(text: str, config: CaretakerConfig) -> str:
     return text
 
 
+def _idle_status(status, values: Mapping[str, str], state: dict[str, object]) -> tuple[str, str]:
+    get = values.get
+    enabled = get("PALWORLD_IDLE_SHUTDOWN_ENABLED", "true") == "true"
+    dry_run = get("PALWORLD_IDLE_WATCHER_DRY_RUN", "true") == "true"
+    idle = "停用" if not enabled else ("啟用（測試模式）" if dry_run else "啟用")
+    idle_since = state.get("idle_since")
+    if idle_since is None or status.players is None:
+        return idle, "未知" if status.players is None else "等待下一次玩家檢查"
+    try:
+        timeout = int(get("PALWORLD_IDLE_TIMEOUT_MINUTES", "10")) * 60
+        remaining = max(0, int((timeout - (time.time() - float(idle_since)) + 59) // 60))
+    except (TypeError, ValueError):
+        return idle, "未知"
+    return idle, f"約 {remaining} 分鐘"
+
+
+def status_embed(section: str, status, metrics: SystemMetrics | None, values: Mapping[str, str],
+                 idle_state: dict[str, object]) -> discord.Embed:
+    """Build a compact, non-sensitive status view for the selected section."""
+    title = {
+        "all": "幻獸帕魯伺服器狀態",
+        "resources": "主機資源狀態",
+        "game": "遊戲伺服器狀態",
+        "players": "在線玩家狀態",
+    }[section]
+    color = discord.Color.green() if status.api_reachable else discord.Color.orange()
+    embed = discord.Embed(title=title, color=color)
+    if section in {"all", "game"}:
+        embed.add_field(name="服務", value=status.service.value, inline=True)
+        embed.add_field(name="REST API", value="可連線" if status.api_reachable else "無法連線", inline=True)
+        embed.add_field(name="遊戲程序 uptime", value=format_duration(metrics.process_uptime_seconds if metrics else None), inline=True)
+    if section in {"all", "players"}:
+        if status.players is None:
+            players = "未知（REST API 無法取得）"
+        elif status.players:
+            players = f"{len(status.players)} 位：" + "、".join(status.players)
+        else:
+            players = "0 位"
+        embed.add_field(name="在線玩家", value=players[:1024], inline=False)
+    if section == "all":
+        idle, remaining = _idle_status(status, values, idle_state)
+        embed.add_field(name="無人關服", value=idle, inline=True)
+        embed.add_field(name="距離自動關服", value=remaining, inline=True)
+    if section in {"all", "resources"}:
+        memory = "未知"
+        disk = "未知"
+        cpu = "未知"
+        process = "未偵測到"
+        if metrics:
+            if metrics.memory_total_bytes is not None and metrics.memory_used_bytes is not None and metrics.memory_percent is not None:
+                memory = f"{format_bytes(metrics.memory_used_bytes)} / {format_bytes(metrics.memory_total_bytes)} ({metrics.memory_percent:.1f}%)"
+            if metrics.disk_total_bytes is not None and metrics.disk_used_bytes is not None:
+                disk = f"{format_bytes(metrics.disk_used_bytes)} / {format_bytes(metrics.disk_total_bytes)}"
+            if metrics.cpu_load_1m is not None:
+                cpu = f"{metrics.cpu_load_1m:.2f}（1 分鐘）"
+            if metrics.process_rss_bytes is not None:
+                process = format_bytes(metrics.process_rss_bytes)
+        embed.add_field(name="主機 RAM", value=memory, inline=False)
+        embed.add_field(name="Palworld RSS", value=process, inline=True)
+        embed.add_field(name="CPU load", value=cpu, inline=True)
+        embed.add_field(name="存檔磁碟", value=disk, inline=True)
+    embed.set_footer(text="僅顯示狀態與資源資料；不含 Token 或密碼")
+    return embed
+
+
 @dataclass
 class BotDependencies:
     config: CaretakerConfig
@@ -127,12 +300,14 @@ class BotDependencies:
     coordinator: OperationCoordinator
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run
     audit: AuditLog | None = None
+    metrics_collector: Callable[[], SystemMetrics] | None = None
+    memory_alert_tracker: MemoryAlertTracker | None = None
 
     @classmethod
     def create(cls, config: CaretakerConfig) -> "BotDependencies":
         api = RESTClient(config)
         lifecycle = ServerLifecycle(SystemdServiceController(), RestCommandChannel(api), api=api)
-        return cls(
+        dependencies = cls(
             config, api, lifecycle, ServerDiagnostics(lifecycle),
             BackupEngine(
                 save_root=config.server_root / "Pal/Saved/SaveGames",
@@ -142,6 +317,16 @@ class BotDependencies:
                 require_mount=config.require_backup_mount,
             ), OperationCoordinator(),
         )
+        dependencies.memory_alert_tracker = MemoryAlertTracker(
+            config.memory_alert_percent, config.memory_alert_cooldown_seconds,
+            state_path=Path(os.environ.get("PALWORLD_ALERT_STATE", str(config.state_root / "alert-state.json"))),
+        )
+        return dependencies
+
+    def system_metrics(self) -> SystemMetrics:
+        if self.metrics_collector is not None:
+            return self.metrics_collector()
+        return collect_system_metrics(self.config.server_root / "Pal/Saved")
 
     def systemd_start(self, unit: str, *, wait: bool = True) -> subprocess.CompletedProcess[str]:
         """Only a fixed, sudoers-approved unit name is passed to systemd."""
@@ -388,26 +573,23 @@ class PalGroup(app_commands.Group):
             await self.operation_error(interaction, exc)
 
     @app_commands.command(name="status", description="查看幻獸帕魯伺服器狀態")
-    async def status(self, interaction: discord.Interaction):
+    @app_commands.describe(section="all：總覽；resources：主機資源；game：遊戲服務；players：在線玩家")
+    @app_commands.choices(section=[
+        app_commands.Choice(name="all（完整總覽）", value="all"),
+        app_commands.Choice(name="resources（主機資源）", value="resources"),
+        app_commands.Choice(name="game（遊戲服務）", value="game"),
+        app_commands.Choice(name="players（在線玩家）", value="players"),
+    ])
+    async def status(self, interaction: discord.Interaction, section: str = "all"):
         if not self.permitted(interaction): return await self.deny(interaction)
+        # The app-command choices constrain this in Discord.  Retain a
+        # fail-safe guard for direct calls and test harnesses.
+        if section not in {"all", "resources", "game", "players"}:
+            return await interaction.response.send_message("未知的狀態區段。", ephemeral=True)
         status = await asyncio.to_thread(self.dependencies.lifecycle.status)
-        if status.service in {ServiceState.INACTIVE, ServiceState.FAILED}:
-            return await interaction.response.send_message("幻獸帕魯伺服器目前未啟動。\n可使用 `/pal start` 開服。", ephemeral=True)
-        if status.service == ServiceState.STARTING:
-            return await interaction.response.send_message("幻獸帕魯伺服器正在啟動，REST API 尚未 ready。", ephemeral=True)
-        if status.service in {ServiceState.STOPPING, ServiceState.UNKNOWN}:
-            return await interaction.response.send_message("幻獸帕魯服務狀態目前未知或正在關閉，請稍後再試。", ephemeral=True)
-        state, values = read_state(STATE), self.dependencies.config.values
-        players = "未知" if status.players is None else str(len(status.players))
-        idle_since = state.get("idle_since")
-        timeout = int(values.get("PALWORLD_IDLE_TIMEOUT_MINUTES", "10")) * 60
-        if idle_since is None or status.players is None:
-            remaining = "未知" if status.players is None else "等待下一次玩家檢查"
-        else:
-            remaining = f"約 {max(0, int((timeout - (time.time() - float(idle_since)) + 59) // 60))} 分鐘"
-        enabled, dry_run = values.get("PALWORLD_IDLE_SHUTDOWN_ENABLED", "true") == "true", values.get("PALWORLD_IDLE_WATCHER_DRY_RUN", "true") == "true"
-        idle = "停用" if not enabled else ("啟用（測試模式）" if dry_run else "啟用")
-        await interaction.response.send_message(f"執行中：是\n玩家數：{players}\n無人關服：{idle}\n距離自動關服：{remaining}", ephemeral=True)
+        metrics = None if section == "players" else await asyncio.to_thread(self.dependencies.system_metrics)
+        embed = status_embed(section, status, metrics, self.dependencies.config.values, read_state(STATE))
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="players", description="查看目前在線玩家")
     async def players(self, interaction: discord.Interaction):
@@ -589,6 +771,77 @@ class Client(discord.Client):
     async def setup_hook(self):
         self.tree.add_command(PalGroup(self.dependencies))
         await self.tree.sync()
+        self.memory_alert_loop.start()
+
+    async def close(self) -> None:
+        self.memory_alert_loop.cancel()
+        await super().close()
+
+    async def _alert_channel(self):
+        """Use an explicitly allow-listed channel; wildcard channels are not alert targets."""
+        channel_ids = ids(self.dependencies.config, "DISCORD_PALWORLD_ALLOWED_CHANNEL_IDS", allow_wildcard=True)
+        if not channel_ids:
+            return None
+        channel_id = min(channel_ids)
+        channel = self.get_channel(channel_id)
+        if channel is not None:
+            return channel
+        try:
+            return await self.fetch_channel(channel_id)
+        except Exception:
+            LOGGER.warning("Could not resolve Discord alert channel", exc_info=True)
+            return None
+
+    async def check_memory_alert(self) -> bool:
+        """Collect memory once and notify the configured channel on a crossing."""
+        tracker = self.dependencies.memory_alert_tracker
+        if tracker is None:
+            tracker = MemoryAlertTracker(
+                self.dependencies.config.memory_alert_percent,
+                self.dependencies.config.memory_alert_cooldown_seconds,
+                state_path=Path(os.environ.get("PALWORLD_ALERT_STATE", str(self.dependencies.config.state_root / "alert-state.json"))),
+            )
+            self.dependencies.memory_alert_tracker = tracker
+        metrics = await asyncio.to_thread(self.dependencies.system_metrics)
+        if not tracker.observe(metrics.memory_percent):
+            return False
+        channel = await self._alert_channel()
+        if channel is None:
+            LOGGER.warning("Memory alert was not sent: no usable Discord alert channel")
+            return False
+        percent = metrics.memory_percent
+        assert percent is not None  # established by MemoryAlertTracker.observe
+        embed = discord.Embed(title="⚠️ 主機記憶體使用率偏高", color=discord.Color.orange())
+        embed.add_field(name="主機 RAM", value=(
+            f"{format_bytes(metrics.memory_used_bytes or 0)} / "
+            f"{format_bytes(metrics.memory_total_bytes or 0)} ({percent:.1f}%)"
+        ), inline=False)
+        embed.add_field(name="Palworld RSS", value=(
+            format_bytes(metrics.process_rss_bytes) if metrics.process_rss_bytes is not None else "未偵測到"
+        ), inline=True)
+        embed.add_field(name="CPU load", value=(
+            f"{metrics.cpu_load_1m:.2f}（1 分鐘）" if metrics.cpu_load_1m is not None else "未知"
+        ), inline=True)
+        embed.set_footer(text="警示會在記憶體恢復後重新啟用，並套用冷卻時間。")
+        try:
+            await channel.send(embed=embed)
+        except Exception:
+            LOGGER.warning("Memory alert was not sent: Discord channel delivery failed", exc_info=True)
+            return False
+        return True
+
+    @tasks.loop(seconds=60)
+    async def memory_alert_loop(self) -> None:
+        try:
+            await self.check_memory_alert()
+        except Exception:
+            # Diagnostics and alert delivery are best effort: command service
+            # must remain available even if procfs or Discord is transiently bad.
+            LOGGER.warning("Memory alert check failed", exc_info=True)
+
+    @memory_alert_loop.before_loop
+    async def _wait_for_ready_before_memory_alerts(self) -> None:
+        await self.wait_until_ready()
 
 
 def main() -> None:

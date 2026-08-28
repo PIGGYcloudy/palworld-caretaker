@@ -5,7 +5,7 @@ Linux 維運工具，重點是安全關服、可恢復備份、閒置自動關�
 遠端操作與本機 Web 管理面板；不提供公開 Web 管理介面。
 
 > [!IMPORTANT]
-> v0.4.0 支援 Ubuntu 24.04 LTS amd64 的原生 systemd 部署，並提供可測試的
+> v0.4.1 支援 Ubuntu 24.04 LTS amd64 的原生 systemd 部署，並提供可測試的
 > Python 核心與僅限本機的 Web UI。部署設定契約、
 > 安裝器、備份/還原/更新腳本與 systemd unit 支援任意安全的絕對安裝與備份
 > 路徑；設定編輯、還原與維護操作均會先驗證並留下安全紀錄。正式存檔仍建議
@@ -19,7 +19,8 @@ Linux 維運工具，重點是安全關服、可恢復備份、閒置自動關�
 - 型別驗證的遊戲設定管理器，使用 `config/editable/` 分層設定、差異預覽與原子寫入。
 - Web UI 與 CLI 的 pre-restore safety backup、manifest 驗證與原子還原流程。
 - 無玩家逾時後再次確認，再執行存檔與正常關服。
-- Discord `/pal` 指令、guild/channel/role permission matrix 與管理員確認。
+- Discord `/pal` 指令、guild/channel/role permission matrix 與管理員確認；
+  `/pal status` 支援分區 rich embeds，並可主動發送主機記憶體警示。
 - Local Web UI：僅綁定 `127.0.0.1:8765`，提供遊戲內公告、玩家踢出／封鎖、
   SaveGames ZIP 匯出、狀態、快照與安全操作面板。
 - Web UI 維護觸發與即時狀態輪詢；Discord 維護前倒數及完成/失敗通知。
@@ -43,7 +44,7 @@ idle watcher（永久在線）      Discord Bot（永久在線）      Local Web
 
 各管理服務彼此獨立。遊戲正常關閉不會停止 Bot、watcher 或 Web UI；啟動只會透過 root 擁有、參數固定的 `/usr/local/sbin/palworld-control start` 執行，絕不執行瀏覽器或 Discord 訊息中的任意 shell 指令。
 
-v0.4.0 的共用核心位於 `src/palworld_caretaker/`：`rest.py` 負責
+v0.4.1 的共用核心位於 `src/palworld_caretaker/`：`rest.py` 負責
 loopback-only、禁止 proxy/redirect 的強型別 REST；`backup.py` 負責 mount、
 容量、manifest SHA-256 與原子兩階段 commit；`diagnostics.py` 收集服務、程序、
 REST 與玩家狀態；`operations.py` 提供跨行程 `flock`；`settings.py` 與
@@ -79,6 +80,8 @@ PALWORLD_STARTUP_GRACE_SECONDS=600
 PALWORLD_SHUTDOWN_WAIT_SECONDS=30
 PALWORLD_IDLE_WATCHER_DRY_RUN=true
 PALWORLD_START_READY_TIMEOUT_SECONDS=180
+PALWORLD_MEMORY_ALERT_PERCENT=85
+PALWORLD_MEMORY_ALERT_COOLDOWN_SECONDS=1800
 PALWORLD_WEB_UI_USERNAME=palworld-manager
 PALWORLD_WEB_UI_PASSWORD=''
 DISCORD_BOT_TOKEN='...'
@@ -135,7 +138,10 @@ timeout、認證失敗、連線錯誤、非 200、JSON 無法解析、缺少 `pl
 ## Discord 指令
 
 - `/pal start`：鎖定後啟動服務，等待 REST API ready；已在線時不重複啟動。
-- `/pal status`：顯示服務/API、玩家數、uptime、idle 開關與剩餘時間。
+- `/pal status [all|resources|game|players]`：Discord 會以 slash choices 提供區段，
+  預設 `all`，並以 ephemeral rich embed 回覆。`all` 顯示服務、REST、玩家、idle
+  與資源總覽；`resources` 顯示主機 RAM、Palworld RSS、CPU load、存檔磁碟；`game`
+  顯示服務、REST、遊戲程序 uptime；`players` 顯示在線清單。
 - `/pal players`：顯示玩家數與名稱；API 異常顯示未知。
 - `/pal backups`：列出最近可用的備份快照與大小。
 - `/pal announce message:"..."`：管理員限定，發送遊戲內公告。
@@ -155,6 +161,19 @@ permission 不會取代這項設定。`start`、`stop`、`backup` 與 `update` �
 不是 active/activating/deactivating；任一狀態無法確認就拒絕操作。`announce`、
 `kick` 與 `ban` 另受 Bot 內的操作鎖、冷卻與 audit 保護。全域 slash command 初次
 同步可能需要 Discord 一段時間顯示。
+
+Bot 每 60 秒檢查主機 RAM。`PALWORLD_MEMORY_ALERT_PERCENT`（預設 `85`，10–99）
+與 `PALWORLD_MEMORY_ALERT_COOLDOWN_SECONDS`（預設 `1800`，60–86400）控制主動警示；
+使用率達到或超過門檻時只通知一次，必須先恢復到門檻以下才重新啟用，冷卻時間會
+抑制恢復後立即再次跨越門檻的通知。hysteresis/cooldown 狀態安全保存在
+`PALWORLD_MANAGER_STATE_DIR/alert-state.json`。警示會送至明確設定的
+`DISCORD_PALWORLD_ALLOWED_CHANNEL_IDS` channel；channel 設為 `*` 或未設定時不會
+猜測目標或傳送主動通知。
+
+Linux 資源 metrics 以有大小上限的 procfs 讀取取得，不呼叫 shell utilities；只會
+匹配精確的 Palworld executable basename（`PalServer`、`PalServer-Linux-Test`、
+`PalServer-Linux-Shipping`）。無法取得或資料不合法的欄位在 status embed 顯示
+`未知`／`未偵測到`，不會把探測失敗當成零值。
 
 互動式設定（token 輸入不顯示，也不會出現在 shell history）：
 
@@ -267,10 +286,10 @@ CLI 還原會在停止服務前再次驗證 snapshot，要求輸入精確確認�
 提交變更前請閱讀 [`CONTRIBUTING.md`](CONTRIBUTING.md)，安全邊界與漏洞回報
 方式見 [`SECURITY.md`](SECURITY.md)。GitHub Actions 會執行 Python 測試、Python
 編譯、Bash 語法檢查、ShellCheck 與 release 產物驗證。從乾淨且已提交的
-v0.4.0 source tree 建立 tarball 與 checksum：
+v0.4.1 source tree 建立 tarball 與 checksum：
 
 ```bash
-scripts/package-release.sh --version 0.4.0 --output-dir dist
+scripts/package-release.sh --version 0.4.1 --output-dir dist
 (cd dist && sha256sum --check SHA256SUMS)
 ```
 

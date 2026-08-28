@@ -25,6 +25,7 @@ DEFAULTS: dict[str, str] = {
     "PALWORLD_IDLE_TIMEOUT_MINUTES": "10", "PALWORLD_PLAYER_CHECK_INTERVAL_SECONDS": "60",
     "PALWORLD_STARTUP_GRACE_SECONDS": "600", "PALWORLD_SHUTDOWN_WAIT_SECONDS": "30",
     "PALWORLD_IDLE_WATCHER_DRY_RUN": "true", "PALWORLD_START_READY_TIMEOUT_SECONDS": "180",
+    "PALWORLD_MEMORY_ALERT_PERCENT": "85", "PALWORLD_MEMORY_ALERT_COOLDOWN_SECONDS": "1800",
     "DISCORD_PALWORLD_ALLOWED_GUILD_IDS": "", "DISCORD_PALWORLD_ALLOWED_ROLE_IDS": "",
     "DISCORD_PALWORLD_ADMIN_ROLE_IDS": "", "DISCORD_PALWORLD_ALLOWED_CHANNEL_IDS": "",
     "BACKUP_RETENTION_COUNT": "14", "BACKUP_TIME": "04:30",
@@ -210,6 +211,7 @@ def _validate_core(values: Mapping[str, str]) -> None:
     for key, low, high in (("MAX_PLAYERS", 1, 32), ("BASE_CAMP_MAX_NUM_IN_GUILD", 1, 10),
                            ("PUBLIC_PORT", 1, 65535), ("PALWORLD_REST_API_PORT", 1, 65535),
                            ("PALWORLD_API_TIMEOUT_SECONDS", 1, 30), ("BACKUP_RETENTION_COUNT", 1, 1000),
+                           ("PALWORLD_MEMORY_ALERT_PERCENT", 10, 99), ("PALWORLD_MEMORY_ALERT_COOLDOWN_SECONDS", 60, 86400),
                            ("PALWORLD_SAVEGAMES_EXPORT_MAX_BYTES", 1, 64 * 1024 ** 3)):
         _integer(values, key, low, high)
     if _integer(values, "PUBLIC_PORT", 1, 65535) == _integer(values, "PALWORLD_REST_API_PORT", 1, 65535):
@@ -270,5 +272,9 @@ class CaretakerConfig:
     def rest_timeout(self) -> int: return _integer(self.values, "PALWORLD_API_TIMEOUT_SECONDS", 1, 30)
     @property
     def backup_retention(self) -> int: return _integer(self.values, "BACKUP_RETENTION_COUNT", 1, 1000)
+    @property
+    def memory_alert_percent(self) -> int: return _integer(self.values, "PALWORLD_MEMORY_ALERT_PERCENT", 10, 99)
+    @property
+    def memory_alert_cooldown_seconds(self) -> int: return _integer(self.values, "PALWORLD_MEMORY_ALERT_COOLDOWN_SECONDS", 60, 86400)
     @property
     def require_backup_mount(self) -> bool: return _bool(self.values, "PALWORLD_BACKUP_REQUIRE_MOUNT")

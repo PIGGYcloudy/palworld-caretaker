@@ -71,6 +71,16 @@ class SettingsSchemaTests(unittest.TestCase):
         with self.assertRaisesRegex(ConfigError, "true or false"):
             CaretakerConfig(values)
 
+    def test_memory_alert_settings_are_schema_validated(self):
+        values = next(self.values())
+        values["PALWORLD_MEMORY_ALERT_PERCENT"] = "9"
+        with self.assertRaisesRegex(ConfigError, "PALWORLD_MEMORY_ALERT_PERCENT.*between 10 and 99"):
+            CaretakerConfig(values)
+        values["PALWORLD_MEMORY_ALERT_PERCENT"] = "85"
+        values["PALWORLD_MEMORY_ALERT_COOLDOWN_SECONDS"] = "59"
+        with self.assertRaisesRegex(ConfigError, "PALWORLD_MEMORY_ALERT_COOLDOWN_SECONDS.*between 60 and 86400"):
+            CaretakerConfig(values)
+
     def test_required_ini_strings_reject_empty_and_renderer_reserved_characters(self):
         for key in ("SERVER_NAME", "SERVER_DESCRIPTION"):
             for value in ("", "bad,name", "bad(name", "bad)name", 'bad"name'):

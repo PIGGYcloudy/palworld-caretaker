@@ -21,7 +21,7 @@ Palworld Dedicated Server 變更與社群回饋調整。
 | 階段 | 預估範圍 | 主要目標 | 里程碑 |
 | --- | --- | --- | --- |
 | 短期 | 約 2–4 週 | 從個人部署整理成通用 Linux 工具 | v0.1.0 |
-| 中期 | 約 1–3 個月 | 建立產品化核心、診斷能力與本機 Web UI | v0.2.0–v0.4 |
+| 中期 | 約 1–3 個月 | 建立產品化核心、診斷能力與本機 Web UI | v0.2.0–v0.4.1 |
 | 長期 | 約 3–9 個月 | Docker、Windows、發佈與升級生態 | v1.0+ |
 
 時間僅供安排工作量，不代表發布保證。
@@ -40,7 +40,7 @@ v0.2.0 已完成中期里程碑的第一批核心工作：
   `--backup-preflight` 維護前檢查。
 - 82 個測試全數通過，包含核心、整合流程與可重現 release artifact 驗證。
 
-v0.3–v0.4 已完成設定 schema、診斷與 audit 可觀察性、Web UI 操作體驗，以及
+v0.3–v0.4.1 已完成設定 schema、診斷與 audit 可觀察性、Web UI 操作體驗，以及
 更多 Discord 操作；Docker 與 Windows 仍屬長期目標。
 
 ## v0.3.0 狀態
@@ -74,8 +74,20 @@ v0.4.0 Sprint 1 已完成 Discord 權限矩陣與遊戲內管理功能：
 - REST 輸入／回應邊界、管理操作鎖、audit 記錄與 SaveGames 路徑信任檢查已補強；
   `python3 -m unittest discover -s tests` 為 `117/117` 通過。
 
-後續工作聚焦於更多遊戲設定欄位、audit rotation/匯出、migration 工具與實機升級
-驗證；Docker 與 Windows 仍屬長期目標。
+Sprint 2 的可觀察性工作已在 v0.4.1 完成；後續工作聚焦於更多遊戲設定欄位、audit
+rotation/匯出、migration 工具與實機升級驗證。Docker 與 Windows 仍屬長期目標。
+
+## v0.4.1 狀態
+
+v0.4.1 Direction B（Sprint 2）已完成：
+
+- Discord `/pal status [all|resources|game|players]` 以 slash choices 與 rich embeds
+  提供分區狀態、玩家、idle 與主機資源摘要。
+- 主機 RAM proactive alert 支援門檻、cooldown 與持久化 hysteresis；設定鍵為
+  `PALWORLD_MEMORY_ALERT_PERCENT` 與 `PALWORLD_MEMORY_ALERT_COOLDOWN_SECONDS`。
+- Linux procfs telemetry 使用 bounded reads 與精確 Palworld process matching；procfs
+  異常時維持 best-effort、未知值不冒充零值。
+- `python3 -m unittest discover -s tests` 為 `131/131` 通過。
 
 ## 短期：Linux v0.1
 
@@ -284,14 +296,15 @@ Docker 可以作為 Windows 的過渡選項，但不等同完整 Windows 原生�
 2. 將 NAS 專用備份改成可設定目的地。
 3. 讓 install 與 upgrade 可安全重複執行。
 4. 加入 diagnose 與分級 uninstall。
-5. 發布 `v0.4.0` 後，依實機回饋進入 schema migration、audit rotation、診斷
+5. 發布 `v0.4.1` 後，依實機回饋進入 schema migration、audit rotation、診斷
    與 adapter 測試。
 
 Web UI、Docker 與 Windows 先以 milestone 追蹤，避免 v0.1 範圍失控。
 
-目前 repository 已完成 v0.4.0 發布所需的通用路徑／分層設定契約、typed
+目前 repository 已完成 v0.4.1 發布所需的通用路徑／分層設定契約、typed
 settings manager、可設定且 fail-closed 的備份目的地、pre-restore safety
 backup、atomic restore、可重複執行的安裝／升級流程、唯讀 diagnose、分級
 uninstall、Web maintenance、Discord 維護通知與權限矩陣、遊戲內公告、玩家
-moderation、SaveGames ZIP 匯出、audit log、全域操作鎖與 loopback Web UI。下一批以實機 Ubuntu 升級／解除安裝驗證、schema migration、
-audit rotation 與更完整的跨平台 adapter 為主。
+moderation、SaveGames ZIP 匯出、分區 status、記憶體警示、bounded procfs telemetry、
+audit log、全域操作鎖與 loopback Web UI。下一批以實機 Ubuntu 升級／解除安裝驗證、
+schema migration、audit rotation 與更完整的跨平台 adapter 為主。

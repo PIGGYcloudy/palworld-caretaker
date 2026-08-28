@@ -6,6 +6,44 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 - 尚無變更。
 
+## [0.4.1] - 2026-08-28
+
+Sprint 2（Direction B）補強 Discord 可觀察性與主機資源診斷，並維持所有狀態查詢
+不洩漏 secrets、外部命令或無界輸入。
+
+### Discord 記憶體主動警示
+
+- Bot 每 60 秒檢查主機 RAM；當使用率達到或超過
+  `PALWORLD_MEMORY_ALERT_PERCENT`（預設 `85`，有效範圍 10–99）時，向明確設定的
+  allowlisted Discord channel 發送 proactive rich alert。
+- `PALWORLD_MEMORY_ALERT_COOLDOWN_SECONDS`（預設 `1800`，有效範圍 60–86400）限制
+  恢復後再次跨越門檻的通知頻率。狀態追蹤 hysteresis：持續達到或超過門檻時不重複
+  通知，必須先低於門檻才重新啟用；非 secret 狀態原子保存於
+  `PALWORLD_MANAGER_STATE_DIR/alert-state.json`。channel 設為 `*` 時不會猜測
+  主動警示目標。
+
+### Sectioned Discord status
+
+- `/pal status [all|resources|game|players]` 以 Discord slash choices 提供四種區段，
+  預設 `all`；回覆使用 ephemeral rich embed。`all` 顯示服務、REST、玩家、idle
+  與資源總覽；`resources` 顯示 RAM、Palworld RSS、CPU load 與存檔磁碟；`game`
+  顯示服務、REST 與遊戲程序 uptime；`players` 顯示在線玩家清單。
+
+### Bounded Linux procfs telemetry
+
+- 資源與遊戲程序 metrics 使用 bounded Linux procfs reads，不呼叫 shell utilities，
+  並對 `/proc/meminfo`、`loadavg`、`uptime`、`cmdline`、`statm` 與 `stat` 設定讀取上限。
+- Palworld process 只接受精確 executable basename（`PalServer`、
+  `PalServer-Linux-Test`、`PalServer-Linux-Shipping`）；相似名稱不會被誤認。procfs
+  無法取得、超限或格式錯誤的欄位回報 `未知`／`未偵測到`，不把失敗探測當成零值。
+
+### 測試與發布
+
+- `python3 -m unittest discover -s tests` 通過 `131/131`；涵蓋 memory alert
+  hysteresis/cooldown、Discord status embeds、procfs 邊界與精確 process matching。
+- release packager 與 Python package 版本更新為 `0.4.1`；封包仍要求乾淨 Git
+  working tree、可重現 tarball 與 `SHA256SUMS`。
+
 ## [0.4.0] - 2026-08-28
 
 Sprint 1 將 Discord 操作授權、遊戲內管理與 SaveGames 匯出納入同一套
@@ -264,6 +302,7 @@ Ubuntu 24.04 systemd 部署工具鏈。
   Bash syntax 與 ShellCheck；涵蓋設定/路徑契約、systemd renderer、生命週期、
   備份/還原失敗邊界、升級、解除安裝及 release 封包潔淨度。
 
+[0.4.1]: https://github.com/PIGGYcloudy/palworld-caretaker/releases/tag/v0.4.1
 [0.4.0]: https://github.com/PIGGYcloudy/palworld-caretaker/releases/tag/v0.4.0
 [0.3.0]: https://github.com/PIGGYcloudy/palworld-caretaker/releases/tag/v0.3.0
 [0.2.0]: https://github.com/PIGGYcloudy/palworld-caretaker/releases/tag/v0.2.0

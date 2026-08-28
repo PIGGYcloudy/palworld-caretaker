@@ -1,6 +1,6 @@
 # Discord Bot 設定
 
-v0.4.0 Caretaker 使用 Discord slash command，並以 guild、channel、一般角色與管理員
+v0.4.1 Caretaker 使用 Discord slash command，並以 guild、channel、一般角色與管理員
 角色的數字 ID 做 fail-closed allowlist。私訊一律拒絕；allowlist 空白時所有
 指令都會被拒絕。
 
@@ -50,7 +50,7 @@ Bot permissions 只需要：
 
 權限模型如下：
 
-- `/pal start`、`/pal status`、`/pal players`、`/pal backups`：一般允許角色或
+- `/pal start`、`/pal status [section]`、`/pal players`、`/pal backups`：一般允許角色或
   管理員角色。
 - `/pal announce`、`/pal kick`、`/pal ban`、`/pal backup`、`/pal diagnose`：僅
   管理員角色。
@@ -62,12 +62,12 @@ Bot permissions 只需要：
 不會繞過 Caretaker 的角色檢查。`DISCORD_PALWORLD_ALLOWED_ROLE_IDS` 可包含一般
 操作角色；管理員角色也會自動取得一般指令權限。
 
-## v0.4.0 指令
+## v0.4.1 指令
 
 | 指令 | 參數 | 說明 |
 | --- | --- | --- |
 | `/pal start` | 無 | 啟動服務並等待 REST API ready |
-| `/pal status` | 無 | 查看服務、REST、玩家與閒置關服狀態 |
+| `/pal status` | `section`（預設 `all`） | 以 rich embed 查看選定狀態區段 |
 | `/pal players` | 無 | 查看目前在線玩家 |
 | `/pal backups` | 無 | 列出最近最多 10 個可用快照與大小 |
 | `/pal announce` | `message` | 發送遊戲內公告（管理員） |
@@ -82,6 +82,32 @@ Bot permissions 只需要：
 ID。`announce`、`kick` 與 `ban` 會遵守 per-user cooldown、Bot 操作鎖與 audit；
 `start`、`stop`、`backup` 與 `update` 另外受 maintenance guard 與全域 operation
 lock 保護。診斷與快照清單不會在回覆中顯示 token 或密碼。
+
+### `/pal status` 區段
+
+`section` 是 Discord slash choice，值只能是 `all`、`resources`、`game` 或
+`players`；不填時使用 `all`。回覆為只對執行者可見的 ephemeral rich embed：
+
+| 區段 | 顯示內容 |
+| --- | --- |
+| `all` | 服務、REST API、在線玩家、idle 狀態／剩餘時間與資源總覽 |
+| `resources` | 主機 RAM、Palworld RSS、1 分鐘 CPU load、存檔磁碟 |
+| `game` | systemd 服務、REST API、精確匹配的 Palworld 程序 uptime |
+| `players` | 在線玩家清單；REST 無法取得時顯示未知 |
+
+主機與程序資源是 Linux procfs 的 best-effort telemetry。讀取有大小上限，且只匹配
+`PalServer`、`PalServer-Linux-Test`、`PalServer-Linux-Shipping` 這些精確 executable
+basename；無法取得或格式錯誤的欄位顯示未知／未偵測到。
+
+### 主動記憶體警示
+
+Bot 每 60 秒檢查主機 RAM。`PALWORLD_MEMORY_ALERT_PERCENT`（預設 `85`，有效範圍
+10–99）設定通知門檻；`PALWORLD_MEMORY_ALERT_COOLDOWN_SECONDS`（預設 `1800`，有效
+範圍 60–86400）限制恢復後再次跨越門檻的通知頻率。Bot 只在達到或超過門檻時通知，
+持續達到或超過門檻不重複通知，並在恢復到門檻以下後重新啟用；hysteresis 狀態原子保存
+於 `PALWORLD_MANAGER_STATE_DIR/alert-state.json`。警示必須有明確的
+`DISCORD_PALWORLD_ALLOWED_CHANNEL_IDS`；設定為 `*` 或留空時不會猜測頻道或發送
+主動通知。
 
 ## 執行互動式設定工具
 
@@ -115,7 +141,7 @@ sudo journalctl -u palworld-discord-bot.service -n 100 --no-pager
 ```
 
 全域 slash command 初次同步可能不會立刻出現。出現後，在允許頻道以一般角色
-測試 `/pal status`、`/pal players`、`/pal backups`，並確認一般角色無法執行
+測試 `/pal status` 的四個 section、`/pal players`、`/pal backups`，並確認一般角色無法執行
 `announce`、`kick`、`ban`、`backup`、`diagnose`、`stop` 或 `update`；再以管理員
 角色測試管理操作。也應從未允許頻道、未允許角色、錯誤 guild 與私訊各測一次拒絕
 行為。

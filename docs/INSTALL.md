@@ -6,7 +6,7 @@
 
 ## 系統需求
 
-- Ubuntu 24.04 LTS amd64，使用 systemd 與 APT；其他發行版尚未列入 v0.4.0
+- Ubuntu 24.04 LTS amd64，使用 systemd 與 APT；其他發行版尚未列入 v0.4.1
   的支援範圍。
 - 具 `sudo` 權限的登入帳號，以及可連線至 Ubuntu 套件庫、Steam 與 Discord
   （若啟用 Bot）的網路。
@@ -21,13 +21,13 @@
 
 ## 準備設定
 
-先把 `palworld-caretaker-v0.4.0.tar.gz` 與 `SHA256SUMS` 放在同一目錄，驗證並
+先把 `palworld-caretaker-v0.4.1.tar.gz` 與 `SHA256SUMS` 放在同一目錄，驗證並
 解壓：
 
 ```bash
 sha256sum --check SHA256SUMS
-tar -xzf palworld-caretaker-v0.4.0.tar.gz
-cd palworld-caretaker-v0.4.0
+tar -xzf palworld-caretaker-v0.4.1.tar.gz
+cd palworld-caretaker-v0.4.1
 ```
 
 驗證必須顯示 `OK`。接著在專案根目錄建立不受 Git 管理的部署設定：
@@ -43,7 +43,7 @@ chmod 0640 deployment-config/secrets.env
 編輯三個檔案：
 
 - `caretaker.env`：安裝根目錄、系統帳號、備份目的地、保留數與排程。
-- `server.env`：遊戲、REST API、閒置關服與 Discord allowlist／權限矩陣。
+- `server.env`：遊戲、REST API、閒置關服、Discord allowlist／權限矩陣與記憶體警示門檻。
 - `secrets.env`：伺服器密碼、管理密碼、可選的獨立 Web UI 密碼與 Discord Bot token。安裝後為
   `root:<PALWORLD_MANAGER_USER>`、mode `0640`，讓本機 Web UI 與 Discord Bot 可讀取；
   不可給其他群組或使用者讀取權限。
@@ -187,7 +187,7 @@ sudo python3 "<PALWORLD_INSTALL_ROOT>/scripts/palworld_manager.py" \
 `/run/palworld-caretaker/operation.lock`；若已有另一個操作進行中，命令會立即
 拒絕並等待下一次維護窗口。不要刪除、替換或以 symbolic link 取代這個鎖檔。
 
-## v0.4.0 管理功能、設定、維護與還原
+## v0.4.1 管理功能、設定、維護與還原
 
 ### Discord 指令與權限
 
@@ -199,7 +199,7 @@ sudo python3 "<PALWORLD_INSTALL_ROOT>/scripts/palworld_manager.py" \
 
 | 指令 | 權限 | 用途 |
 | --- | --- | --- |
-| `/pal start`、`/pal status`、`/pal players`、`/pal backups` | 一般角色或管理員角色 | 查看狀態、玩家與最近快照；`start` 也會啟動服務 |
+| `/pal start`、`/pal status [section]`、`/pal players`、`/pal backups` | 一般角色或管理員角色 | 查看分區狀態、玩家與最近快照；`start` 也會啟動服務 |
 | `/pal announce message:"..."` | 管理員角色 | 發送遊戲內公告 |
 | `/pal kick player_name_or_id:"..." reason:"..."` | 管理員角色 | 踢出指定玩家 |
 | `/pal ban player_name_or_id:"..." reason:"..."` | 管理員角色 | 封鎖指定玩家 |
@@ -210,6 +210,12 @@ sudo python3 "<PALWORLD_INSTALL_ROOT>/scripts/palworld_manager.py" \
 slash command，不需要 Discord `Administrator` app permission，且管理員角色仍由
 `DISCORD_PALWORLD_ADMIN_ROLE_IDS` 控制。完整建立、邀請與驗證流程見
 [Discord Bot 設定](DISCORD_SETUP.md)。
+
+`/pal status` 的 `section` 可選 `all`（預設總覽）、`resources`（RAM、Palworld RSS、
+CPU load、存檔磁碟）、`game`（服務、REST、程序 uptime）或 `players`（在線清單），
+並以 ephemeral rich embed 回覆。Bot 的主機 RAM 警示由
+`PALWORLD_MEMORY_ALERT_PERCENT` 與 `PALWORLD_MEMORY_ALERT_COOLDOWN_SECONDS` 控制；
+兩者的預設值、範圍與 hysteresis 行為見[設定契約](CONFIGURATION.md)。
 
 ### Web UI 公告、玩家管理與 SaveGames 匯出
 

@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import json
 from pathlib import Path
 import sys
+import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -18,7 +20,7 @@ BOT = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = BOT
 SPEC.loader.exec_module(BOT)
 
-from palworld_caretaker import CaretakerConfig, Player, ServerStatus, ServiceState  # noqa: E402
+from palworld_caretaker import CaretakerConfig, Player, ServerStatus, ServiceState, SystemMetrics  # noqa: E402
 
 
 class _Response:
@@ -117,6 +119,121 @@ class DiscordBotTests(unittest.IsolatedAsyncioTestCase):
         now[0] += 30
         async with coordinator.hold(1, "backup"):
             pass
+
+    async def test_status_sections_are_compact_and_secret_free(self):
+        group, _backups, _api = self.make_group()
+        group.dependencies.lifecycle = SimpleNamespace(
+            status=lambda: ServerStatus(ServiceState.ACTIVE, True, True, ("Alice", "Bob"))
+        )
+        group.dependencies.metrics_collector = lambda: SystemMetrics(
+            1024 * 1024 * 100, 1024 * 1024 * 20, 1024 * 1024 * 80, 80.0,
+            1.25, 1024 * 1024 * 200, 1024 * 1024 * 50, 1024 * 1024 * 150,
+            123, 1024 * 1024 * 40, 7200.0,
+        )
+        expected = {
+            "all": ("幻獸帕魯伺服器狀態", {"服務", "在線玩家", "主機 RAM", "無人關服"}),
+            "resources": ("主機資源狀態", {"主機 RAM", "Palworld RSS", "CPU load", "存檔磁碟"}),
+            "game": ("遊戲伺服器狀態", {"服務", "REST API", "遊戲程序 uptime"}),
+            "players": ("在線玩家狀態", {"在線玩家"}),
+        }
+        for section, (title, expected_fields) in expected.items():
+            with self.subTest(section=section):
+                interaction = _Interaction()
+                await BOT.PalGroup.status.callback(group, interaction, section)
+                content, kwargs = interaction.response.messages[0]
+                self.assertIsNone(content)
+                self.assertTrue(kwargs["ephemeral"])
+                embed = kwargs["embed"]
+                self.assertEqual(embed.title, title)
+                self.assertTrue(expected_fields.issubset({field.name for field in embed.fields}))
+                rendered = " ".join(field.value for field in embed.fields)
+                self.assertNotIn("ADMIN-SECRET", rendered)
+                self.assertNotIn("DISCORD-SECRET", rendered)
+
+    async def test_memory_alert_tracker_applies_crossing_cooldown_and_recovery(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            now = [0.0]
+            tracker = BOT.MemoryAlertTracker(85, 60, Path(temporary) / "alert-state.json", clock=lambda: now[0])
+            self.assertTrue(tracker.observe(85.0))       # initial threshold crossing
+            self.assertFalse(tracker.observe(90.0))      # remains high: hysteresis
+            self.assertFalse(tracker.observe(84.9))      # recovery re-arms
+            now[0] = 10.0
+            self.assertFalse(tracker.observe(86.0))      # cooldown suppresses re-crossing
+            self.assertFalse(tracker.observe(84.0))
+            now[0] = 61.0
+            self.assertTrue(tracker.observe(86.0))       # recovered and cooldown elapsed
+            restored = BOT.MemoryAlertTracker(85, 60, Path(temporary) / "alert-state.json", clock=lambda: now[0])
+            self.assertFalse(restored.observe(90.0))     # persisted above-threshold state
+
+    async def test_memory_alert_tracker_resets_corrupt_infinite_overflow_and_future_timestamps(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "alert-state.json"
+            corrupted = (
+                '{"above_threshold":false,"last_alert_at":"not-a-timestamp"}',
+                '{"above_threshold":false,"last_alert_at":Infinity}',
+                '{"above_threshold":false,"last_alert_at":' + "9" * 400 + "}",
+                json.dumps({"above_threshold": False, "last_alert_at": 100.0 + 86401.0}),
+            )
+            for payload in corrupted:
+                with self.subTest(payload=payload[:40]):
+                    path.write_text(payload, encoding="utf-8")
+                    tracker = BOT.MemoryAlertTracker(85, 60, path, clock=lambda: 100.0)
+                    self.assertEqual(tracker.last_alert_at, 0.0)
+                    self.assertTrue(tracker.observe(90.0))
+                    self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["last_alert_at"], 100.0)
+
+    async def test_memory_alert_sends_one_proactive_embed_per_threshold_crossing(self):
+        group, _backups, _api = self.make_group()
+        with tempfile.TemporaryDirectory() as temporary:
+            group.dependencies.metrics_collector = lambda: SystemMetrics(
+                1000, 100, 900, 90.0, 2.0, 2000, 1000, 1000, 123, 400, 60.0,
+            )
+            group.dependencies.memory_alert_tracker = BOT.MemoryAlertTracker(
+                85, 60, Path(temporary) / "alert-state.json", clock=lambda: 100.0,
+            )
+            sent = []
+
+            class Channel:
+                async def send(self, **kwargs): sent.append(kwargs)
+
+            async def alert_channel(): return Channel()
+
+            client = SimpleNamespace(dependencies=group.dependencies, _alert_channel=alert_channel)
+            self.assertTrue(await BOT.Client.check_memory_alert(client))
+            self.assertFalse(await BOT.Client.check_memory_alert(client))
+            self.assertEqual(len(sent), 1)
+            self.assertIn("記憶體", sent[0]["embed"].title)
+
+    async def test_memory_alert_channel_missing_or_send_failure_is_logged_and_nonfatal(self):
+        group, _backups, _api = self.make_group()
+        with tempfile.TemporaryDirectory() as temporary:
+            group.dependencies.metrics_collector = lambda: SystemMetrics(
+                1000, 100, 900, 90.0, 2.0, 2000, 1000, 1000, 123, 400, 60.0,
+            )
+            state_path = Path(temporary) / "alert-state.json"
+            group.dependencies.memory_alert_tracker = BOT.MemoryAlertTracker(
+                85, 60, state_path, clock=lambda: 100.0,
+            )
+
+            async def missing_channel(): return None
+
+            client = SimpleNamespace(dependencies=group.dependencies, _alert_channel=missing_channel)
+            with self.assertLogs(BOT.LOGGER, "WARNING") as logs:
+                self.assertFalse(await BOT.Client.check_memory_alert(client))
+            self.assertIn("no usable Discord alert channel", logs.output[0])
+
+            class BrokenChannel:
+                async def send(self, **_kwargs): raise RuntimeError("network failure")
+
+            async def broken_channel(): return BrokenChannel()
+
+            group.dependencies.memory_alert_tracker = BOT.MemoryAlertTracker(
+                85, 60, Path(temporary) / "second-alert-state.json", clock=lambda: 100.0,
+            )
+            client = SimpleNamespace(dependencies=group.dependencies, _alert_channel=broken_channel)
+            with self.assertLogs(BOT.LOGGER, "WARNING") as logs:
+                self.assertFalse(await BOT.Client.check_memory_alert(client))
+            self.assertIn("Discord channel delivery failed", logs.output[0])
 
     async def test_permission_matrix_fails_closed_and_separates_admins(self):
         group, _backups, _api = self.make_group()

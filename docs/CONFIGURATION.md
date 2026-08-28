@@ -1,6 +1,6 @@
 # Deployment configuration contract
 
-The v0.4.0 caretaker reads UTF-8 `KEY=VALUE` files as data. It never sources them or
+The v0.4.1 caretaker reads UTF-8 `KEY=VALUE` files as data. It never sources them or
 performs shell expansion. New deployments use these files in increasing
 precedence order:
 
@@ -33,7 +33,7 @@ deleted by the Web UI account.
 `ADMIN_PASSWORD`，因此任何部署預設仍需要認證。建議在多使用者主機設定獨立的
 `PALWORLD_WEB_UI_PASSWORD`。
 
-## v0.4 Discord permission matrix and SaveGames export
+## v0.4.1 Discord status, alerts, and SaveGames export
 
 Discord 權限由四個 numeric ID 設定共同決定：
 `DISCORD_PALWORLD_ALLOWED_GUILD_IDS`、
@@ -50,11 +50,29 @@ Discord 權限由四個 numeric ID 設定共同決定：
 `/pal stop` 與 `/pal update`；`stop` 和 `update` 另要求 `confirm:true`。完整指令
 參數與 Bot 設定流程見 [Discord Bot 設定](DISCORD_SETUP.md)。
 
+`/pal status` 的 `section` 是 Discord slash choice：`all`（預設）顯示服務、REST、
+玩家、idle 與資源總覽；`resources` 顯示主機 RAM、Palworld RSS、CPU load 與存檔
+磁碟；`game` 顯示服務、REST 與遊戲程序 uptime；`players` 顯示在線玩家清單。
+每個 section 都以 ephemeral rich embed 回覆。
+
 `PALWORLD_SAVEGAMES_EXPORT_MAX_BYTES` 控制 Web UI SaveGames ZIP 匯出的大小，預設
 為 `8589934592`（8 GiB），有效範圍為 1 B 至 64 GiB。匯出前會先要求 REST API
 存檔，並檢查 SaveGames 來源、symlink、可用空間與壓縮檔上限；成功下載或失敗後
 都會移除暫存 archive。請確保 `PALWORLD_MANAGER_STATE_DIR` 所在檔案系統有足夠
 空間。
+
+`PALWORLD_MEMORY_ALERT_PERCENT` 設定 Discord Bot 發送主機 RAM proactive alert 的門檻
+（預設 `85`，有效範圍 10–99）；使用率達到或超過門檻才會通知。
+`PALWORLD_MEMORY_ALERT_COOLDOWN_SECONDS` 設定恢復後再次跨越門檻的最短通知間隔
+（預設 `1800` 秒，有效範圍 60–86400）。Bot 每 60 秒檢查，持續達到或超過門檻時不重複
+通知，只有低於門檻才會重新啟用；hysteresis 與 cooldown 的非 secret 狀態保存於
+`PALWORLD_MANAGER_STATE_DIR/alert-state.json`。警示只會送到明確列出的
+`DISCORD_PALWORLD_ALLOWED_CHANNEL_IDS`；`*` 或空值不會猜測頻道。
+
+主機與程序 metrics 使用有大小上限的 Linux procfs 讀取，不依賴 shell utilities；
+Palworld 程序只匹配精確 executable basename `PalServer`、`PalServer-Linux-Test` 或
+`PalServer-Linux-Shipping`。無法取得、超限或格式錯誤的欄位在 status 顯示未知／未偵測到，
+不會把失敗探測當成零值。
 
 ## Local visual world settings
 
