@@ -12,6 +12,9 @@ from .settings import EDITABLE_DEFAULTS, SETTING_SPECS, validate_settings_values
 
 DEFAULTS: dict[str, str] = {
     "PALWORLD_INSTALL_ROOT": "/srv/palworld",
+    # Empty retains the host deployment layout of INSTALL_ROOT/server.  Docker
+    # mounts the game data directly at /srv/palworld and sets this explicitly.
+    "PALWORLD_SERVER_ROOT": "",
     "PALWORLD_BACKUP_DIR": "/mnt/qnap-tyt/palworld-backups",
     "PALWORLD_BACKUP_MOUNT": "/mnt/qnap-tyt",
     "PALWORLD_BACKUP_REQUIRE_MOUNT": "true",
@@ -200,12 +203,14 @@ def _integer(values: Mapping[str, str], key: str, low: int, high: int) -> int:
 def _validate_core(values: Mapping[str, str]) -> None:
     install, backup, state = (_absolute(values, key) for key in (
         "PALWORLD_INSTALL_ROOT", "PALWORLD_BACKUP_DIR", "PALWORLD_MANAGER_STATE_DIR"))
+    server = _absolute(values, "PALWORLD_SERVER_ROOT") if values.get("PALWORLD_SERVER_ROOT") else install / "server"
     mount_raw = values.get("PALWORLD_BACKUP_MOUNT", "")
     mount = _absolute(values, "PALWORLD_BACKUP_MOUNT") if mount_raw else None
-    if any(path == Path("/") for path in (install, backup, state, mount) if path is not None):
+    if any(path == Path("/") for path in (install, server, backup, state, mount) if path is not None):
         raise ConfigError("deployment paths must not be the filesystem root")
-    if _below(backup, install) or _below(install, backup):
-        raise ConfigError("PALWORLD_BACKUP_DIR and PALWORLD_INSTALL_ROOT must not overlap")
+    if (_below(backup, install) or _below(install, backup)
+            or _below(backup, server) or _below(server, backup)):
+        raise ConfigError("PALWORLD_BACKUP_DIR must not overlap the Palworld installation or server root")
     if _bool(values, "PALWORLD_BACKUP_REQUIRE_MOUNT") and (mount is None or backup == mount or not _below(backup, mount)):
         raise ConfigError("PALWORLD_BACKUP_DIR must be below PALWORLD_BACKUP_MOUNT when mount checking is enabled")
     for key, low, high in (("MAX_PLAYERS", 1, 32), ("BASE_CAMP_MAX_NUM_IN_GUILD", 1, 10),
@@ -250,7 +255,9 @@ class CaretakerConfig:
     @property
     def install_root(self) -> Path: return _absolute(self.values, "PALWORLD_INSTALL_ROOT")
     @property
-    def server_root(self) -> Path: return self.install_root / "server"
+    def server_root(self) -> Path:
+        configured = self.values.get("PALWORLD_SERVER_ROOT", "")
+        return _absolute(self.values, "PALWORLD_SERVER_ROOT") if configured else self.install_root / "server"
     @property
     def config_root(self) -> Path: return self.install_root / "config"
     @property

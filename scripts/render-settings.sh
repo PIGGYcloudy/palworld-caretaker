@@ -24,7 +24,9 @@ die() {
   exit 1
 }
 
-(( EUID == 0 || TEST_MODE == 1 )) || die 'run this script with sudo'
+if (( EUID != 0 && TEST_MODE != 1 )) && [[ "${PALWORLD_CONTAINER_MODE:-}" != 1 ]]; then
+  die 'run this script with sudo'
+fi
 [[ -f "$SETTINGS_FILE" ]] || die 'PalWorldSettings.ini is missing; start the server once first'
 
 MAX_PLAYERS="$(config_value MAX_PLAYERS)"
@@ -176,7 +178,7 @@ grep -q 'RESTAPIEnabled=True' "$tmp_file" || die 'rendered settings missing REST
 grep -q "RESTAPIPort=$PALWORLD_REST_API_PORT" "$tmp_file" || die 'rendered settings missing REST API port'
 grep -q "BaseCampMaxNumInGuild=$BASE_CAMP_MAX_NUM_IN_GUILD" "$tmp_file" || die 'rendered settings missing guild base camp limit'
 
-if (( TEST_MODE == 0 )); then
+if (( TEST_MODE == 0 && "${PALWORLD_CONTAINER_MODE:-}" != 1 )); then
   chown "$SERVICE_USER:$SERVICE_USER" "$tmp_file"
 fi
 chmod 0640 "$tmp_file"

@@ -8,6 +8,7 @@ from typing import Callable, Protocol
 
 from .errors import ApiError
 from .rest import PalworldRESTClient
+from .container import SupervisorControlClient
 
 
 class ServiceState(str, Enum):
@@ -69,6 +70,25 @@ class SystemdServiceController:
     def stop(self) -> None: self._action("stop")
 
 
+class ContainerServiceController:
+    """Container adapter: lifecycle authority stays with the PID 1 supervisor."""
+
+    def __init__(self, client: SupervisorControlClient | None = None):
+        self.client = client or SupervisorControlClient()
+
+    def state(self) -> ServiceState:
+        try:
+            return ServiceState(str(self.client.request("status").get("service", "unknown")))
+        except RuntimeError:
+            return ServiceState.UNKNOWN
+
+    def start(self) -> None:
+        self.client.request("start")
+
+    def stop(self) -> None:
+        self.client.request("stop")
+
+
 class ProcessProbe:
     """Portable process probe supplied with a predicate rather than shell parsing."""
     def __init__(self, is_running: Callable[[], bool]): self._is_running = is_running
@@ -79,6 +99,20 @@ class RestCommandChannel:
     def __init__(self, api: PalworldRESTClient): self.api = api
     def save(self) -> None: self.api.save()
     def shutdown(self, wait_seconds: int, message: str) -> None: self.api.shutdown(wait_seconds, message)
+
+
+class ContainerCommandChannel:
+    """Ask the supervisor to preserve save-before-stop and process-group rules."""
+
+    def __init__(self, client: SupervisorControlClient | None = None):
+        self.client = client or SupervisorControlClient()
+
+    def save(self) -> None:
+        # A standalone save is deliberately not a lifecycle transition.
+        return None
+
+    def shutdown(self, wait_seconds: int, message: str) -> None:
+        self.client.request("stop")
 
 
 class ServerLifecycle:

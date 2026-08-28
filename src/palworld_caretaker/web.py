@@ -33,7 +33,9 @@ from .config import CaretakerConfig, load_config
 from .errors import ApiError, ConfigError, SnapshotError
 from .operations import OperationLock, OperationLockBusy
 from .rest import RESTClient
-from .service import RestCommandChannel, ServerDiagnostics, ServerLifecycle, ServiceState, SystemdServiceController
+from .service import (ContainerCommandChannel, ContainerServiceController, RestCommandChannel,
+                      ServerDiagnostics, ServerLifecycle, ServiceState, SystemdServiceController)
+from .container import SupervisorControlClient, container_mode
 from .settings import categories
 from .settings_store import SettingsStore
 
@@ -46,6 +48,34 @@ _SAFE_STATES = {"active", "activating", "deactivating", "inactive", "failed"}
 _EXPORT_PREFIX = "palworld-savegames-"
 _EXPORT_SUFFIX = ".zip"
 _EXPORT_CHUNK = 64 * 1024
+
+
+def _canonical_origin(value: str, *, require_origin_only: bool) -> str | None:
+    """Return a normalized HTTP origin, rejecting ambiguous URL forms."""
+    try:
+        parsed = urlsplit(value)
+        # Accessing ``port`` validates malformed port values such as ``:abc``.
+        port = parsed.port
+    except ValueError:
+        return None
+    if (
+        parsed.scheme.lower() not in {"http", "https"}
+        or not parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or (require_origin_only and parsed.path)
+    ):
+        return None
+    hostname = parsed.hostname
+    if hostname is None:
+        return None
+    # urlsplit has already checked bracketed IPv6 syntax.  Rebuild from its
+    # parsed components so case changes and a Host header cannot bypass a
+    # string comparison.
+    rendered_host = f"[{hostname.lower()}]" if ":" in hostname else hostname.lower()
+    return f"{parsed.scheme.lower()}://{rendered_host}{f':{port}' if port is not None else ''}"
 
 
 class _BoundedWriter:
@@ -194,11 +224,16 @@ class WebDependencies:
     restore_path: str | None = None
     settings_store: SettingsStore | None = None
     audit: AuditLog | None = None
+    supervisor: SupervisorControlClient | None = None
 
     @classmethod
     def create(cls, config: CaretakerConfig) -> "WebDependencies":
         api = RESTClient(config)
-        lifecycle = ServerLifecycle(SystemdServiceController(), RestCommandChannel(api), api=api)
+        supervisor = SupervisorControlClient() if container_mode() else None
+        lifecycle = ServerLifecycle(
+            ContainerServiceController(supervisor) if supervisor else SystemdServiceController(),
+            ContainerCommandChannel(supervisor) if supervisor else RestCommandChannel(api), api=api,
+        )
         backups = BackupEngine(
             save_root=config.server_root / "Pal/Saved/SaveGames",
             config_root=config.server_root / "Pal/Saved/Config",
@@ -213,10 +248,16 @@ class WebDependencies:
             operation_lock=lambda: OperationLock(
                 manager_user=config.values["PALWORLD_MANAGER_USER"]
             ),
+            supervisor=supervisor,
         )
 
     def maintenance_running(self) -> bool:
         """Fail closed when systemd cannot prove maintenance is inactive."""
+        if self.supervisor is not None:
+            try:
+                return bool(self.supervisor.request("status").get("maintenance"))
+            except RuntimeError:
+                return True
         try:
             result = self.runner(
                 ["sudo", "-n", "/usr/bin/systemctl", "is-active", _MAINTENANCE_UNIT],
@@ -261,6 +302,9 @@ class WebDependencies:
         )
 
     def _start_server(self) -> None:
+        if self.supervisor is not None:
+            self.supervisor.request("start")
+            return
         result = self.runner(
             ["sudo", "-n", self.control_path, "start"],
             capture_output=True, text=True, timeout=130, check=False,
@@ -315,6 +359,15 @@ class WebDependencies:
             # call; it is not relied on for correctness.
             self._require_idle_maintenance()
             return self._start()
+        if self.supervisor is not None:
+            # PID 1 owns the container-wide lock.  Do not try to acquire the
+            # host tmpfiles lock here: it is intentionally absent in Docker
+            # and would turn an otherwise valid UI action into a failure.
+            self._require_idle_maintenance()
+            self.supervisor.request(action)
+            return {"message": "Save confirmed; shutdown has been requested."} if action == "stop" else {
+                "message": "Save confirmed; server restart has been requested."
+            }
         try:
             with self.operation_lock():
                 self._require_idle_maintenance()
@@ -340,9 +393,12 @@ class WebDependencies:
             # A failed broadcast must not convert a safe, systemd-managed backup
             # into an unsafe direct filesystem operation.
             announced = False
-        result = self._sudo_start(_BACKUP_UNIT, wait=True)
-        if result.returncode:
-            raise WebUIError("backup service failed")
+        if self.supervisor is not None:
+            self.supervisor.request("backup")
+        else:
+            result = self._sudo_start(_BACKUP_UNIT, wait=True)
+            if result.returncode:
+                raise WebUIError("backup service failed")
         created = [item for item in self.backups.list_snapshots() if item.name not in before]
         if len(created) != 1:
             raise WebUIError("new snapshot cannot be safely verified")
@@ -376,6 +432,17 @@ class WebDependencies:
             self.backups.preflight_restore(version)
         except SnapshotError:
             raise
+        if self.supervisor is not None:
+            was_running = self.lifecycle.status().service == ServiceState.ACTIVE
+            result = self.supervisor.request("restore", snapshot=version)
+            safety_backup = result.get("safety_backup")
+            if not isinstance(safety_backup, str) or not re.fullmatch(r"pre-restore-\d{8}-\d{6}", safety_backup):
+                raise WebUIError("restore safety backup cannot be verified")
+            return {
+                "message": "Restore completed. The server was restarted." if was_running else "Restore completed. The server remains stopped.",
+                "snapshot": version, "safety_backup": safety_backup,
+                "server_stopped": not was_running, "server_restarted": was_running,
+            }
         restore_path = self.restore_path or str(self.config.scripts_root / "restore-palworld.sh")
         result = self.runner(
             ["sudo", "-n", restore_path, "--web-restore", version],
@@ -406,6 +473,9 @@ class WebDependencies:
     def trigger_maintenance(self) -> dict[str, Any]:
         """Ask systemd to run the fixed maintenance unit in the background."""
         self._require_idle_maintenance()
+        if self.supervisor is not None:
+            self.supervisor.request("update")
+            return {"message": "Maintenance update completed.", "started": False}
         result = self._sudo_start(_MAINTENANCE_UNIT, wait=False)
         if result.returncode:
             raise WebUIError("maintenance service could not be started")
@@ -413,6 +483,15 @@ class WebDependencies:
 
     def maintenance_payload(self) -> dict[str, Any]:
         """Return the current unit state plus the safe, persisted progress summary."""
+        if self.supervisor is not None:
+            try:
+                current = self.supervisor.request("status")
+                running = bool(current.get("maintenance"))
+                return {"service": "active" if running else "inactive", "running": running,
+                        "phase": "updating" if running else None, "latest_log_summary": None, "updated_at": None}
+            except RuntimeError:
+                return {"service": "unknown", "running": True, "phase": None,
+                        "latest_log_summary": None, "updated_at": None}
         try:
             result = self.runner(
                 ["sudo", "-n", "/usr/bin/systemctl", "is-active", _MAINTENANCE_UNIT],
@@ -794,6 +873,12 @@ class _Handler(BaseHTTPRequestHandler):
         return True
 
     def do_GET(self) -> None:  # noqa: N802
+        # This intentionally has no application data and is available without
+        # credentials so an orchestrator can distinguish a live UI process
+        # from a failed one without placing a secret in its health command.
+        if self.path == "/healthz":
+            self._send(HTTPStatus.OK, b'{"status":"ok"}', "application/json; charset=utf-8")
+            return
         if self._auth_required():
             return
         request = urlsplit(self.path)
@@ -827,9 +912,15 @@ class _Handler(BaseHTTPRequestHandler):
             self._error(HTTPStatus.SERVICE_UNAVAILABLE, "The requested data is unavailable.")
 
     def _mutation_payload(self) -> Mapping[str, Any] | None:
-        expected_origin = f"http://{DEFAULT_BIND}:{self.server.server_port}"
         origin = self.headers.get("Origin")
-        if origin and not hmac.compare_digest(origin, expected_origin):
+        referer = self.headers.get("Referer")
+        if origin:
+            if not self._origin_matches(origin, require_origin_only=True):
+                return None
+        # Origin is not present on some non-browser and legacy browser
+        # requests. Preserve the authenticated CSRF-token path for a request
+        # with neither header, but verify Referer whenever it is supplied.
+        elif referer and not self._origin_matches(referer, require_origin_only=False):
             return None
         token = self.headers.get("X-Palworld-CSRF", "")
         if not hmac.compare_digest(token, self.server.csrf_token):
@@ -849,6 +940,24 @@ class _Handler(BaseHTTPRequestHandler):
             return decoded if isinstance(decoded, dict) else None
         except (UnicodeDecodeError, json.JSONDecodeError):
             return None
+
+    def _origin_matches(self, supplied: str, *, require_origin_only: bool) -> bool:
+        origin = _canonical_origin(supplied, require_origin_only=require_origin_only)
+        if origin is None:
+            return False
+        configured = self.server.public_origin
+        if configured is not None:
+            return hmac.compare_digest(origin, configured)
+        # In Docker's direct 0.0.0.0 mode no single public hostname is known.
+        # Bind the Origin (or Referer) to the browser-controlled Host header,
+        # retaining same-origin CSRF protection for LAN IP and DNS access. A
+        # reverse proxy should set PALWORLD_WEB_PUBLIC_ORIGIN explicitly when
+        # it cannot preserve the public Host header.
+        scheme = origin.split("://", 1)[0]
+        host_origin = _canonical_origin(
+            f"{scheme}://{self.headers.get('Host', '')}", require_origin_only=True,
+        )
+        return host_origin is not None and hmac.compare_digest(origin, host_origin)
 
     def do_POST(self) -> None:  # noqa: N802
         if self._auth_required():
@@ -986,8 +1095,9 @@ class WebServer(ThreadingHTTPServer):
 
     def __init__(self, address: tuple[str, int], dependencies: WebDependencies):
         host, port = address
-        if host != DEFAULT_BIND:
-            raise ValueError("web UI must bind only to 127.0.0.1")
+        container_mode = os.environ.get("PALWORLD_CONTAINER_MODE") == "1"
+        if host != DEFAULT_BIND and not (container_mode and host == "0.0.0.0"):
+            raise ValueError("web UI must bind only to 127.0.0.1 outside container mode")
         if not isinstance(port, int) or not 0 <= port <= 65535:
             raise ValueError("web UI port must be between 0 and 65535")
         # A response-owned archive has no durable purpose.  Anything matching
@@ -996,6 +1106,7 @@ class WebServer(ThreadingHTTPServer):
         dependencies.scavenge_export_archives()
         self.dependencies = dependencies
         self.csrf_token = secrets.token_urlsafe(32)
+        configured_origin = os.environ.get("PALWORLD_WEB_PUBLIC_ORIGIN", "").strip()
         self.auth_username = dependencies.config.values["PALWORLD_WEB_UI_USERNAME"]
         self.auth_password = (
             dependencies.config.values.get("PALWORLD_WEB_UI_PASSWORD")
@@ -1004,6 +1115,13 @@ class WebServer(ThreadingHTTPServer):
         if not self.auth_username or not self.auth_password:
             raise ValueError("web UI authentication credentials must be configured")
         super().__init__(address, _Handler)
+        self.public_origin = _canonical_origin(configured_origin, require_origin_only=True) if configured_origin else None
+        if configured_origin and self.public_origin is None:
+            raise ValueError("PALWORLD_WEB_PUBLIC_ORIGIN must be an HTTP origin without a path")
+        if not configured_origin and not (container_mode and host == "0.0.0.0"):
+            # Keep the host installation loopback-only contract strict. The
+            # dynamic Host policy is exclusively for Docker's LAN listener.
+            self.public_origin = f"http://{DEFAULT_BIND}:{self.server_port}"
 
 
 def create_server(dependencies: WebDependencies, *, host: str = DEFAULT_BIND, port: int = DEFAULT_PORT) -> WebServer:
@@ -1011,7 +1129,7 @@ def create_server(dependencies: WebDependencies, *, host: str = DEFAULT_BIND, po
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Palworld Caretaker local web UI (loopback only)")
+    parser = argparse.ArgumentParser(description="Palworld Caretaker local web UI")
     parser.add_argument(
         "--config-dir", default=os.environ.get("PALWORLD_CONFIG", "/srv/palworld/config"),
         help="configuration directory (defaults to PALWORLD_CONFIG)",
@@ -1019,8 +1137,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--bind", default=DEFAULT_BIND, help=argparse.SUPPRESS)
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     args = parser.parse_args(argv)
-    if args.bind != DEFAULT_BIND:
-        parser.error("the web UI may bind only to 127.0.0.1")
+    if args.bind != DEFAULT_BIND and not (
+        os.environ.get("PALWORLD_CONTAINER_MODE") == "1" and args.bind == "0.0.0.0"
+    ):
+        parser.error("the web UI may bind only to 127.0.0.1 outside container mode")
     try:
         config = load_config(args.config_dir)
         server = create_server(WebDependencies.create(config), host=args.bind, port=args.port)

@@ -61,6 +61,7 @@ class DiagnosticCheck:
 
 DEFAULT_CONFIG: dict[str, str] = {
     "PALWORLD_INSTALL_ROOT": "/srv/palworld",
+    "PALWORLD_SERVER_ROOT": "",
     "PALWORLD_BACKUP_DIR": "/mnt/qnap-tyt/palworld-backups",
     "PALWORLD_BACKUP_MOUNT": "/mnt/qnap-tyt",
     "PALWORLD_BACKUP_REQUIRE_MOUNT": "true",
@@ -337,9 +338,12 @@ def validate_config(config: dict[str, str]) -> dict[str, Path | None]:
         if value and any(not _DISCORD_ID_RE.fullmatch(item.strip()) for item in value.split(",")):
             raise ConfigError(f"{key} must be a comma-separated list of numeric IDs")
 
+    server_root = _absolute_path(config, "PALWORLD_SERVER_ROOT") if config.get("PALWORLD_SERVER_ROOT") else install_root / "server"
+    if (_is_relative_to(backup_dir, server_root) or _is_relative_to(server_root, backup_dir)):
+        raise ConfigError("PALWORLD_BACKUP_DIR and PALWORLD_SERVER_ROOT must not overlap")
     return {
         "install_root": install_root,
-        "server_root": install_root / "server",
+        "server_root": server_root,
         "config_root": install_root / "config",
         "scripts_root": install_root / "scripts",
         "local_backup_root": install_root / "backups-local",
@@ -360,7 +364,9 @@ def config_value(config: dict[str, str], key: str) -> str:
         "PALWORLD_LOCAL_BACKUP_ROOT": paths["local_backup_root"],
         "PALWORLD_SETTINGS_BACKUP_DIR": paths["settings_backup_dir"],
     }
-    if key in config:
+    # PALWORLD_SERVER_ROOT is an optional explicit override.  An empty default
+    # must continue to expose the derived host-layout path to shell adapters.
+    if key in config and not (key == "PALWORLD_SERVER_ROOT" and not config[key]):
         return config[key]
     if key in derived:
         return str(derived[key])

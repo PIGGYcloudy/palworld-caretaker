@@ -2,12 +2,14 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-VERSION=0.4.1
+VERSION=0.5.0
 OUTPUT_DIR=dist
+OUTPUT_FILE=
+OUTPUT_DIR_SPECIFIED=0
 SOURCE_REF=HEAD
 
 usage() {
-  printf 'Usage: %s [--version VERSION] [--output-dir DIRECTORY] [--source-ref GIT_REF]\n' "$0"
+  printf 'Usage: %s [--version VERSION] [--output FILE | --output-dir DIRECTORY] [--source-ref GIT_REF]\n' "$0"
 }
 
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
@@ -15,7 +17,8 @@ die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 while (( $# > 0 )); do
   case "$1" in
     --version) [[ $# -ge 2 ]] || die '--version requires a value'; VERSION=$2; shift 2 ;;
-    --output-dir) [[ $# -ge 2 ]] || die '--output-dir requires a directory'; OUTPUT_DIR=$2; shift 2 ;;
+    --output-dir) [[ $# -ge 2 ]] || die '--output-dir requires a directory'; OUTPUT_DIR=$2; OUTPUT_DIR_SPECIFIED=1; shift 2 ;;
+    --output) [[ $# -ge 2 ]] || die '--output requires a file'; OUTPUT_FILE=$2; shift 2 ;;
     --source-ref) [[ $# -ge 2 ]] || die '--source-ref requires a Git ref'; SOURCE_REF=$2; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; die "unknown argument: $1" ;;
@@ -34,12 +37,22 @@ git -C "$REPOSITORY" diff --quiet -- || die 'tracked working-tree changes exist;
 git -C "$REPOSITORY" diff --cached --quiet -- || die 'staged changes exist; commit them before packaging'
 git -C "$REPOSITORY" show "$SOURCE_REF:CHANGELOG.md" | grep -Fq "## [$VERSION]" || die "CHANGELOG.md does not contain release $VERSION"
 
-if [[ "$OUTPUT_DIR" != /* ]]; then OUTPUT_DIR="$REPOSITORY/$OUTPUT_DIR"; fi
-OUTPUT_DIR="$(realpath -m -- "$OUTPUT_DIR")"
-[[ "$OUTPUT_DIR" != / ]] || die 'output directory must not be the filesystem root'
+[[ "$OUTPUT_DIR_SPECIFIED" -eq 0 || -z "$OUTPUT_FILE" ]] || die '--output and --output-dir cannot be used together'
+if [[ -n "$OUTPUT_FILE" ]]; then
+  if [[ "$OUTPUT_FILE" != /* ]]; then OUTPUT_FILE="$REPOSITORY/$OUTPUT_FILE"; fi
+  OUTPUT_FILE="$(realpath -m -- "$OUTPUT_FILE")"
+  [[ "$OUTPUT_FILE" != / ]] || die 'output file must not be the filesystem root'
+  ARCHIVE="$OUTPUT_FILE"
+  OUTPUT_DIR="$(dirname -- "$ARCHIVE")"
+  ARCHIVE_NAME="$(basename -- "$ARCHIVE")"
+else
+  if [[ "$OUTPUT_DIR" != /* ]]; then OUTPUT_DIR="$REPOSITORY/$OUTPUT_DIR"; fi
+  OUTPUT_DIR="$(realpath -m -- "$OUTPUT_DIR")"
+  [[ "$OUTPUT_DIR" != / ]] || die 'output directory must not be the filesystem root'
+  ARCHIVE_NAME="palworld-caretaker-v$VERSION.tar.gz"
+  ARCHIVE="$OUTPUT_DIR/$ARCHIVE_NAME"
+fi
 mkdir -p -- "$OUTPUT_DIR"
-ARCHIVE_NAME="palworld-caretaker-v$VERSION.tar.gz"
-ARCHIVE="$OUTPUT_DIR/$ARCHIVE_NAME"
 CHECKSUMS="$OUTPUT_DIR/SHA256SUMS"
 TEMPORARY="$(mktemp -d)"
 cleanup() { rm -rf -- "$TEMPORARY"; }

@@ -6,6 +6,51 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 - 尚無變更。
 
+## [0.5.0] - 2026-08-28
+
+Sprint 3 將 Docker 容器化部署、可由內網使用的 Web UI，以及容器生命週期安全邊界
+納入正式發布包。
+
+### Docker 一鍵容器化開服
+
+- 新增 `Dockerfile`、`docker-compose.yml`、`docker/docker-supervisor.py` 與
+  [`docs/DOCKER.md`](docs/DOCKER.md)，可用 Docker Compose 建立持久化的 Palworld
+  伺服器、Caretaker Web UI、可選 Discord Bot、SteamCMD 更新與備份工作環境。
+- 容器由 PID 1 Supervisor 管理 PalServer、Web UI 與 Bot，不依賴 systemd、sudo 或
+  host 的 `systemctl`；Web／Discord 操作經由私有 Unix socket 交由 Supervisor
+  序列化處理。
+
+### 0.0.0.0 Web UI 與動態同源防護
+
+- Docker Compose 的 Web UI 預設發布在 `0.0.0.0:8765`，可從區網 IP、Hamachi、
+  Tailscale 或 ZeroTier 的私有網路位址直接使用。
+- 容器直連且未設定 `PALWORLD_WEB_PUBLIC_ORIGIN` 時，Web UI 以請求的 `Host` 動態
+  驗證 `Origin`／`Referer`，保留同源 CSRF 防護，不需要為每個 VPN 或區網 IP 預先
+  寫死 origin；反向 proxy 終止 TLS 時則可設定精確的公開 origin。
+- 原生 systemd 部署仍維持 `127.0.0.1:8765`；兩種模式都要求 HTTP Basic Auth
+  與行程內 CSRF token，且不應直接暴露到 Internet。
+
+### Non-root 執行與動態 UID/GID
+
+- Docker entrypoint 只在 bootstrap 階段以 root 對齊掛載 volume 的 `PUID`／`PGID`，
+  隨後以 non-root `steam` 使用者執行 Supervisor、PalServer 與管理前端。
+- 支援啟動時動態建立／對齊 `PUID`、`PGID`，並只在 volume 根目錄 owner 改變時進行
+  必要的 no-follow 遞迴 ownership 修復，避免每次重啟掃描整個世界資料。
+
+### 優雅停服與防壞檔
+
+- Docker Supervisor 在 `SIGTERM`／`SIGINT` 時先等待 `operation_lock` 內進行中的
+  backup、restore 或 update 完成，再透過 REST 執行 save／graceful shutdown，必要
+  時才對完整 PalServer process group 發送 `SIGINT`、`SIGTERM` 與最後的 `SIGKILL`。
+- Supervisor 與 Web／Discord／排程工作共用序列化的 `operation_lock`，避免停服與
+  原子發布或還原同時改寫世界資料；關閉流程不刪除 live SaveGames／Config tree，
+  以降低中斷造成壞檔的風險。
+
+### 測試與發布
+
+- release packager 與 Python package 版本更新為 `0.5.0`，支援以 `--output` 指定
+  tarball 路徑，並持續產生及驗證 `SHA256SUMS`。
+
 ## [0.4.1] - 2026-08-28
 
 Sprint 2（Direction B）補強 Discord 可觀察性與主機資源診斷，並維持所有狀態查詢
@@ -302,6 +347,7 @@ Ubuntu 24.04 systemd 部署工具鏈。
   Bash syntax 與 ShellCheck；涵蓋設定/路徑契約、systemd renderer、生命週期、
   備份/還原失敗邊界、升級、解除安裝及 release 封包潔淨度。
 
+[0.5.0]: https://github.com/PIGGYcloudy/palworld-caretaker/releases/tag/v0.5.0
 [0.4.1]: https://github.com/PIGGYcloudy/palworld-caretaker/releases/tag/v0.4.1
 [0.4.0]: https://github.com/PIGGYcloudy/palworld-caretaker/releases/tag/v0.4.0
 [0.3.0]: https://github.com/PIGGYcloudy/palworld-caretaker/releases/tag/v0.3.0

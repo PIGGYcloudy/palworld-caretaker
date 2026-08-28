@@ -1,0 +1,32 @@
+# Copy this file to docker-compose.yml or use it with:
+# docker compose -f docker-compose.example.yml up -d
+services:
+  palworld-caretaker:
+    build: .
+    image: palworld-caretaker:0.5.0
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      PUID: 1000
+      PGID: 1000
+      STEAMCMD_UPDATE_ON_START: "true"
+      # Empty supports direct LAN IP/DNS access; set an exact public origin
+      # when a reverse proxy terminates TLS.
+      PALWORLD_WEB_PUBLIC_ORIGIN: ""
+      PALWORLD_DOCKER_ALLOW_INSECURE_DEFAULTS: "false"
+    volumes:
+      - ./data/server:/srv/palworld
+      - ./data/backups:/srv/palworld-backups
+      - ./config:/etc/palworld-caretaker
+    ports:
+      - "8211:8211/udp"              # Palworld game traffic
+      - "127.0.0.1:25575:25575/tcp"  # optional REST host exposure
+      - "0.0.0.0:8765:8765/tcp"      # Caretaker Web UI
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail --silent http://127.0.0.1:8765/healthz >/dev/null"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 5m
+    stop_grace_period: 3m

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import base64
+import http.client
 import json
 import os
 from pathlib import Path
@@ -371,6 +372,51 @@ class WebUITests(unittest.TestCase):
         status, _raw, _headers = self.post("stop", token=self.server.csrf_token, origin=True)
         self.assertEqual(status, 200)
         self.assertEqual(self.fixture.lifecycle.stops, 1)
+
+    def test_container_dynamic_origin_accepts_lan_host_and_rejects_cross_origin(self):
+        with patch.dict(os.environ, {
+            "PALWORLD_CONTAINER_MODE": "1",
+            "PALWORLD_WEB_PUBLIC_ORIGIN": "",
+        }):
+            server = create_server(self.fixture.dependencies, host="0.0.0.0", port=0)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                lan_host = f"192.168.50.10:{server.server_port}"
+                headers = {
+                    "Authorization": "Basic " + base64.b64encode(
+                        b"palworld-manager:admin-secret-never-rendered"
+                    ).decode(),
+                    "Content-Type": "application/json",
+                    "X-Palworld-CSRF": server.csrf_token,
+                    "Host": lan_host,
+                    "Origin": f"http://{lan_host}",
+                }
+                connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=3)
+                connection.request("POST", "/api/start", body=b"{}", headers=headers)
+                response = connection.getresponse()
+                self.assertEqual(response.status, 200)
+                response.read()
+                connection.close()
+
+                headers["Origin"] = "http://attacker.invalid"
+                connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=3)
+                connection.request("POST", "/api/start", body=b"{}", headers=headers)
+                response = connection.getresponse()
+                self.assertEqual(response.status, 403)
+                response.read()
+                connection.close()
+
+                headers.pop("Origin")
+                headers["Referer"] = f"http://{lan_host}/"
+                connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=3)
+                connection.request("POST", "/api/start", body=b"{}", headers=headers)
+                response = connection.getresponse()
+                self.assertEqual(response.status, 200)
+                response.read()
+                connection.close()
+            finally:
+                server.shutdown(); server.server_close(); thread.join(timeout=2)
 
     def test_backup_and_restart_check_maintenance_before_any_mutation(self):
         status, raw, _headers = self.post("backup", token=self.server.csrf_token)

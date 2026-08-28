@@ -26,6 +26,8 @@ from palworld_caretaker import (
     ServerDiagnostics, ServerLifecycle, ServiceState, SnapshotError,
     SystemMetrics, SystemdServiceController, collect_system_metrics, load_config,
 )
+from palworld_caretaker.container import SupervisorControlClient, container_mode
+from palworld_caretaker.service import ContainerCommandChannel, ContainerServiceController
 
 
 CONFIG_SOURCE = os.environ.get("PALWORLD_CONFIG", "/srv/palworld/config")
@@ -302,11 +304,16 @@ class BotDependencies:
     audit: AuditLog | None = None
     metrics_collector: Callable[[], SystemMetrics] | None = None
     memory_alert_tracker: MemoryAlertTracker | None = None
+    supervisor: SupervisorControlClient | None = None
 
     @classmethod
     def create(cls, config: CaretakerConfig) -> "BotDependencies":
         api = RESTClient(config)
-        lifecycle = ServerLifecycle(SystemdServiceController(), RestCommandChannel(api), api=api)
+        supervisor = SupervisorControlClient() if container_mode() else None
+        lifecycle = ServerLifecycle(
+            ContainerServiceController(supervisor) if supervisor else SystemdServiceController(),
+            ContainerCommandChannel(supervisor) if supervisor else RestCommandChannel(api), api=api,
+        )
         dependencies = cls(
             config, api, lifecycle, ServerDiagnostics(lifecycle),
             BackupEngine(
@@ -315,7 +322,7 @@ class BotDependencies:
                 backup_root=config.backup_root, local_backup_root=config.local_backup_root,
                 retention_count=config.backup_retention, backup_mount=config.backup_mount,
                 require_mount=config.require_backup_mount,
-            ), OperationCoordinator(),
+            ), OperationCoordinator(), supervisor=supervisor,
         )
         dependencies.memory_alert_tracker = MemoryAlertTracker(
             config.memory_alert_percent, config.memory_alert_cooldown_seconds,
@@ -330,6 +337,12 @@ class BotDependencies:
 
     def systemd_start(self, unit: str, *, wait: bool = True) -> subprocess.CompletedProcess[str]:
         """Only a fixed, sudoers-approved unit name is passed to systemd."""
+        if self.supervisor is not None:
+            action = {"palworld-backup.service": "backup", "palworld-maintenance.service": "update"}.get(unit)
+            if action is None:
+                raise RuntimeError("unsupported container operation")
+            self.supervisor.request(action)
+            return subprocess.CompletedProcess(["container-supervisor", action], 0, "", "")
         return self.runner(
             ["sudo", "-n", "/usr/bin/systemctl", "start", unit, "--wait" if wait else "--no-block"],
             capture_output=True, text=True, timeout=35 * 60 if wait else 15, check=False,
@@ -337,6 +350,9 @@ class BotDependencies:
 
     def graceful_stop(self) -> subprocess.CompletedProcess[str]:
         """Delegate save + shutdown to the root script holding the global lock."""
+        if self.supervisor is not None:
+            self.supervisor.request("stop")
+            return subprocess.CompletedProcess(["container-supervisor", "stop"], 0, "", "")
         return self.runner(
             ["sudo", "-n", str(self.config.scripts_root / "graceful-stop-palworld.sh")],
             capture_output=True, text=True, timeout=8 * 60, check=False,
@@ -349,6 +365,11 @@ class BotDependencies:
 
     def maintenance_service_state(self) -> str | None:
         """Return a verified maintenance unit state, or ``None`` if unknown."""
+        if self.supervisor is not None:
+            try:
+                return "active" if self.supervisor.request("status").get("maintenance") else "inactive"
+            except RuntimeError:
+                return None
         try:
             result = self.runner(
                 ["sudo", "-n", "/usr/bin/systemctl", "is-active", "palworld-maintenance.service"],
@@ -374,6 +395,15 @@ class BotDependencies:
                               status=status, details=details)
         except (OSError, ValueError):
             pass
+
+    def start_server(self) -> subprocess.CompletedProcess[str]:
+        if self.supervisor is not None:
+            self.supervisor.request("start")
+            return subprocess.CompletedProcess(["container-supervisor", "start"], 0, "", "")
+        return self.runner(
+            ["sudo", "-n", "/usr/local/sbin/palworld-control", "start"],
+            capture_output=True, text=True, timeout=130, check=False,
+        )
 
 
 class PalGroup(app_commands.Group):
@@ -554,10 +584,7 @@ class PalGroup(app_commands.Group):
                 if status.service == ServiceState.ACTIVE:
                     count = "未知" if status.players is None else len(status.players)
                     return await interaction.followup.send(f"伺服器目前已經在線，現有 {count} 位玩家。")
-                result = await asyncio.to_thread(
-                    self.dependencies.runner, ["sudo", "-n", "/usr/local/sbin/palworld-control", "start"],
-                    capture_output=True, text=True, timeout=130, check=False,
-                )
+                result = await asyncio.to_thread(self.dependencies.start_server)
                 if result.returncode:
                     self.dependencies.record_audit(action="start", status="failed", user_id=interaction.user.id)
                     return await interaction.followup.send("伺服器啟動失敗，請管理員查看伺服器紀錄。")
@@ -692,6 +719,9 @@ class PalGroup(app_commands.Group):
                     self.dependencies.record_audit(action="update", status="failed", user_id=interaction.user.id)
                     return await interaction.followup.send("無法啟動更新工作，請管理員查看 `palworld-maintenance.service` 紀錄。")
                 self.dependencies.record_audit(action="update", status="requested", user_id=interaction.user.id)
+                if self.dependencies.supervisor is not None:
+                    await interaction.followup.send("✅ 伺服器維護與更新已完成。")
+                    return
                 last_phase, received_run_state = "", False
                 deadline = time.monotonic() + 15 * 60
                 while True:

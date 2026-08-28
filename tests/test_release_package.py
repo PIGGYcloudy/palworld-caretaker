@@ -9,6 +9,8 @@ from pathlib import Path
 
 
 class ReleasePackageTests(unittest.TestCase):
+    VERSION = "0.5.0"
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="palworld-release-")
         self.base = Path(self.temporary.name)
@@ -56,13 +58,11 @@ class ReleasePackageTests(unittest.TestCase):
         result = self._run(
             "/bin/bash",
             "scripts/package-release.sh",
-            "--version",
-            "0.4.1",
-            "--output-dir",
-            str(output),
+            "--output",
+            str(output / f"palworld-caretaker-v{self.VERSION}.tar.gz"),
         )
-        self.assertIn("palworld-caretaker-v0.4.1.tar.gz", result.stdout)
-        return output / "palworld-caretaker-v0.4.1.tar.gz"
+        self.assertIn(f"palworld-caretaker-v{self.VERSION}.tar.gz", result.stdout)
+        return output / f"palworld-caretaker-v{self.VERSION}.tar.gz"
 
     def test_package_is_clean_complete_and_checksum_verified(self):
         output = self.base / "artifacts"
@@ -82,7 +82,7 @@ class ReleasePackageTests(unittest.TestCase):
 
         with tarfile.open(archive, "r:gz") as release:
             names = release.getnames()
-        prefix = "palworld-caretaker-v0.4.1/"
+        prefix = f"palworld-caretaker-v{self.VERSION}/"
         self.assertIn(prefix + "docs/INSTALL.md", names)
         self.assertIn(prefix + "docs/UPGRADE.md", names)
         self.assertIn(prefix + "docs/DISCORD_SETUP.md", names)
