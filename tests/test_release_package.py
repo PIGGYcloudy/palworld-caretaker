@@ -57,12 +57,12 @@ class ReleasePackageTests(unittest.TestCase):
             "/bin/bash",
             "scripts/package-release.sh",
             "--version",
-            "0.3.0",
+            "0.4.0",
             "--output-dir",
             str(output),
         )
-        self.assertIn("palworld-caretaker-v0.3.0.tar.gz", result.stdout)
-        return output / "palworld-caretaker-v0.3.0.tar.gz"
+        self.assertIn("palworld-caretaker-v0.4.0.tar.gz", result.stdout)
+        return output / "palworld-caretaker-v0.4.0.tar.gz"
 
     def test_package_is_clean_complete_and_checksum_verified(self):
         output = self.base / "artifacts"
@@ -82,7 +82,7 @@ class ReleasePackageTests(unittest.TestCase):
 
         with tarfile.open(archive, "r:gz") as release:
             names = release.getnames()
-        prefix = "palworld-caretaker-v0.3.0/"
+        prefix = "palworld-caretaker-v0.4.0/"
         self.assertIn(prefix + "docs/INSTALL.md", names)
         self.assertIn(prefix + "docs/UPGRADE.md", names)
         self.assertIn(prefix + "docs/DISCORD_SETUP.md", names)

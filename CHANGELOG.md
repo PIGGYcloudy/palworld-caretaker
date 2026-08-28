@@ -6,6 +6,50 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 - 尚無變更。
 
+## [0.4.0] - 2026-08-28
+
+Sprint 1 將 Discord 操作授權、遊戲內管理與 SaveGames 匯出納入同一套
+fail-closed 的安全邊界。
+
+### Discord 權限矩陣與管理操作
+
+- 新增 Discord `/pal announce`、`/pal kick` 與 `/pal ban`。公告可直接發送到
+  遊戲內；踢出與封鎖可使用精確玩家名稱或 user/Steam ID，並可附上原因。
+- `/pal backup` 會啟動並驗證一次安全 snapshot；`/pal backups` 列出最近可用快照；
+  `/pal diagnose` 顯示服務、REST 與玩家健康摘要。
+- 權限檢查獨立驗證 guild、channel、role 與 DM 邊界。`DISCORD_PALWORLD_ADMIN_ROLE_IDS`
+  （`ADMIN_ROLE_IDS`）只授權管理員操作；一般指令可由
+  `DISCORD_PALWORLD_ALLOWED_ROLE_IDS` 或管理員角色使用。空 allowlist、未允許頻道、
+  未允許 guild 與私訊一律拒絕。
+
+### Web UI 管理功能
+
+- 新增遊戲內公告表單，以及線上玩家的踢出／封鎖控制；操作前會要求確認，並可填寫
+  原因。
+- 新增 SaveGames ZIP 匯出。匯出前先要求 REST API 存檔，再從目前 SaveGames
+  建立下載檔；symlink、非 regular file、超過大小上限或空間不足時拒絕，暫存檔在
+  完成或失敗後清理。
+- SaveGames 匯出受 `PALWORLD_SAVEGAMES_EXPORT_MAX_BYTES` 限制，預設為 8 GiB；
+  Web UI 仍固定 loopback、Basic Auth、同源 CSRF 與操作狀態檢查。
+
+### 嚴格安全強化
+
+- REST client 限制回應大小、保留 HTTP 錯誤狀態，並對公告、玩家識別碼與管理原因
+  執行安全文字／格式驗證，避免未受控輸入進入伺服器控制請求。
+- Discord 變更指令維持 per-user cooldown、Bot 操作鎖與 audit；`start`、`stop`、
+  `backup` 與 `update` 另外受全域 operation lock 與 maintenance guard 保護。
+- SaveGames walk 使用 `O_NOFOLLOW` 與 inode 檢查，拒絕目錄交換與 symlink traversal；
+  匯出大小與可用空間均在建立 archive 前後受限，避免瀏覽器請求消耗無界本機磁碟。
+
+### 測試與發布
+
+- `python3 -m unittest discover -s tests` 通過 `117/117`：涵蓋 REST moderation
+  contract（`tests/test_rest.py`）、Discord 權限矩陣／管理指令／維護通知、Web UI
+  公告／玩家控制／ZIP 匯出與 symlink／容量邊界，以及既有 audit、備份還原、生命
+  週期與 release artifact 測試。
+- release packager 與 Python package 版本更新為 `0.4.0`；封包維持可重現 tarball、
+  潔淨內容驗證與 `SHA256SUMS`。
+
 ## [0.3.0] - 2026-08-28
 
 這個版本把遊戲內設定、還原、維護與管理操作紀錄整合到同一套可驗證的
@@ -220,6 +264,7 @@ Ubuntu 24.04 systemd 部署工具鏈。
   Bash syntax 與 ShellCheck；涵蓋設定/路徑契約、systemd renderer、生命週期、
   備份/還原失敗邊界、升級、解除安裝及 release 封包潔淨度。
 
+[0.4.0]: https://github.com/PIGGYcloudy/palworld-caretaker/releases/tag/v0.4.0
 [0.3.0]: https://github.com/PIGGYcloudy/palworld-caretaker/releases/tag/v0.3.0
 [0.2.0]: https://github.com/PIGGYcloudy/palworld-caretaker/releases/tag/v0.2.0
 [0.1.0]: https://github.com/PIGGYcloudy/palworld-caretaker/releases/tag/v0.1.0

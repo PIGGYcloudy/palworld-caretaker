@@ -1,6 +1,6 @@
 # Discord Bot 設定
 
-Caretaker 使用 Discord slash command，並以 guild、channel、一般角色與管理員
+v0.4.0 Caretaker 使用 Discord slash command，並以 guild、channel、一般角色與管理員
 角色的數字 ID 做 fail-closed allowlist。私訊一律拒絕；allowlist 空白時所有
 指令都會被拒絕。
 
@@ -50,9 +50,38 @@ Bot permissions 只需要：
 
 權限模型如下：
 
-- `/pal start`、`/pal status`、`/pal players`：一般允許角色或管理員角色。
+- `/pal start`、`/pal status`、`/pal players`、`/pal backups`：一般允許角色或
+  管理員角色。
+- `/pal announce`、`/pal kick`、`/pal ban`、`/pal backup`、`/pal diagnose`：僅
+  管理員角色。
 - `/pal stop confirm:true`、`/pal update confirm:true`：僅管理員角色，並要求
   明確的 `confirm:true`。
+
+`ADMIN_ROLE_IDS` 是 `DISCORD_PALWORLD_ADMIN_ROLE_IDS` 的簡稱；這個設定必須包含
+可執行管理員指令的 Discord role ID。Discord 的 `Administrator` app permission
+不會繞過 Caretaker 的角色檢查。`DISCORD_PALWORLD_ALLOWED_ROLE_IDS` 可包含一般
+操作角色；管理員角色也會自動取得一般指令權限。
+
+## v0.4.0 指令
+
+| 指令 | 參數 | 說明 |
+| --- | --- | --- |
+| `/pal start` | 無 | 啟動服務並等待 REST API ready |
+| `/pal status` | 無 | 查看服務、REST、玩家與閒置關服狀態 |
+| `/pal players` | 無 | 查看目前在線玩家 |
+| `/pal backups` | 無 | 列出最近最多 10 個可用快照與大小 |
+| `/pal announce` | `message` | 發送遊戲內公告（管理員） |
+| `/pal kick` | `player_name_or_id`、`reason`（可選） | 踢出玩家（管理員） |
+| `/pal ban` | `player_name_or_id`、`reason`（可選） | 封鎖玩家（管理員） |
+| `/pal backup` | 無 | 建立並驗證安全 snapshot（管理員） |
+| `/pal diagnose` | 無 | 顯示 secret-masked 健康摘要（管理員） |
+| `/pal stop` | `confirm:true` | 存檔後正常關服（管理員） |
+| `/pal update` | `confirm:true` | 備份、更新並重啟（管理員） |
+
+`kick` 與 `ban` 可輸入精確在線玩家名稱或 user/Steam ID；若名稱重複，請改用
+ID。`announce`、`kick` 與 `ban` 會遵守 per-user cooldown、Bot 操作鎖與 audit；
+`start`、`stop`、`backup` 與 `update` 另外受 maintenance guard 與全域 operation
+lock 保護。診斷與快照清單不會在回覆中顯示 token 或密碼。
 
 ## 執行互動式設定工具
 
@@ -86,9 +115,10 @@ sudo journalctl -u palworld-discord-bot.service -n 100 --no-pager
 ```
 
 全域 slash command 初次同步可能不會立刻出現。出現後，在允許頻道以一般角色
-測試 `/pal status`、`/pal players`，並確認一般角色無法執行 stop/update；再以
-管理員角色測試需要確認的操作。也應從未允許頻道、未允許角色與私訊各測一次
-拒絕行為。
+測試 `/pal status`、`/pal players`、`/pal backups`，並確認一般角色無法執行
+`announce`、`kick`、`ban`、`backup`、`diagnose`、`stop` 或 `update`；再以管理員
+角色測試管理操作。也應從未允許頻道、未允許角色、錯誤 guild 與私訊各測一次拒絕
+行為。
 
 ## Token 安全與輪替
 

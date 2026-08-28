@@ -1,6 +1,6 @@
 # Deployment configuration contract
 
-The v0.3.0 caretaker reads UTF-8 `KEY=VALUE` files as data. It never sources them or
+The v0.4.0 caretaker reads UTF-8 `KEY=VALUE` files as data. It never sources them or
 performs shell expansion. New deployments use these files in increasing
 precedence order:
 
@@ -33,6 +33,29 @@ deleted by the Web UI account.
 `ADMIN_PASSWORD`，因此任何部署預設仍需要認證。建議在多使用者主機設定獨立的
 `PALWORLD_WEB_UI_PASSWORD`。
 
+## v0.4 Discord permission matrix and SaveGames export
+
+Discord 權限由四個 numeric ID 設定共同決定：
+`DISCORD_PALWORLD_ALLOWED_GUILD_IDS`、
+`DISCORD_PALWORLD_ALLOWED_CHANNEL_IDS`、
+`DISCORD_PALWORLD_ALLOWED_ROLE_IDS` 與
+`DISCORD_PALWORLD_ADMIN_ROLE_IDS`。最後一項也常簡稱為 `ADMIN_ROLE_IDS`，只應
+填入管理員 role ID；它不是 Discord 的 `Administrator` app permission。ID 可用逗號
+分隔，只有 channel 設定可使用 `*`。空清單、未允許的 guild/channel/role 與私訊
+都會 fail closed。
+
+一般角色或管理員角色可使用 `/pal start`、`/pal status`、`/pal players` 與
+`/pal backups`。只有 `DISCORD_PALWORLD_ADMIN_ROLE_IDS` 可使用
+`/pal announce`、`/pal kick`、`/pal ban`、`/pal backup`、`/pal diagnose`、
+`/pal stop` 與 `/pal update`；`stop` 和 `update` 另要求 `confirm:true`。完整指令
+參數與 Bot 設定流程見 [Discord Bot 設定](DISCORD_SETUP.md)。
+
+`PALWORLD_SAVEGAMES_EXPORT_MAX_BYTES` 控制 Web UI SaveGames ZIP 匯出的大小，預設
+為 `8589934592`（8 GiB），有效範圍為 1 B 至 64 GiB。匯出前會先要求 REST API
+存檔，並檢查 SaveGames 來源、symlink、可用空間與壓縮檔上限；成功下載或失敗後
+都會移除暫存 archive。請確保 `PALWORLD_MANAGER_STATE_DIR` 所在檔案系統有足夠
+空間。
+
 ## Local visual world settings
 
 The loopback-only Web UI includes a schema-validated World Settings editor for
@@ -53,7 +76,7 @@ wrong types, values outside the schema range, invalid `HH:MM` values, and
 write. The old file contents remain available in the timestamped settings
 backup if an operator needs to inspect or recover a change.
 
-## v0.3 operational records and maintenance
+## v0.4 operational records and maintenance
 
 The default manager state directory is `/var/lib/palworld-manager`. It contains
 the multi-channel audit log at `/var/lib/palworld-manager/audit.log` and the
@@ -64,7 +87,9 @@ mask credential-shaped keys and configured secret values before both writing and
 displaying them. The log is a manager-owned regular file with mode `0640`; it is
 not a replacement for the systemd journal.
 
-The Web UI's SteamCMD maintenance button starts only the fixed
+The Web UI includes in-game announcement broadcasting, online-player kick/ban
+controls, and SaveGames ZIP export in addition to its existing controls. Its
+SteamCMD maintenance button starts only the fixed
 `palworld-maintenance.service` unit. The browser polls the persisted maintenance
 state every 10 seconds and shows the safe phase summary. A maintenance request
 is rejected when another maintenance or operation lock is active. Discord

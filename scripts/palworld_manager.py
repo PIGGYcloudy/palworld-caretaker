@@ -96,6 +96,7 @@ DEFAULT_CONFIG: dict[str, str] = {
     "DISCORD_PALWORLD_ALLOWED_CHANNEL_IDS": "",
     "PALWORLD_WEB_UI_USERNAME": "palworld-manager",
     "PALWORLD_WEB_UI_PASSWORD": "",
+    "PALWORLD_SAVEGAMES_EXPORT_MAX_BYTES": str(8 * 1024 ** 3),
     "BACKUP_RETENTION_COUNT": "14",
     "BACKUP_TIME": "04:30",
     "SERVER_PASSWORD": "",
@@ -306,6 +307,7 @@ def validate_config(config: dict[str, str]) -> dict[str, Path | None]:
     if public_port == rest_port:
         raise ConfigError("PUBLIC_PORT and PALWORLD_REST_API_PORT must be different")
     env_int(config, "PALWORLD_API_TIMEOUT_SECONDS", 5, 1, 30)
+    env_int(config, "PALWORLD_SAVEGAMES_EXPORT_MAX_BYTES", 8 * 1024 ** 3, 1, 64 * 1024 ** 3)
     env_int(config, "PALWORLD_IDLE_TIMEOUT_MINUTES", 10, 1, 10080)
     env_int(config, "PALWORLD_PLAYER_CHECK_INTERVAL_SECONDS", 60, 5, 3600)
     env_int(config, "PALWORLD_STARTUP_GRACE_SECONDS", 600, 0, 86400)

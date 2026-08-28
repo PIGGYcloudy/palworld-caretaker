@@ -6,7 +6,7 @@
 
 ## 系統需求
 
-- Ubuntu 24.04 LTS amd64，使用 systemd 與 APT；其他發行版尚未列入 v0.3.0
+- Ubuntu 24.04 LTS amd64，使用 systemd 與 APT；其他發行版尚未列入 v0.4.0
   的支援範圍。
 - 具 `sudo` 權限的登入帳號，以及可連線至 Ubuntu 套件庫、Steam 與 Discord
   （若啟用 Bot）的網路。
@@ -21,13 +21,13 @@
 
 ## 準備設定
 
-先把 `palworld-caretaker-v0.3.0.tar.gz` 與 `SHA256SUMS` 放在同一目錄，驗證並
+先把 `palworld-caretaker-v0.4.0.tar.gz` 與 `SHA256SUMS` 放在同一目錄，驗證並
 解壓：
 
 ```bash
 sha256sum --check SHA256SUMS
-tar -xzf palworld-caretaker-v0.3.0.tar.gz
-cd palworld-caretaker-v0.3.0
+tar -xzf palworld-caretaker-v0.4.0.tar.gz
+cd palworld-caretaker-v0.4.0
 ```
 
 驗證必須顯示 `OK`。接著在專案根目錄建立不受 Git 管理的部署設定：
@@ -43,7 +43,7 @@ chmod 0640 deployment-config/secrets.env
 編輯三個檔案：
 
 - `caretaker.env`：安裝根目錄、系統帳號、備份目的地、保留數與排程。
-- `server.env`：遊戲、REST API、閒置關服與 Discord allowlist。
+- `server.env`：遊戲、REST API、閒置關服與 Discord allowlist／權限矩陣。
 - `secrets.env`：伺服器密碼、管理密碼、可選的獨立 Web UI 密碼與 Discord Bot token。安裝後為
   `root:<PALWORLD_MANAGER_USER>`、mode `0640`，讓本機 Web UI 與 Discord Bot 可讀取；
   不可給其他群組或使用者讀取權限。
@@ -187,7 +187,44 @@ sudo python3 "<PALWORLD_INSTALL_ROOT>/scripts/palworld_manager.py" \
 `/run/palworld-caretaker/operation.lock`；若已有另一個操作進行中，命令會立即
 拒絕並等待下一次維護窗口。不要刪除、替換或以 symbolic link 取代這個鎖檔。
 
-## v0.3.0 設定、維護與還原
+## v0.4.0 管理功能、設定、維護與還原
+
+### Discord 指令與權限
+
+`ADMIN_ROLE_IDS` 是設定鍵 `DISCORD_PALWORLD_ADMIN_ROLE_IDS` 的簡稱；它必須填入
+管理員 Discord role ID。`DISCORD_PALWORLD_ALLOWED_ROLE_IDS` 是一般操作角色。
+所有請求仍須通過指定 guild 與 channel；空 allowlist、未允許的 guild/channel、
+沒有符合角色或私訊一律拒絕。`DISCORD_PALWORLD_ALLOWED_CHANNEL_IDS=*` 只可放寬
+頻道邊界，不會放寬 guild 或角色邊界。
+
+| 指令 | 權限 | 用途 |
+| --- | --- | --- |
+| `/pal start`、`/pal status`、`/pal players`、`/pal backups` | 一般角色或管理員角色 | 查看狀態、玩家與最近快照；`start` 也會啟動服務 |
+| `/pal announce message:"..."` | 管理員角色 | 發送遊戲內公告 |
+| `/pal kick player_name_or_id:"..." reason:"..."` | 管理員角色 | 踢出指定玩家 |
+| `/pal ban player_name_or_id:"..." reason:"..."` | 管理員角色 | 封鎖指定玩家 |
+| `/pal backup`、`/pal diagnose` | 管理員角色 | 建立安全備份或查看健康診斷 |
+| `/pal stop confirm:true`、`/pal update confirm:true` | 管理員角色 | 安全關服或備份後更新；必須明確確認 |
+
+踢出／封鎖請使用精確玩家名稱或 user/Steam ID；名稱重複時改用 ID。Bot 使用
+slash command，不需要 Discord `Administrator` app permission，且管理員角色仍由
+`DISCORD_PALWORLD_ADMIN_ROLE_IDS` 控制。完整建立、邀請與驗證流程見
+[Discord Bot 設定](DISCORD_SETUP.md)。
+
+### Web UI 公告、玩家管理與 SaveGames 匯出
+
+登入僅限 loopback 的 Web UI 後：
+
+- 「遊戲內公告」表單會將訊息廣播給遊戲內玩家。
+- 線上玩家清單提供「踢出」與「封鎖」按鈕；每次操作先確認，並可輸入原因。
+- 「SaveGames 匯出」會先要求 REST API `POST /save` 成功，再把目前使用中的
+  `Pal/Saved/SaveGames` 建成 ZIP 下載。`PALWORLD_SAVEGAMES_EXPORT_MAX_BYTES`
+  預設為 8 GiB；超過大小、symlink／非 regular file 或暫存空間不足時會拒絕，
+  完成或失敗後清理暫存檔。
+
+這些功能與其他 Web 操作一樣要求 HTTP Basic Auth、同源 CSRF token 與 JSON request；
+SaveGames 匯出另外受 maintenance guard 與操作鎖保護。REST port `8212` 與 Web port
+`8765` 都不可公開到網際網路。
 
 ### Web UI 設定管理
 

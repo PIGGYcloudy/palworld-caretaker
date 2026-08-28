@@ -1,11 +1,11 @@
-# 從既有 `/srv/palworld` 升級至 v0.3.0
+# 從既有 `/srv/palworld` 升級至 v0.4.0
 
 升級器只更新 caretaker 管理程式、Python 環境、sudoers 與動態渲染的 systemd
 units；不下載遊戲、不改寫設定層、不刪除世界存檔，也不碰外部備份目的地。
 本指南假設既有部署的設定位於 `/srv/palworld/config`，包括舊式單一
 `palworld.env` 或新的分層設定檔。
 
-v0.3.0 將 REST、備份/還原、設定 schema、maintenance、audit log、跨行程鎖與
+v0.4.0 將 REST、備份/還原、設定 schema、maintenance、audit log、跨行程鎖與
 loopback Web UI 的安全決策集中在 `src/palworld_caretaker/` Python 核心；systemd、
 Bash 與 Discord 只作為平台入口與 adapter。升級會保留既有設定與世界資料，並讓
 所有入口共用同一套 fail-closed 契約。
@@ -28,7 +28,7 @@ Bash 與 Discord 只作為平台入口與 adapter。升級會保留既有設定�
    ```
 
 3. 另行保存目前 release 原始檔或版本號。若升級後要完整回到舊管理程式，必須
-   重新執行舊 release 的升級器；v0.3.0 的自動 safety copy 保存設定、
+   重新執行舊 release 的升級器；v0.4.0 的自動 safety copy 保存設定、
    `PalWorldSettings.ini`、systemd units 與 sudoers，但不是舊程式碼封包。
 
 請先確認備份目的地已掛載且最新 snapshot 含有 `savegames/`、`config/` 與
@@ -36,7 +36,7 @@ Bash 與 Discord 只作為平台入口與 adapter。升級會保留既有設定�
 
 ## 驗證既有設定
 
-下載並解壓 v0.3.0 release，從解壓目錄執行只讀驗證：
+下載並解壓 v0.4.0 release，從解壓目錄執行只讀驗證：
 
 ```bash
 python3 scripts/palworld_manager.py \
@@ -46,7 +46,7 @@ python3 scripts/palworld_manager.py \
 ```
 
 舊式 `palworld.env` 仍受支援，升級不要求拆檔；若使用 root-level
-`caretaker.env`/`server.env`，v0.3.0 會將可編輯 schema 欄位遷移到
+`caretaker.env`/`server.env`，v0.4.0 會將可編輯 schema 欄位遷移到
 `config/editable/`。若要自行重整其他設定，應在另一個維護時段依
 [設定契約](CONFIGURATION.md) 操作，避免同時升級與重整設定。
 不要以 `.example` 覆蓋正式設定。
@@ -132,10 +132,19 @@ ssh -N -L 8765:127.0.0.1:8765 user@palworld-host
 `/var/lib/palworld-manager/audit.log`；這是 secret-masked、strict JSONL 的
 manager-owned `0640` 檔案，完整命令輸出仍以 systemd journal 為準。
 
-Discord v0.3.0 另提供 `/pal backup`、`/pal backups` 與管理員限定的
-`/pal diagnose`；`/pal update confirm:true` 會在有已知在線玩家時先發送 graceful
-shutdown 倒數公告，並在維護完成或失敗時通知。這些指令也會遵守相同的
-maintenance guard 與全域操作鎖。
+Discord v0.4.0 提供 `/pal announce`、`/pal kick`、`/pal ban`、`/pal backup`、
+`/pal backups` 與管理員限定的 `/pal diagnose`；`/pal update confirm:true` 會在
+有已知在線玩家時先發送 graceful shutdown 倒數公告，並在維護完成或失敗時通知。
+`DISCORD_PALWORLD_ADMIN_ROLE_IDS`（`ADMIN_ROLE_IDS`）只授權 announce、kick、ban、
+backup、diagnose、stop 與 update；一般角色或管理員角色可使用 start、status、
+players 與 backups。`start`、`stop`、`backup` 與 `update` 會遵守 maintenance
+guard 與全域 operation lock；announce、kick 與 ban 則受 Bot 操作鎖、冷卻與 audit
+保護。
+
+Web UI 另外提供遊戲內公告、線上玩家踢出／封鎖，以及 SaveGames ZIP 匯出。匯出會
+先要求 REST API 存檔，受 `PALWORLD_SAVEGAMES_EXPORT_MAX_BYTES`（預設 8 GiB）、
+symlink／regular-file 與可用空間檢查保護，下載後不保留暫存 archive；Web UI 仍只
+監聽 `127.0.0.1:8765`，並要求 Basic Auth 與 CSRF token。
 
 升級後的 backup、restore、update、Web UI、Discord 與 idle watcher 會共用
 `/run/palworld-caretaker/operation.lock`。若升級或另一項維護正在進行，並行
@@ -188,7 +197,7 @@ sudo python3 /srv/palworld/scripts/palworld_manager.py \
 3. 使用先前保存的舊 release 重新執行其升級/安裝管理元件流程，恢復相符的腳本
    與 Python dependencies。不要把新 unit 與舊腳本混用。
 
-4. 若世界資料本身無法載入，使用 v0.3.0 還原工具列出 snapshot，再以精確確認
+4. 若世界資料本身無法載入，使用 v0.4.0 還原工具列出 snapshot，再以精確確認
    字串執行還原：
 
    ```bash

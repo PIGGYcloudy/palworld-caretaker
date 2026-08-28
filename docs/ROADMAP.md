@@ -40,8 +40,8 @@ v0.2.0 已完成中期里程碑的第一批核心工作：
   `--backup-preflight` 維護前檢查。
 - 82 個測試全數通過，包含核心、整合流程與可重現 release artifact 驗證。
 
-後續 v0.3–v0.4 聚焦於設定 schema/migration、診斷與 audit 可觀察性、Web UI
-的設定與 log 體驗，以及更多 Discord 操作；Docker 與 Windows 仍屬長期目標。
+v0.3–v0.4 已完成設定 schema、診斷與 audit 可觀察性、Web UI 操作體驗，以及
+更多 Discord 操作；Docker 與 Windows 仍屬長期目標。
 
 ## v0.3.0 狀態
 
@@ -62,8 +62,20 @@ v0.3.0 完成了上述下一批的核心操作體驗：
   rename 檢查；Web service 的可寫範圍限縮在 manager-owned editable/settings
   backup 路徑。
 
-後續 v0.4 聚焦於更多遊戲設定欄位、audit rotation/匯出、診斷報告、migration
-工具與實機升級驗證；Docker 與 Windows 仍屬長期目標。
+## v0.4.0 狀態
+
+v0.4.0 Sprint 1 已完成 Discord 權限矩陣與遊戲內管理功能：
+
+- `/pal announce`、`/pal kick`、`/pal ban`、`/pal backup`、`/pal backups` 與
+  `/pal diagnose` 已加入；`DISCORD_PALWORLD_ADMIN_ROLE_IDS` 僅授權管理員操作，
+  guild、channel、role 與 DM 邊界均 fail closed。
+- Web UI 已加入遊戲內公告、玩家踢出／封鎖與 SaveGames ZIP 匯出；匯出前先存檔，
+  並使用大小、空間與 symlink 防護。
+- REST 輸入／回應邊界、管理操作鎖、audit 記錄與 SaveGames 路徑信任檢查已補強；
+  `python3 -m unittest discover -s tests` 為 `117/117` 通過。
+
+後續工作聚焦於更多遊戲設定欄位、audit rotation/匯出、migration 工具與實機升級
+驗證；Docker 與 Windows 仍屬長期目標。
 
 ## 短期：Linux v0.1
 
@@ -162,7 +174,7 @@ v0.1 文件至少涵蓋：
 - 文件足以讓未參與開發的人獨立完成基本部署。
 - 建立 `v0.1.0` tag、GitHub Release、checksum 與 release notes。
 
-## 中期：產品化核心與操作體驗（v0.2.0–v0.3.0 已完成）
+## 中期：產品化核心與操作體驗（v0.2.0–v0.4.0 Sprint 1 已完成）
 
 ### 1. 建立 Python 共用核心（v0.2.0–v0.3.0 已完成）
 
@@ -207,9 +219,12 @@ audit log 檢視；後續面板工作包括：
   與更細緻的權限模型。
 - 遠端存取另行提供 HTTPS、認證與防火牆指引，不預設開放公網。
 
-### 5. Discord 操作體驗（v0.3.0 已完成維護流程）
+### 5. Discord 操作體驗（v0.4.0 Sprint 1 已完成）
 
-- 加入 `/pal backup`、`/pal backups` 與 `/pal diagnose`。
+- 加入 `/pal announce`、`/pal kick`、`/pal ban`、`/pal backup`、`/pal backups` 與
+  `/pal diagnose`。
+- 完成 guild/channel/role permission matrix；`DISCORD_PALWORLD_ADMIN_ROLE_IDS`
+  僅授權管理員指令，空 allowlist 與私訊一律拒絕。
 - 維護前在線玩家倒數公告，以及完成與失敗通知。
 - 更新前在線玩家警告。
 - 指令冷卻、全域操作鎖、重複請求保護與維護進度輪詢已完成；後續補充更多
@@ -269,14 +284,14 @@ Docker 可以作為 Windows 的過渡選項，但不等同完整 Windows 原生�
 2. 將 NAS 專用備份改成可設定目的地。
 3. 讓 install 與 upgrade 可安全重複執行。
 4. 加入 diagnose 與分級 uninstall。
-5. 發布 `v0.3.0` 後，依實機回饋進入 schema migration、audit rotation、診斷
+5. 發布 `v0.4.0` 後，依實機回饋進入 schema migration、audit rotation、診斷
    與 adapter 測試。
 
 Web UI、Docker 與 Windows 先以 milestone 追蹤，避免 v0.1 範圍失控。
 
-目前 repository 已完成 v0.3.0 發布所需的通用路徑／分層設定契約、typed
+目前 repository 已完成 v0.4.0 發布所需的通用路徑／分層設定契約、typed
 settings manager、可設定且 fail-closed 的備份目的地、pre-restore safety
 backup、atomic restore、可重複執行的安裝／升級流程、唯讀 diagnose、分級
-uninstall、Web maintenance、Discord 維護通知、audit log、全域操作鎖與
-loopback Web UI。下一批以實機 Ubuntu 升級／解除安裝驗證、schema migration、
+uninstall、Web maintenance、Discord 維護通知與權限矩陣、遊戲內公告、玩家
+moderation、SaveGames ZIP 匯出、audit log、全域操作鎖與 loopback Web UI。下一批以實機 Ubuntu 升級／解除安裝驗證、schema migration、
 audit rotation 與更完整的跨平台 adapter 為主。

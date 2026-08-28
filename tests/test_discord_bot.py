@@ -18,7 +18,7 @@ BOT = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = BOT
 SPEC.loader.exec_module(BOT)
 
-from palworld_caretaker import CaretakerConfig, ServerStatus, ServiceState  # noqa: E402
+from palworld_caretaker import CaretakerConfig, Player, ServerStatus, ServiceState  # noqa: E402
 
 
 class _Response:
@@ -48,8 +48,12 @@ class _Backups:
 
 
 class _API:
-    def __init__(self): self.announcements = []
+    def __init__(self): self.announcements, self.kicks, self.bans = [], [], []
     def broadcast(self, message): self.announcements.append(message)
+    def announce(self, message): self.announcements.append(message)
+    def player_records(self): return (Player("Alice", "steam-alice"),)
+    def kick(self, userid, reason): self.kicks.append((userid, reason))
+    def ban(self, userid, reason): self.bans.append((userid, reason))
 
 
 class _Diagnostics:
@@ -113,6 +117,45 @@ class DiscordBotTests(unittest.IsolatedAsyncioTestCase):
         now[0] += 30
         async with coordinator.hold(1, "backup"):
             pass
+
+    async def test_permission_matrix_fails_closed_and_separates_admins(self):
+        group, _backups, _api = self.make_group()
+        # ``make_group`` bypasses permissions for command tests.  Restore the
+        # production method and use deliberately different IDs for each gate.
+        group.permitted = BOT.PalGroup.permitted.__get__(group, BOT.PalGroup)
+        group.guild_ids, group.channel_ids = {1}, {10}
+        group.role_ids, group.admin_ids, group.channels_all = {20}, {30}, False
+
+        def interaction(*, channel=10, roles=(20,), guild=True):
+            return SimpleNamespace(
+                guild=SimpleNamespace(id=1) if guild else None,
+                guild_id=1 if guild else None,
+                channel_id=channel,
+                user=SimpleNamespace(roles=[SimpleNamespace(id=role) for role in roles]),
+            )
+
+        self.assertFalse(group.permitted(interaction(channel=99)))       # wrong channel
+        self.assertFalse(group.permitted(interaction(roles=(99,))))      # missing normal role
+        self.assertFalse(group.permitted(interaction(), admin=True))     # normal role is not admin
+        self.assertTrue(group.permitted(interaction(roles=(30,)), admin=True))
+        group.channels_all = True
+        self.assertTrue(group.permitted(interaction(channel=99)))        # channel wildcard only
+        self.assertFalse(group.permitted(interaction(guild=False, roles=(30,)), admin=True))
+
+    async def test_admin_player_commands_resolve_names_and_call_typed_api(self):
+        group, _backups, api = self.make_group()
+        calls = []
+        group.dependencies.audit = SimpleNamespace(record=lambda **entry: calls.append(entry))
+        announce, kick, ban = _Interaction(), _Interaction(), _Interaction()
+
+        await BOT.PalGroup.announce_command.callback(group, announce, "Server notice")
+        await BOT.PalGroup.kick.callback(group, kick, "Alice", "AFK")
+        await BOT.PalGroup.ban.callback(group, ban, "steam-alice", "abuse")
+
+        self.assertEqual(api.announcements[-1], "Server notice")
+        self.assertEqual(api.kicks, [("steam-alice", "AFK")])
+        self.assertEqual(api.bans, [("steam-alice", "abuse")])
+        self.assertEqual([entry["action"] for entry in calls], ["announce", "kick", "ban"])
 
     async def test_backup_reports_the_verified_snapshot_and_broadcasts_first(self):
         group, _backups, api = self.make_group()

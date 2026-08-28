@@ -12,6 +12,10 @@ class ConfigError(CaretakerError):
 class ApiError(CaretakerError):
     """The Palworld REST endpoint cannot be used safely."""
 
+    def __init__(self, message: str, *, status: int | None = None):
+        super().__init__(message)
+        self.status = status
+
 
 class SnapshotError(CaretakerError):
     """A backup snapshot failed validation or a file operation failed."""

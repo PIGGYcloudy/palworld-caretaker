@@ -266,7 +266,7 @@ exec /usr/bin/rsync "$@"
         result = self._run("backup-palworld.sh")
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("API request failed", result.stderr)
+        self.assertIn("HTTP 500", result.stderr)
         self.assertNotIn("systemctl stop palworld.service", self.command_log.read_text())
 
     def test_backup_rejects_insufficient_space_before_stopping_service(self):

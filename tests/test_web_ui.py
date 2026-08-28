@@ -15,12 +15,15 @@ import time
 import unittest
 import urllib.error
 import urllib.request
+import zipfile
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
 from palworld_caretaker.config import CaretakerConfig, DEFAULTS
-from palworld_caretaker.rest import Metrics
+from palworld_caretaker.errors import ApiError
+from palworld_caretaker.rest import Metrics, Player
+from palworld_caretaker.web import _Handler
 from palworld_caretaker.service import ServerDiagnostics, ServerStatus, ServiceState
 from palworld_caretaker.backup import BackupEngine, RestoreResult
 from palworld_caretaker.operations import OperationLock, OperationLockBusy, OperationLockUnsafe
@@ -30,9 +33,27 @@ from palworld_caretaker.web import WebDependencies, create_server, main
 class FakeAPI:
     def __init__(self):
         self.broadcasts: list[str] = []
+        self.kicks: list[tuple[str, str]] = []
+        self.bans: list[tuple[str, str]] = []
+        self.saves = 0
 
     def broadcast(self, message):
         self.broadcasts.append(message)
+
+    def announce(self, message):
+        self.broadcasts.append(message)
+
+    def kick(self, userid, message):
+        self.kicks.append((userid, message))
+
+    def ban(self, userid, message):
+        self.bans.append((userid, message))
+
+    def save(self):
+        self.saves += 1
+
+    def player_records(self):
+        return (Player("Alice", "steam-alice", "alice", ping=42, location="Forest"),)
 
     def metrics(self):
         return Metrics({"cpu_usage": 34.5, "memory_usage": 123456})
@@ -175,6 +196,12 @@ class WebUITests(unittest.TestCase):
             headers["Origin"] = self.base
         return self.request(f"/api/{action}", method="POST", headers=headers, body=b"{}")
 
+    def post_json(self, path, payload):
+        return self.request(path, method="POST", headers={
+            "Content-Type": "application/json", "X-Palworld-CSRF": self.server.csrf_token,
+            "Origin": self.base,
+        }, body=json.dumps(payload).encode())
+
     def test_dashboard_and_backup_api_render_only_safe_data(self):
         status, page, headers = self.request("/")
         self.assertEqual(status, 200)
@@ -192,6 +219,127 @@ class WebUITests(unittest.TestCase):
         status, raw, _headers = self.request("/api/backups")
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(raw)["snapshots"][0]["size"], "4.0 KiB")
+
+    def test_player_controls_announce_and_savegames_export(self):
+        status, raw, _headers = self.request("/api/players")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(raw)["players"][0]["user_id"], "steam-alice")
+
+        status, raw, _headers = self.post_json("/api/announce", {"message": "Welcome"})
+        self.assertEqual(status, 200, raw)
+        self.assertEqual(self.fixture.api.broadcasts[-1], "Welcome")
+        status, raw, _headers = self.post_json("/api/players/kick", {"userid": "steam-alice", "message": "AFK"})
+        self.assertEqual(status, 200, raw)
+        self.assertEqual(self.fixture.api.kicks, [("steam-alice", "AFK")])
+        status, raw, _headers = self.post_json("/api/players/ban", {"userid": "steam-alice", "message": "abuse"})
+        self.assertEqual(status, 200, raw)
+        self.assertEqual(self.fixture.api.bans, [("steam-alice", "abuse")])
+
+        save_root = self.fixture.dependencies.config.server_root / "Pal/Saved/SaveGames"
+        save_root.mkdir(parents=True)
+        (save_root / "World.sav").write_bytes(b"world-data")
+        status, archive, headers = self.post_json("/api/savegames/download", {})
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["Content-Type"], "application/zip")
+        self.assertRegex(headers["Content-Disposition"], r'^attachment; filename="palworld-savegames-\d{8}-\d{6}\.zip"$')
+        self.assertEqual(self.fixture.api.saves, 1)
+        archive_path = self.fixture.dependencies.config.settings_backup_root / "assert.zip"
+        archive_path.write_bytes(archive)
+        with zipfile.ZipFile(archive_path) as saved:
+            self.assertEqual(saved.read("World.sav"), b"world-data")
+        self.assertEqual(list(self.fixture.dependencies.config.settings_backup_root.glob("palworld-savegames-*.zip")), [])
+        self.assertEqual(self.request("/api/audit/logs?limit=10")[0], 200)
+
+    def test_savegames_export_rejects_symlink_entries(self):
+        save_root = self.fixture.dependencies.config.server_root / "Pal/Saved/SaveGames"
+        save_root.mkdir(parents=True)
+        outside = Path(self.fixture.dependencies._test_temporary.name) / "outside.sav"  # type: ignore[attr-defined]
+        outside.write_bytes(b"outside")
+        (save_root / "linked.sav").symlink_to(outside)
+        status, _raw, _headers = self.post_json("/api/savegames/download", {})
+        self.assertEqual(status, 503)
+        self.assertEqual(self.fixture.api.saves, 1)  # save happens before archive traversal
+        self.assertEqual(list(self.fixture.dependencies.config.settings_backup_root.glob("palworld-savegames-*.zip")), [])
+
+    def test_savegames_export_rejects_directory_symlinks_and_enforces_bounds(self):
+        save_root = self.fixture.dependencies.config.server_root / "Pal/Saved/SaveGames"
+        save_root.mkdir(parents=True)
+        outside = Path(self.fixture.dependencies._test_temporary.name) / "outside-directory"  # type: ignore[attr-defined]
+        outside.mkdir()
+        (outside / "outside.sav").write_bytes(b"outside")
+        (save_root / "linked-directory").symlink_to(outside, target_is_directory=True)
+        status, _raw, _headers = self.post_json("/api/savegames/download", {})
+        self.assertEqual(status, 503)
+
+        (save_root / "linked-directory").unlink()
+        (save_root / "World.sav").write_bytes(b"more-than-one-byte")
+        self.fixture.dependencies.config.values["PALWORLD_SAVEGAMES_EXPORT_MAX_BYTES"] = "1"
+        status, _raw, _headers = self.post_json("/api/savegames/download", {})
+        self.assertEqual(status, 503)
+        self.assertEqual(list(self.fixture.dependencies.config.settings_backup_root.glob("palworld-savegames-*.zip")), [])
+
+    def test_savegames_export_requires_free_space_for_the_source_size(self):
+        save_root = self.fixture.dependencies.config.server_root / "Pal/Saved/SaveGames"
+        save_root.mkdir(parents=True)
+        (save_root / "World.sav").write_bytes(b"world-data")
+        with patch("palworld_caretaker.web.shutil.disk_usage", return_value=type("Disk", (), {"free": 0})()):
+            status, _raw, _headers = self.post_json("/api/savegames/download", {})
+        self.assertEqual(status, 503)
+        self.assertEqual(list(self.fixture.dependencies.config.settings_backup_root.glob("palworld-savegames-*.zip")), [])
+
+    def test_savegames_export_cleans_up_when_audit_recording_fails(self):
+        save_root = self.fixture.dependencies.config.server_root / "Pal/Saved/SaveGames"
+        save_root.mkdir(parents=True)
+        (save_root / "World.sav").write_bytes(b"world-data")
+
+        def record_audit(_action, status, _details=None):
+            if status == "success":
+                raise OSError("audit storage is unavailable")
+
+        with patch.object(self.fixture.dependencies, "record_audit", side_effect=record_audit):
+            status, _raw, _headers = self.post_json("/api/savegames/download", {})
+
+        self.assertEqual(status, 503)
+        self.assertEqual(list(self.fixture.dependencies.config.settings_backup_root.glob("palworld-savegames-*.zip")), [])
+
+    def test_export_scavenges_crash_leftovers_and_cleans_up_on_broken_connection(self):
+        fixture = make_fixture()
+        export_root = fixture.dependencies.config.settings_backup_root
+        export_root.mkdir(parents=True)
+        stale = export_root / "palworld-savegames-crashed.zip"
+        stale.write_bytes(b"incomplete")
+        server = create_server(fixture.dependencies, port=0)
+        self.assertFalse(stale.exists())
+        server.server_close()
+        fixture.dependencies._test_temporary.cleanup()  # type: ignore[attr-defined]
+
+        archive = self.fixture.dependencies.config.settings_backup_root / "palworld-savegames-abort.zip"
+        archive.write_bytes(b"archive")
+
+        class BrokenWriter:
+            def write(self, _data): raise BrokenPipeError
+
+        class Probe:
+            wfile = BrokenWriter()
+            def send_response(self, _status): pass
+            def _headers(self, *_args, **_kwargs): pass
+            def send_header(self, *_args): pass
+            def end_headers(self): pass
+
+        _Handler._download(Probe(), archive, "palworld-savegames.zip")
+        self.assertFalse(archive.exists())
+
+    def test_player_validation_is_a_clean_400_and_rest_404_is_not_a_503(self):
+        status, _raw, _headers = self.post_json("/api/players/kick", {"userid": "../bad", "message": "reason"})
+        self.assertEqual(status, 400)
+
+        def missing_player(*_args):
+            raise ApiError("HTTP 404", status=404)
+
+        self.fixture.api.kick = missing_player
+        status, raw, _headers = self.post_json("/api/players/kick", {"userid": "steam-alice", "message": "reason"})
+        self.assertEqual(status, 404)
+        self.assertEqual(json.loads(raw)["error"], "Player was not found.")
 
     def test_every_endpoint_requires_basic_auth_before_exposing_csrf(self):
         status, raw, headers = self.request("/", authenticate=False)
@@ -278,7 +426,7 @@ class WebUITests(unittest.TestCase):
 
     def test_maintenance_trigger_status_and_audit_api(self):
         state = self.fixture.dependencies.config.state_root
-        state.mkdir()
+        state.mkdir(exist_ok=True)
         (state / "maintenance-state.json").write_text(json.dumps({
             "phase": "updating", "message": "SteamCMD update is running", "updated_at": "2026-08-28T00:00:00Z",
         }), encoding="utf-8")

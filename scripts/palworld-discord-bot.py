@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import time
 from typing import AsyncIterator, Callable
@@ -82,6 +83,10 @@ def config_from(source: str | Path) -> CaretakerConfig:
 def ids(config: CaretakerConfig, key: str, *, allow_wildcard: bool = False) -> set[int]:
     raw = config.values.get(key, "").strip()
     if allow_wildcard and raw == "*":
+        return set()
+    # Configuration validation normally catches this.  Keeping the frontend
+    # fail-closed makes a hand-built test/development config safe as well.
+    if raw == "*":
         return set()
     return {int(value.strip()) for value in raw.split(",") if value.strip()}
 
@@ -198,14 +203,27 @@ class PalGroup(app_commands.Group):
         self.admin_ids = ids(dependencies.config, "DISCORD_PALWORLD_ADMIN_ROLE_IDS")
 
     def permitted(self, interaction: discord.Interaction, *, admin: bool = False) -> bool:
-        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+        """Apply every boundary independently; an empty list always denies.
+
+        Normal commands accept either an explicitly allowed role or an admin
+        role (the useful fallback when no separate normal role is configured).
+        Administrative commands accept *only* an admin role.  Channel ``*``
+        is deliberately limited to channels: guild and role boundaries remain
+        explicit and DMs can never satisfy this check.
+        """
+        if getattr(interaction, "guild", None) is None:
             return False
-        roles = {role.id for role in interaction.user.roles}
+        guild_id = getattr(interaction, "guild_id", None)
+        channel_id = getattr(interaction, "channel_id", None)
+        roles = {
+            role.id for role in getattr(getattr(interaction, "user", None), "roles", ())
+            if isinstance(getattr(role, "id", None), int)
+        }
         required = self.admin_ids if admin else self.role_ids | self.admin_ids
         return bool(
-            self.guild_ids and interaction.guild_id in self.guild_ids
-            and (self.channels_all or (self.channel_ids and interaction.channel_id in self.channel_ids))
-            and required and (interaction.guild_id in required or bool(roles & required))
+            self.guild_ids and guild_id in self.guild_ids
+            and (self.channels_all or (self.channel_ids and channel_id in self.channel_ids))
+            and required and bool(roles & required)
         )
 
     async def deny(self, interaction: discord.Interaction) -> None:
@@ -217,6 +235,76 @@ class PalGroup(app_commands.Group):
         except ApiError:
             return False
         return True
+
+    async def resolve_player(self, player_name_or_id: str) -> tuple[str, str]:
+        """Resolve a visible player name without guessing when names collide."""
+        if not isinstance(player_name_or_id, str) or not player_name_or_id.strip() or "\x00" in player_name_or_id:
+            raise ApiError("player name or identifier is required")
+        candidate = player_name_or_id.strip()
+        records = await asyncio.to_thread(self.dependencies.api.player_records)
+        by_id = [player for player in records if player.user_id == candidate]
+        if len(by_id) == 1:
+            return candidate, by_id[0].name
+        matches = [player for player in records if player.name.casefold() == candidate.casefold()]
+        if len(matches) == 1 and matches[0].user_id:
+            return matches[0].user_id, matches[0].name
+        if len(matches) > 1:
+            raise ApiError("player name is ambiguous; use the player identifier")
+        # A one-token Steam/user ID can be sent directly even when its player
+        # record is no longer online.  Names with whitespace must resolve.
+        if re.fullmatch(r"[A-Za-z0-9_-]{1,256}", candidate):
+            return candidate, candidate
+        raise ApiError("player was not found; use the exact player identifier")
+
+    async def _moderate_player(self, interaction: discord.Interaction, action: str,
+                               player_name_or_id: str, reason: str) -> None:
+        await interaction.response.defer(thinking=True)
+        try:
+            async with self.dependencies.coordinator.hold(interaction.user.id, action):
+                target, display_name = await self.resolve_player(player_name_or_id)
+                call = self.dependencies.api.kick if action == "kick" else self.dependencies.api.ban
+                await asyncio.to_thread(call, target, reason)
+                self.dependencies.record_audit(
+                    action=action, status="success", user_id=interaction.user.id,
+                    details={"target": target, "player": display_name, "reason": reason},
+                )
+                await interaction.followup.send(f"已{('踢出' if action == 'kick' else '封鎖')}玩家：{display_name}。")
+        except (OperationBusy, CommandCooldown) as exc:
+            await self.operation_error(interaction, exc)
+        except ApiError:
+            self.dependencies.record_audit(action=action, status="failed", user_id=interaction.user.id)
+            await interaction.followup.send("玩家操作失敗；請確認玩家名稱或 ID 與伺服器狀態。", ephemeral=True)
+
+    @app_commands.command(name="announce", description="發送遊戲內公告（管理員）")
+    @app_commands.describe(message="公告內容")
+    async def announce_command(self, interaction: discord.Interaction, message: str):
+        if not self.permitted(interaction, admin=True): return await self.deny(interaction)
+        await interaction.response.defer(thinking=True)
+        try:
+            async with self.dependencies.coordinator.hold(interaction.user.id, "announce"):
+                await asyncio.to_thread(self.dependencies.api.announce, message)
+                self.dependencies.record_audit(
+                    action="announce", status="success", user_id=interaction.user.id,
+                    details={"message": message},
+                )
+                await interaction.followup.send("遊戲內公告已送出。")
+        except (OperationBusy, CommandCooldown) as exc:
+            await self.operation_error(interaction, exc)
+        except ApiError:
+            self.dependencies.record_audit(action="announce", status="failed", user_id=interaction.user.id)
+            await interaction.followup.send("公告未送出；請確認伺服器 REST API 狀態。", ephemeral=True)
+
+    @app_commands.command(name="kick", description="踢出在線玩家（管理員）")
+    @app_commands.describe(player_name_or_id="玩家名稱或 user/Steam ID", reason="可選原因")
+    async def kick(self, interaction: discord.Interaction, player_name_or_id: str, reason: str = ""):
+        if not self.permitted(interaction, admin=True): return await self.deny(interaction)
+        await self._moderate_player(interaction, "kick", player_name_or_id, reason)
+
+    @app_commands.command(name="ban", description="封鎖玩家（管理員）")
+    @app_commands.describe(player_name_or_id="玩家名稱或 user/Steam ID", reason="可選原因")
+    async def ban(self, interaction: discord.Interaction, player_name_or_id: str, reason: str = ""):
+        if not self.permitted(interaction, admin=True): return await self.deny(interaction)
+        await self._moderate_player(interaction, "ban", player_name_or_id, reason)
 
     async def operation_error(self, interaction: discord.Interaction, exc: RuntimeError) -> None:
         if isinstance(exc, CommandCooldown):

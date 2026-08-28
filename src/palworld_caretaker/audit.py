@@ -14,7 +14,7 @@ from typing import Any, Mapping
 # sensitive.  This intentionally implements wildcard matching such as
 # ``*KEY*`` and ``*AUTH*`` rather than maintaining a brittle vocabulary of
 # individual header names.
-_SECRET_KEY = re.compile(r"(?:key|secret|token|pass(?:word)?|auth|credential|cookie)", re.I)
+_SECRET_KEY = re.compile(r"(?:key|secret|token|pass(?:word)?|auth|credential|cookie|message|reason)", re.I)
 _MAX_LINE = 16 * 1024
 _MAX_ENTRIES = 200
 

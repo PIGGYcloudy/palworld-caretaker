@@ -23,7 +23,7 @@ class _Response:
         self.status = status
         self.body = body if isinstance(body, bytes) else json.dumps(body).encode("utf-8")
 
-    def read(self): return self.body
+    def read(self, amount: int | None = None): return self.body if amount is None else self.body[:amount]
     def __enter__(self): return self
     def __exit__(self, *_args): return False
 

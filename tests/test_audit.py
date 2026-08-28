@@ -50,6 +50,10 @@ class AuditLogTests(unittest.TestCase):
         self.assertEqual(result["headers"]["X-Api-Key"], "***")
         self.assertEqual(result["events"], ["token=***"])
 
+    def test_sanitize_redacts_operator_supplied_messages_and_reasons(self):
+        result = sanitize({"message": "private ban rationale", "reason": "support token abc"})
+        self.assertEqual(result, {"message": "***", "reason": "***"})
+
     def test_sanitize_covers_wildcard_credential_key_fragments_and_rejects_nan(self):
         result = sanitize({
             "deployKeyId": "a", "clientSecretValue": "b", "refreshToken": "c",

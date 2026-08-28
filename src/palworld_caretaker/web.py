@@ -19,7 +19,10 @@ import os
 from pathlib import Path
 import re
 import secrets
+import shutil
+import stat
 import subprocess
+import tempfile
 import time
 from typing import Any, Callable, Mapping
 from urllib.parse import parse_qs, urlsplit
@@ -40,6 +43,86 @@ DEFAULT_PORT = 8765
 _MAINTENANCE_UNIT = "palworld-maintenance.service"
 _BACKUP_UNIT = "palworld-backup.service"
 _SAFE_STATES = {"active", "activating", "deactivating", "inactive", "failed"}
+_EXPORT_PREFIX = "palworld-savegames-"
+_EXPORT_SUFFIX = ".zip"
+_EXPORT_CHUNK = 64 * 1024
+
+
+class _BoundedWriter:
+    """File wrapper which refuses a zip larger than its configured limit."""
+
+    def __init__(self, raw: Any, maximum: int):
+        self.raw, self.maximum, self.written = raw, maximum, 0
+
+    def write(self, data: bytes) -> int:
+        if self.written + len(data) > self.maximum:
+            raise WebUIError("SaveGames export exceeds its configured size limit")
+        written = self.raw.write(data)
+        self.written += written
+        return written
+
+    def tell(self) -> int:
+        return self.raw.tell()
+
+    def seek(self, *args: Any) -> int:
+        return self.raw.seek(*args)
+
+    def flush(self) -> None:
+        self.raw.flush()
+
+
+def _open_no_follow(name: str | Path, flags: int, *, directory: int | None = None) -> int:
+    if not hasattr(os, "O_NOFOLLOW"):
+        raise WebUIError("safe SaveGames traversal requires O_NOFOLLOW")
+    try:
+        if directory is None:
+            return os.open(name, flags | os.O_NOFOLLOW)
+        return os.open(name, flags | os.O_NOFOLLOW, dir_fd=directory)
+    except OSError as exc:
+        raise WebUIError("unsafe SaveGames entry") from exc
+
+
+def _safe_savegame_files(root: Path):
+    """Yield regular SaveGames files through pinned, non-following descriptors.
+
+    Every directory is opened with ``O_NOFOLLOW`` and checked against the
+    inode seen by ``lstat``.  This rejects both directory symlinks and a
+    directory swapped for a symlink between enumeration and descent.
+    """
+    root_fd = _open_no_follow(root, os.O_RDONLY | os.O_DIRECTORY)
+
+    def walk(directory_fd: int, relative: Path):
+        with os.scandir(directory_fd) as scanner:
+            entries = list(scanner)
+        for entry in entries:
+            try:
+                initial = os.stat(entry.name, dir_fd=directory_fd, follow_symlinks=False)
+            except OSError as exc:
+                raise WebUIError("unsafe SaveGames entry") from exc
+            child_relative = relative / entry.name
+            if stat.S_ISDIR(initial.st_mode):
+                child_fd = _open_no_follow(entry.name, os.O_RDONLY | os.O_DIRECTORY, directory=directory_fd)
+                try:
+                    opened = os.fstat(child_fd)
+                    if (opened.st_dev, opened.st_ino) != (initial.st_dev, initial.st_ino):
+                        raise WebUIError("unsafe SaveGames entry")
+                    yield from walk(child_fd, child_relative)
+                finally:
+                    os.close(child_fd)
+            elif stat.S_ISREG(initial.st_mode):
+                child_fd = _open_no_follow(entry.name, os.O_RDONLY, directory=directory_fd)
+                opened = os.fstat(child_fd)
+                if (opened.st_dev, opened.st_ino) != (initial.st_dev, initial.st_ino) or not stat.S_ISREG(opened.st_mode):
+                    os.close(child_fd)
+                    raise WebUIError("unsafe SaveGames entry")
+                yield child_relative, child_fd, opened.st_size
+            else:
+                raise WebUIError("unsafe SaveGames entry")
+
+    try:
+        yield from walk(root_fd, Path())
+    finally:
+        os.close(root_fd)
 
 
 class WebUIError(RuntimeError):
@@ -391,6 +474,148 @@ class WebDependencies:
             })
         return {"snapshots": snapshots}
 
+    def players_payload(self) -> dict[str, Any]:
+        """Return player records needed for local moderation controls."""
+        return {"players": [
+            {
+                "name": player.name, "user_id": player.user_id,
+                "account_name": player.account_name, "ping": player.ping,
+                "location": player.location,
+            }
+            for player in self.api.player_records()
+        ]}
+
+    def announce(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        message = payload.get("message")
+        if not isinstance(message, str):
+            raise WebUIError("announcement message is required")
+        self.api.announce(message)
+        return {"message": "In-game announcement sent."}
+
+    def moderate_player(self, action: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+        if action not in {"kick", "ban"}:
+            raise WebUIError("unsupported player operation")
+        target, reason = payload.get("userid"), payload.get("message", "")
+        if not isinstance(target, str) or not isinstance(reason, str):
+            raise WebUIError("player identifier and reason must be text")
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,256}", target, re.ASCII):
+            raise WebUIError("player identifier is invalid")
+        call = self.api.kick if action == "kick" else self.api.ban
+        call(target, reason)
+        return {"message": f"Player {action} request sent.", "userid": target}
+
+    def _export_root(self) -> Path:
+        """Return the service-writable, manager-owned export scratch directory."""
+        state_root = self.config.state_root
+        try:
+            state_info = state_root.lstat()
+        except FileNotFoundError:
+            state_root.mkdir(mode=0o750, parents=True, exist_ok=True)
+            state_info = state_root.lstat()
+        except OSError as exc:
+            raise WebUIError("safe temporary storage is unavailable") from exc
+        if stat.S_ISLNK(state_info.st_mode) or not stat.S_ISDIR(state_info.st_mode):
+            raise WebUIError("safe temporary storage is unavailable")
+        root = self.config.settings_backup_root
+        try:
+            info = root.lstat()
+        except FileNotFoundError:
+            root.mkdir(mode=0o700)
+            info = root.lstat()
+        except OSError as exc:
+            raise WebUIError("safe temporary storage is unavailable") from exc
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise WebUIError("safe temporary storage is unavailable")
+        return root
+
+    def scavenge_export_archives(self) -> None:
+        """Remove archives left by a crash before accepting new UI requests."""
+        root = self._export_root()
+        try:
+            entries = list(root.iterdir())
+        except OSError as exc:
+            raise WebUIError("safe temporary storage is unavailable") from exc
+        for entry in entries:
+            if not entry.name.startswith(_EXPORT_PREFIX) or not entry.name.endswith(_EXPORT_SUFFIX):
+                continue
+            try:
+                mode = entry.lstat().st_mode
+                if stat.S_ISREG(mode) or stat.S_ISLNK(mode):
+                    entry.unlink()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise WebUIError("stale SaveGames export could not be removed") from exc
+
+    def _active_savegames_root(self) -> Path:
+        """Resolve the configured active save directory without accepting links."""
+        configured = self.config.server_root / "Pal/Saved/SaveGames"
+        try:
+            if stat.S_ISLNK(configured.lstat().st_mode) or not configured.is_dir():
+                raise OSError("SaveGames is not a real directory")
+            root = configured.resolve(strict=True)
+            server_root = self.config.server_root.resolve(strict=True)
+            root.relative_to(server_root)
+        except (OSError, ValueError) as exc:
+            raise WebUIError("active SaveGames directory is unavailable") from exc
+        return root
+
+    def export_savegames(self) -> tuple[Path, str]:
+        """Save first, then create a bounded zip from a strict descriptor walk."""
+        try:
+            with self.operation_lock():
+                self._require_idle_maintenance()
+                self.api.save()
+                save_root = self._active_savegames_root()
+                export_root = self._export_root()
+                maximum = int(self.config.values["PALWORLD_SAVEGAMES_EXPORT_MAX_BYTES"])
+                source_bytes = 0
+                for _relative, descriptor, size in _safe_savegame_files(save_root):
+                    try:
+                        source_bytes += size
+                        if source_bytes > maximum:
+                            raise WebUIError("SaveGames export exceeds its configured size limit")
+                    finally:
+                        os.close(descriptor)
+                # Deflation may help, but planning for an incompressible input
+                # is the only safe disk reservation.  Leave a small amount for
+                # zip metadata and concurrent audit records.
+                required = source_bytes + 1024 * 1024
+                if shutil.disk_usage(export_root).free < required:
+                    raise WebUIError("insufficient free space for SaveGames export")
+                handle = tempfile.NamedTemporaryFile(
+                    prefix=_EXPORT_PREFIX, suffix=_EXPORT_SUFFIX, dir=export_root, delete=False,
+                )
+                archive_path = Path(handle.name)
+                handle.close()
+                try:
+                    import zipfile
+                    with archive_path.open("wb") as raw:
+                        bounded = _BoundedWriter(raw, maximum)
+                        with zipfile.ZipFile(bounded, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                            for relative, descriptor, _size in _safe_savegame_files(save_root):
+                                try:
+                                    with os.fdopen(descriptor, "rb", closefd=True) as source, \
+                                            archive.open(relative.as_posix(), "w") as destination:
+                                        while chunk := source.read(_EXPORT_CHUNK):
+                                            destination.write(chunk)
+                                except BaseException:
+                                    # fdopen owns the descriptor only after it
+                                    # is entered; close it for an earlier open
+                                    # failure as well.
+                                    try:
+                                        os.close(descriptor)
+                                    except OSError:
+                                        pass
+                                    raise
+                except BaseException:
+                    archive_path.unlink(missing_ok=True)
+                    raise
+        except OperationLockBusy as exc:
+            raise OperationInProgress(str(exc)) from exc
+        filename = datetime.now(timezone.utc).strftime("palworld-savegames-%Y%m%d-%H%M%S.zip")
+        return archive_path, filename
+
     def _settings_store(self) -> SettingsStore:
         if self.settings_store is not None:
             return self.settings_store
@@ -455,7 +680,10 @@ def _page(token: str) -> bytes:
 body{{font:16px system-ui,sans-serif;margin:2rem;max-width:58rem;color:#17212b;background:#f8fafc}}h1{{margin-bottom:.2rem}}section{{background:#fff;border:1px solid #d9e1ea;border-radius:.5rem;padding:1rem;margin:1rem 0}}button{{padding:.55rem .8rem;margin:.2rem}}#message{{min-height:1.5rem}}ul{{padding-left:1.3rem}}fieldset{{border:0;border-top:1px solid #d9e1ea;margin:1rem 0;padding:1rem 0}}legend{{font-weight:650}}label{{display:grid;grid-template-columns:minmax(13rem,1fr) minmax(12rem,2fr);gap:.75rem;align-items:center;margin:.55rem 0}}input,select{{font:inherit;padding:.35rem}}#settings-diff{{white-space:pre-wrap}}.notice{{color:#8a4b00}}
 </style></head><body><h1>Palworld Caretaker</h1><p>僅限本機環回位址。</p>
 <section><h2>伺服器狀態</h2><div id=\"status\">讀取中…</div></section>
+<section><h2>線上玩家</h2><ul id=\"players\"></ul></section>
+<section><h2>遊戲內公告</h2><form id=\"announce-form\"><label><span>公告內容</span><input id=\"announce-message\" name=\"message\" maxlength=\"1024\" required></label><button type=\"submit\">發送公告</button></form></section>
 <section><h2>備份快照</h2><ul id=\"backups\"></ul><button data-action=\"backup\">立即安全備份</button><p>還原會先停止伺服器並保留本機 safety backup。</p><select id=\"restore-snapshot\"></select><button id=\"restore\">從快照還原</button></section>
+<section><h2>SaveGames 匯出</h2><p>會先要求伺服器存檔，再下載目前使用中的 SaveGames 壓縮檔。</p><button id=\"savegames-download\">下載 SaveGames</button></section>
 <section><h2>安全操作</h2><button data-action=\"start\">啟動</button><button data-action=\"stop\">安全關閉</button><button data-action=\"restart\">安全重啟</button><p id=\"message\" role=\"status\"></p></section>
 <section><h2>SteamCMD 維護</h2><div id=\"maintenance\">讀取中…</div><button id=\"maintenance-trigger\">執行備份與更新</button></section>
 <section><h2>最近操作紀錄</h2><ul id=\"audit\"></ul></section>
@@ -463,8 +691,9 @@ body{{font:16px system-ui,sans-serif;margin:2rem;max-width:58rem;color:#17212b;b
 <script nonce={token}>const csrf={escaped_token};
 const request=async(path,options={{}})=>{{const r=await fetch(path,options);const d=await r.json();if(!r.ok)throw Error(d.error||'操作失敗');return d;}};
 const text=(v)=>v===null?'未知':String(v);
-async function refresh(){{try{{const [s,b,m,a]=await Promise.all([request('/api/status'),request('/api/backups'),request('/api/maintenance/status'),request('/api/audit/logs?limit=10')]);
+async function refresh(){{try{{const [s,p,b,m,a]=await Promise.all([request('/api/status'),request('/api/players'),request('/api/backups'),request('/api/maintenance/status'),request('/api/audit/logs?limit=10')]);
 document.querySelector('#status').textContent=`服務：${{s.service}}；REST：${{s.api_reachable?'可連線':'無法連線'}}；玩家：${{s.players===null?'未知':s.players.join('、')||'無'}}；CPU：${{text(s.metrics.cpu)}}；記憶體：${{text(s.metrics.memory)}}`;
+const players=document.querySelector('#players');players.replaceChildren(...p.players.map(player=>{{const li=document.createElement('li'),label=document.createElement('span');label.textContent=player.name+(player.user_id?` (${{player.user_id}})`: '（沒有可用 ID）');li.append(label);if(player.user_id)for(const action of ['kick','ban']){{const button=document.createElement('button');button.textContent=action==='kick'?'踢出':'封鎖';button.addEventListener('click',async()=>{{if(!confirm(`確定要${{button.textContent}} ${{player.name}}？`))return;const reason=prompt('原因（可留空）：')??'';try{{const data=await request('/api/players/'+action,{{method:'POST',headers:{{'Content-Type':'application/json','X-Palworld-CSRF':csrf}},body:JSON.stringify({{userid:player.user_id,message:reason}})}});document.querySelector('#message').textContent=data.message;await refresh();}}catch(e){{document.querySelector('#message').textContent=e.message;}}}});li.append(button);}}return li;}}));if(!p.players.length)players.textContent='目前沒有在線玩家。';
 const list=document.querySelector('#backups');list.replaceChildren(...b.snapshots.map(x=>{{const li=document.createElement('li');li.textContent=`${{x.name}} — ${{x.created_at||'時間未知'}} — ${{x.size}}`;return li;}}));
 if(!b.snapshots.length)list.textContent='目前沒有可用快照。';const select=document.querySelector('#restore-snapshot');const selected=select.value;select.replaceChildren(...b.snapshots.map(x=>{{const option=document.createElement('option');option.value=x.name;option.textContent=x.name;return option;}}));select.value=selected;
 document.querySelector('#maintenance').textContent=`服務：${{m.service}}；階段：${{m.phase||'尚無紀錄'}}；最新：${{m.latest_log_summary||'尚無紀錄'}}`;
@@ -472,6 +701,8 @@ const audit=document.querySelector('#audit');audit.replaceChildren(...a.entries.
 document.querySelectorAll('button[data-action]').forEach(button=>button.addEventListener('click',async()=>{{const action=button.dataset.action;if((action==='stop'||action==='restart')&&!confirm('確定要執行安全 '+action+'？'))return;button.disabled=true;try{{const data=await request('/api/'+action,{{method:'POST',headers:{{'Content-Type':'application/json','X-Palworld-CSRF':csrf}},body:'{{}}'}});document.querySelector('#message').textContent=data.message;await refresh();}}catch(e){{document.querySelector('#message').textContent=e.message;}}finally{{button.disabled=false;}}}}));refresh();setInterval(refresh,10000);
 document.querySelector('#restore').addEventListener('click',async()=>{{const snapshot=document.querySelector('#restore-snapshot').value;if(!snapshot||!confirm('確定要從 '+snapshot+' 還原？伺服器會停止。'))return;try{{const data=await request('/api/backups/restore',{{method:'POST',headers:{{'Content-Type':'application/json','X-Palworld-CSRF':csrf}},body:JSON.stringify({{snapshot}})}});document.querySelector('#message').textContent=data.message+' Safety backup: '+data.safety_backup;await refresh();}}catch(e){{document.querySelector('#message').textContent=e.message;}}}});
 document.querySelector('#maintenance-trigger').addEventListener('click',async()=>{{try{{const data=await request('/api/maintenance/trigger',{{method:'POST',headers:{{'Content-Type':'application/json','X-Palworld-CSRF':csrf}},body:'{{}}'}});document.querySelector('#message').textContent=data.message;await refresh();}}catch(e){{document.querySelector('#message').textContent=e.message;}}}});
+document.querySelector('#announce-form').addEventListener('submit',async event=>{{event.preventDefault();const input=document.querySelector('#announce-message');if(!input.reportValidity())return;try{{const data=await request('/api/announce',{{method:'POST',headers:{{'Content-Type':'application/json','X-Palworld-CSRF':csrf}},body:JSON.stringify({{message:input.value}})}});document.querySelector('#message').textContent=data.message;input.value='';await refresh();}}catch(e){{document.querySelector('#message').textContent=e.message;}}}});
+document.querySelector('#savegames-download').addEventListener('click',async()=>{{const button=document.querySelector('#savegames-download');button.disabled=true;try{{const response=await fetch('/api/savegames/download',{{method:'POST',headers:{{'Content-Type':'application/json','X-Palworld-CSRF':csrf}},body:'{{}}'}});if(!response.ok){{const data=await response.json();throw Error(data.error||'匯出失敗');}}const blob=await response.blob(),url=URL.createObjectURL(blob),link=document.createElement('a');link.href=url;link.download='palworld-savegames.zip';link.click();URL.revokeObjectURL(url);document.querySelector('#message').textContent='SaveGames 匯出完成。';await refresh();}}catch(e){{document.querySelector('#message').textContent=e.message;}}finally{{button.disabled=false;}}}});
 const settingsForm=document.querySelector('#settings-form');const settingsValues=()=>Object.fromEntries(new FormData(settingsForm).entries());
 const showDiff=data=>{{const changes=data.changes||[];document.querySelector('#settings-diff').textContent=changes.length?changes.map(x=>`${{x.category}} — ${{x.label}}: ${{x.old}} → ${{x.new}}`).join('\\n'):'沒有變更。';document.querySelector('#restart-notice').hidden=!data.restart_required;}};
 async function loadSettings(){{try{{const data=await request('/api/settings');const root=document.querySelector('#settings-fields');root.replaceChildren();for(const category of data.categories){{const fieldset=document.createElement('fieldset'),legend=document.createElement('legend');legend.textContent=category.name;fieldset.append(legend);for(const field of category.fields){{const label=document.createElement('label'),caption=document.createElement('span'),input=document.createElement(field.kind==='choice'?'select':'input');caption.textContent=field.label;input.name=field.key;input.required=true;if(field.kind==='boolean'){{for(const optionValue of ['true','false']){{const option=document.createElement('option');option.value=optionValue;option.textContent=optionValue==='true'?'Enabled':'Disabled';input.append(option);}}}}else if(field.kind==='integer'||field.kind==='number'){{input.type='number';input.step=field.kind==='integer'?'1':'0.1';if(field.minimum!==null)input.min=field.minimum;if(field.maximum!==null)input.max=field.maximum;}}else input.type='text';if(field.kind==='choice')for(const optionValue of field.choices){{const option=document.createElement('option');option.value=optionValue;option.textContent=optionValue;input.append(option);}}input.value=field.value;label.append(caption,input);fieldset.append(label);}}root.append(fieldset);}}showDiff({{changes:[],restart_required:data.restart_required}});}}catch(e){{document.querySelector('#settings-fields').textContent=e.message;}}}}
@@ -517,6 +748,23 @@ class _Handler(BaseHTTPRequestHandler):
     def _json(self, status: HTTPStatus, payload: Mapping[str, Any]) -> None:
         self._send(status, json.dumps(payload, separators=(",", ":")).encode("utf-8"), "application/json; charset=utf-8")
 
+    def _download(self, archive_path: Path, filename: str) -> None:
+        """Return a fixed-name archive and remove its private temporary file."""
+        try:
+            size = archive_path.stat().st_size
+            self.send_response(HTTPStatus.OK)
+            self._headers("application/zip", size)
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+            self.end_headers()
+            with archive_path.open("rb") as archive:
+                shutil.copyfileobj(archive, self.wfile, length=64 * 1024)
+        except (BrokenPipeError, ConnectionResetError):
+            # A browser can cancel a download at any point.  The archive is
+            # still response-owned and the finally block below removes it.
+            return
+        finally:
+            archive_path.unlink(missing_ok=True)
+
     def _error(self, status: HTTPStatus, message: str) -> None:
         self._json(status, {"error": message})
 
@@ -559,6 +807,8 @@ class _Handler(BaseHTTPRequestHandler):
                 self._json(HTTPStatus.OK, self.server.dependencies.status_payload())
             elif request.path == "/api/backups" and not request.query:
                 self._json(HTTPStatus.OK, self.server.dependencies.backups_payload())
+            elif request.path == "/api/players" and not request.query:
+                self._json(HTTPStatus.OK, self.server.dependencies.players_payload())
             elif request.path == "/api/settings" and not request.query:
                 self._json(HTTPStatus.OK, self.server.dependencies.settings_payload())
             elif request.path == "/api/maintenance/status" and not request.query:
@@ -663,6 +913,52 @@ class _Handler(BaseHTTPRequestHandler):
                 self.server.dependencies.record_audit("update", "failed")
                 self._error(HTTPStatus.SERVICE_UNAVAILABLE, "Maintenance could not be started safely.")
             return
+        if request.path in {"/api/announce", "/api/broadcast"}:
+            try:
+                result = self.server.dependencies.announce(payload)
+                self.server.dependencies.record_audit("announce", "success", {"message": payload.get("message", "")})
+                self._json(HTTPStatus.OK, result)
+            except WebUIError:
+                self.server.dependencies.record_audit("announce", "rejected")
+                self._error(HTTPStatus.BAD_REQUEST, "Announcement request was rejected.")
+            except ApiError:
+                self.server.dependencies.record_audit("announce", "failed")
+                self._error(HTTPStatus.SERVICE_UNAVAILABLE, "Announcement could not be sent.")
+            return
+        player_action = {"/api/players/kick": "kick", "/api/players/ban": "ban"}.get(request.path)
+        if player_action is not None:
+            try:
+                result = self.server.dependencies.moderate_player(player_action, payload)
+                self.server.dependencies.record_audit(player_action, "success", {"userid": result["userid"]})
+                self._json(HTTPStatus.OK, result)
+            except WebUIError:
+                self.server.dependencies.record_audit(player_action, "rejected")
+                self._error(HTTPStatus.BAD_REQUEST, "Player operation was rejected.")
+            except ApiError as exc:
+                self.server.dependencies.record_audit(player_action, "failed")
+                if exc.status == HTTPStatus.NOT_FOUND:
+                    self._error(HTTPStatus.NOT_FOUND, "Player was not found.")
+                else:
+                    self._error(HTTPStatus.SERVICE_UNAVAILABLE, "Player operation could not be completed.")
+            return
+        if request.path == "/api/savegames/download":
+            try:
+                archive_path, filename = self.server.dependencies.export_savegames()
+                try:
+                    self.server.dependencies.record_audit("savegames_export", "success", {"filename": filename})
+                    self._download(archive_path, filename)
+                finally:
+                    archive_path.unlink(missing_ok=True)
+            except MaintenanceInProgress:
+                self.server.dependencies.record_audit("savegames_export", "conflict", {"reason": "maintenance"})
+                self._error(HTTPStatus.CONFLICT, "Maintenance is active; export was not started.")
+            except OperationInProgress:
+                self.server.dependencies.record_audit("savegames_export", "conflict")
+                self._error(HTTPStatus.CONFLICT, "Another operation is already in progress.")
+            except (ApiError, OSError, RuntimeError):
+                self.server.dependencies.record_audit("savegames_export", "failed")
+                self._error(HTTPStatus.SERVICE_UNAVAILABLE, "SaveGames export failed safely.")
+            return
         action = {"/api/backup": "backup", "/api/start": "start", "/api/stop": "stop", "/api/restart": "restart"}.get(request.path)
         if action is None:
             self._error(HTTPStatus.NOT_FOUND, "Not found.")
@@ -694,6 +990,10 @@ class WebServer(ThreadingHTTPServer):
             raise ValueError("web UI must bind only to 127.0.0.1")
         if not isinstance(port, int) or not 0 <= port <= 65535:
             raise ValueError("web UI port must be between 0 and 65535")
+        # A response-owned archive has no durable purpose.  Anything matching
+        # the private export naming convention at process start is from a
+        # previous crash or forced termination and is removed before serving.
+        dependencies.scavenge_export_archives()
         self.dependencies = dependencies
         self.csrf_token = secrets.token_urlsafe(32)
         self.auth_username = dependencies.config.values["PALWORLD_WEB_UI_USERNAME"]

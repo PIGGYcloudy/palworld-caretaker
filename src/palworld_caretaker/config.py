@@ -30,6 +30,10 @@ DEFAULTS: dict[str, str] = {
     "BACKUP_RETENTION_COUNT": "14", "BACKUP_TIME": "04:30",
     "SERVER_PASSWORD": "", "ADMIN_PASSWORD": "", "DISCORD_BOT_TOKEN": "",
     "PALWORLD_WEB_UI_USERNAME": "palworld-manager", "PALWORLD_WEB_UI_PASSWORD": "",
+    # The archive is assembled in the manager state directory.  This cap is
+    # deliberately independent from backup retention so a browser request
+    # cannot consume arbitrary local disk.
+    "PALWORLD_SAVEGAMES_EXPORT_MAX_BYTES": str(8 * 1024 ** 3),
     **EDITABLE_DEFAULTS,
 }
 CONFIG_FILES = ("caretaker.env", "server.env", "secrets.env")
@@ -205,7 +209,8 @@ def _validate_core(values: Mapping[str, str]) -> None:
         raise ConfigError("PALWORLD_BACKUP_DIR must be below PALWORLD_BACKUP_MOUNT when mount checking is enabled")
     for key, low, high in (("MAX_PLAYERS", 1, 32), ("BASE_CAMP_MAX_NUM_IN_GUILD", 1, 10),
                            ("PUBLIC_PORT", 1, 65535), ("PALWORLD_REST_API_PORT", 1, 65535),
-                           ("PALWORLD_API_TIMEOUT_SECONDS", 1, 30), ("BACKUP_RETENTION_COUNT", 1, 1000)):
+                           ("PALWORLD_API_TIMEOUT_SECONDS", 1, 30), ("BACKUP_RETENTION_COUNT", 1, 1000),
+                           ("PALWORLD_SAVEGAMES_EXPORT_MAX_BYTES", 1, 64 * 1024 ** 3)):
         _integer(values, key, low, high)
     if _integer(values, "PUBLIC_PORT", 1, 65535) == _integer(values, "PALWORLD_REST_API_PORT", 1, 65535):
         raise ConfigError("PUBLIC_PORT and PALWORLD_REST_API_PORT must be different")
@@ -218,6 +223,8 @@ def _validate_core(values: Mapping[str, str]) -> None:
             raise ConfigError(f"{key} is not a valid system account name")
     for key in ("DISCORD_PALWORLD_ALLOWED_GUILD_IDS", "DISCORD_PALWORLD_ALLOWED_ROLE_IDS", "DISCORD_PALWORLD_ADMIN_ROLE_IDS", "DISCORD_PALWORLD_ALLOWED_CHANNEL_IDS"):
         value = values.get(key, "")
+        if value == "*" and key != "DISCORD_PALWORLD_ALLOWED_CHANNEL_IDS":
+            raise ConfigError(f"{key} may not use a wildcard")
         if value != "*" and value and any(not _DISCORD_ID_RE.fullmatch(item.strip()) for item in value.split(",")):
             raise ConfigError(f"{key} must be a comma-separated list of numeric IDs")
     validate_settings_values(values)
