@@ -3,6 +3,7 @@ config/palworld.env
 *.env
 !.env.example
 !config/*.env.example
+!docker/default-config/*.env
 
 # Local backups and pre-upgrade snapshots
 .local-backups/
