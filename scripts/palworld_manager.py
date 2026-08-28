@@ -7,6 +7,7 @@ import base64
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass
 import json
+import math
 import os
 import pwd
 import re
@@ -26,11 +27,13 @@ except ImportError:  # pragma: no cover - the deployed adapter is Linux-only
 
 try:
     from palworld_caretaker.backup import BackupManager as _CoreBackupManager
+    from palworld_caretaker.audit import AuditLog as _CoreAuditLog
     from palworld_caretaker.errors import SnapshotError as _CoreSnapshotError
     from palworld_caretaker.operations import OperationLock as _CoreOperationLock
     from palworld_caretaker.operations import OperationLockBusy as _CoreOperationLockBusy
 except ImportError:
     _CoreBackupManager = None
+    _CoreAuditLog = None
     class _CoreSnapshotError(RuntimeError):
         pass
 
@@ -66,6 +69,13 @@ DEFAULT_CONFIG: dict[str, str] = {
     "PALWORLD_MANAGER_USER": "palworld-manager",
     "MAX_PLAYERS": "10",
     "BASE_CAMP_MAX_NUM_IN_GUILD": "10",
+    "DAY_TIME_SPEED_RATE": "1.0", "NIGHT_TIME_SPEED_RATE": "1.0",
+    "EXP_RATE": "1.0", "PAL_CAPTURE_RATE": "1.0",
+    "COLLECTION_DROP_RATE": "1.0", "ENEMY_DROP_ITEM_RATE": "1.0",
+    "PAL_DAMAGE_RATE_ATTACK": "1.0", "PAL_DAMAGE_RATE_DEFENSE": "1.0",
+    "PLAYER_DAMAGE_RATE_ATTACK": "1.0", "PLAYER_DAMAGE_RATE_DEFENSE": "1.0",
+    "GUILD_PLAYER_MAX_NUM": "20", "PAL_SPAWN_NUM_RATE": "1.0",
+    "DROP_ITEM_MAX_NUM": "3000", "PAL_EGG_DEFAULT_HATCHING_TIME": "72.0",
     "SERVER_NAME": "Palworld Dedicated Server",
     "SERVER_DESCRIPTION": "Private Palworld Dedicated Server",
     "PUBLIC_PORT": "8211",
@@ -95,6 +105,24 @@ DEFAULT_CONFIG: dict[str, str] = {
 
 CONFIG_FILES = ("caretaker.env", "server.env", "secrets.env")
 LEGACY_CONFIG_FILE = "palworld.env"
+EDITABLE_CONFIG_DIRECTORY = "editable"
+EDITABLE_CONFIG_FILES = ("caretaker.env", "server.env")
+# Keep this bootstrap-safe copy in sync with
+# palworld_caretaker.settings.SETTING_SPECS.  The installer invokes this module
+# before the versioned Python package has been deployed, so importing that
+# module here would weaken fresh-install preflight.
+EDITABLE_SETTING_KEYS = frozenset({
+    "SERVER_NAME", "SERVER_DESCRIPTION", "MAX_PLAYERS",
+    "DAY_TIME_SPEED_RATE", "NIGHT_TIME_SPEED_RATE", "EXP_RATE",
+    "PAL_CAPTURE_RATE", "COLLECTION_DROP_RATE", "ENEMY_DROP_ITEM_RATE",
+    "PAL_DAMAGE_RATE_ATTACK", "PAL_DAMAGE_RATE_DEFENSE",
+    "PLAYER_DAMAGE_RATE_ATTACK", "PLAYER_DAMAGE_RATE_DEFENSE",
+    "GUILD_PLAYER_MAX_NUM", "BASE_CAMP_MAX_NUM_IN_GUILD",
+    "PAL_SPAWN_NUM_RATE", "DROP_ITEM_MAX_NUM",
+    "PAL_EGG_DEFAULT_HATCHING_TIME", "PALWORLD_IDLE_SHUTDOWN_ENABLED",
+    "PALWORLD_IDLE_TIMEOUT_MINUTES", "BACKUP_RETENTION_COUNT", "BACKUP_TIME",
+})
+SETTINGS_BACKUP_DIRECTORY = "settings-backups"
 _KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 _SAFE_ACCOUNT_RE = re.compile(r"^[a-z_][a-z0-9_-]*[$]?$", re.ASCII)
 _DISCORD_ID_RE = re.compile(r"^[0-9]+$")
@@ -172,7 +200,7 @@ def load_env(path: str | Path) -> dict[str, str]:
 def load_config(
     config_dir: str | Path = "/srv/palworld/config", *, require_file: bool = True,
 ) -> dict[str, str]:
-    """Merge defaults, the legacy file, then the three-file deployment contract."""
+    """Merge protected layers, manager-editable layers, then secrets."""
     directory = Path(config_dir)
     config = dict(DEFAULT_CONFIG)
     loaded = 0
@@ -180,11 +208,27 @@ def load_config(
     if legacy.is_file():
         config.update(load_env(legacy))
         loaded += 1
-    for filename in CONFIG_FILES:
+    for filename in EDITABLE_CONFIG_FILES:
         path = directory / filename
         if path.is_file():
             config.update(load_env(path))
             loaded += 1
+    for filename in EDITABLE_CONFIG_FILES:
+        path = directory / EDITABLE_CONFIG_DIRECTORY / filename
+        if path.is_file():
+            editable_values = load_env(path)
+            forbidden = sorted(set(editable_values) - EDITABLE_SETTING_KEYS)
+            if forbidden:
+                raise ConfigError(
+                    f"{path}: editable configuration may contain only setting keys: "
+                    f"{', '.join(forbidden)}"
+                )
+            config.update(editable_values)
+            loaded += 1
+    path = directory / "secrets.env"
+    if path.is_file():
+        config.update(load_env(path))
+        loaded += 1
     if require_file and not loaded:
         raise ConfigError(f"{directory}: no deployment configuration file found")
     return config
@@ -246,6 +290,17 @@ def validate_config(config: dict[str, str]) -> dict[str, Path | None]:
 
     env_int(config, "MAX_PLAYERS", 10, 1, 32)
     env_int(config, "BASE_CAMP_MAX_NUM_IN_GUILD", 10, 1, 10)
+    env_int(config, "GUILD_PLAYER_MAX_NUM", 20, 1, 100)
+    env_int(config, "DROP_ITEM_MAX_NUM", 3000, 1, 10000)
+    for key, minimum, maximum in (
+        ("DAY_TIME_SPEED_RATE", .1, 5), ("NIGHT_TIME_SPEED_RATE", .1, 5),
+        ("EXP_RATE", .1, 20), ("PAL_CAPTURE_RATE", .1, 5),
+        ("COLLECTION_DROP_RATE", .1, 5), ("ENEMY_DROP_ITEM_RATE", .1, 5),
+        ("PAL_DAMAGE_RATE_ATTACK", .1, 5), ("PAL_DAMAGE_RATE_DEFENSE", .1, 5),
+        ("PLAYER_DAMAGE_RATE_ATTACK", .1, 5), ("PLAYER_DAMAGE_RATE_DEFENSE", .1, 5),
+        ("PAL_SPAWN_NUM_RATE", .1, 5), ("PAL_EGG_DEFAULT_HATCHING_TIME", 0, 240),
+    ):
+        env_float(config, key, minimum, maximum)
     public_port = env_int(config, "PUBLIC_PORT", 8211, 1, 65535)
     rest_port = env_int(config, "PALWORLD_REST_API_PORT", 8212, 1, 65535)
     if public_port == rest_port:
@@ -285,6 +340,7 @@ def validate_config(config: dict[str, str]) -> dict[str, Path | None]:
         "backup_dir": backup_dir,
         "backup_mount": backup_mount,
         "state_dir": state_dir,
+        "settings_backup_dir": state_dir / SETTINGS_BACKUP_DIRECTORY,
     }
 
 
@@ -296,6 +352,7 @@ def config_value(config: dict[str, str], key: str) -> str:
         "PALWORLD_CONFIG_ROOT": paths["config_root"],
         "PALWORLD_SCRIPTS_ROOT": paths["scripts_root"],
         "PALWORLD_LOCAL_BACKUP_ROOT": paths["local_backup_root"],
+        "PALWORLD_SETTINGS_BACKUP_DIR": paths["settings_backup_dir"],
     }
     if key in config:
         return config[key]
@@ -343,6 +400,7 @@ def render_systemd_units(
         "@CONFIG_ROOT@": _systemd_path(str(paths["config_root"])),
         "@SCRIPTS_ROOT@": _systemd_path(str(paths["scripts_root"])),
         "@STATE_DIR@": _systemd_path(str(paths["state_dir"])),
+        "@SETTINGS_BACKUP_DIR@": _systemd_path(str(paths["settings_backup_dir"])),
         "@HOME_ENV@": _systemd_quote(f"HOME={paths['server_root']}"),
         "@CONFIG_ENV@": _systemd_quote(f"PALWORLD_CONFIG={paths['config_root']}"),
         "@CONFIG_DIR_ENV@": _systemd_quote(f"PALWORLD_CONFIG_DIR={paths['config_root']}"),
@@ -352,6 +410,7 @@ def render_systemd_units(
         ),
         "@PALSERVER@": _systemd_quote(str(paths["server_root"] / "PalServer.sh")),
         "@BACKUP_SCRIPT@": _systemd_quote(str(paths["scripts_root"] / "backup-palworld.sh")),
+        "@RESTORE_SCRIPT@": _systemd_quote(str(paths["scripts_root"] / "restore-palworld.sh")),
         "@MAINTENANCE_SCRIPT@": _systemd_quote(
             str(paths["scripts_root"] / "daily-palworld-maintenance.sh")
         ),
@@ -436,6 +495,12 @@ def preflight_values(
             errors.append(f"{key} must be configured")
         elif any(character in value for character in ',()"\r\n'):
             errors.append(f"{key} contains a Palworld INI-reserved character")
+    for key in ("SERVER_NAME", "SERVER_DESCRIPTION"):
+        value = config.get(key, "")
+        if not value:
+            errors.append(f"{key} must not be empty")
+        elif any(character in value for character in ',()"\r\n'):
+            errors.append(f"{key} contains a Palworld INI-reserved character")
     web_password = config.get("PALWORLD_WEB_UI_PASSWORD", "")
     if web_password and any(character in web_password for character in "\r\n"):
         errors.append("PALWORLD_WEB_UI_PASSWORD contains a forbidden control character")
@@ -471,6 +536,40 @@ def preflight_config(
     state_dir = paths["state_dir"]
     if state_dir.is_dir() and (not has_mode(state_dir, 0o222) or not os.access(state_dir, os.W_OK)):
         errors.append(f"state_dir is not writable: {state_dir}")
+
+    # The web editor may replace only the isolated non-secret layer.  Check
+    # the ownership contract when this root-owned deployment preflight runs;
+    # unprivileged development checks intentionally cannot assert account IDs.
+    config_root = paths["config_root"]
+    if os.geteuid() == 0 and config_root.is_dir():
+        try:
+            manager = pwd.getpwnam(config["PALWORLD_MANAGER_USER"])
+        except KeyError:
+            errors.append("PALWORLD_MANAGER_USER does not resolve for editable configuration validation")
+        else:
+            info = config_root.stat()
+            if (info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)) != (0, manager.pw_gid, 0o750):
+                errors.append("config_root must be root:<PALWORLD_MANAGER_USER> with mode 0750")
+            editable = config_root / EDITABLE_CONFIG_DIRECTORY
+            if editable.is_symlink() or not editable.is_dir():
+                errors.append("editable configuration directory must be a real directory")
+            else:
+                editable_info = editable.stat()
+                if (editable_info.st_uid, editable_info.st_gid, stat.S_IMODE(editable_info.st_mode)) != (
+                    manager.pw_uid, manager.pw_gid, 0o750,
+                ):
+                    errors.append("editable configuration directory must be manager-owned with mode 0750")
+                for name in EDITABLE_CONFIG_FILES:
+                    path = editable / name
+                    if path.exists() or path.is_symlink():
+                        if path.is_symlink() or not path.is_file():
+                            errors.append(f"editable {name} must be a regular file")
+                        else:
+                            file_info = path.stat()
+                            if (file_info.st_uid, file_info.st_gid, stat.S_IMODE(file_info.st_mode)) != (
+                                manager.pw_uid, manager.pw_gid, 0o640,
+                            ):
+                                errors.append(f"editable {name} must be manager-owned with mode 0640")
 
     backup_dir = paths["backup_dir"]
     mount = paths["backup_mount"]
@@ -594,6 +693,16 @@ def env_int(config: dict[str, str], key: str, default: int, minimum: int, maximu
         raise ConfigError(f"{key} must be an integer") from exc
     if not minimum <= value <= maximum:
         raise ConfigError(f"{key} must be between {minimum} and {maximum}")
+    return value
+
+
+def env_float(config: dict[str, str], key: str, minimum: float, maximum: float) -> float:
+    try:
+        value = float(config[key])
+    except (KeyError, ValueError) as exc:
+        raise ConfigError(f"{key} must be a number") from exc
+    if not math.isfinite(value) or not minimum <= value <= maximum:
+        raise ConfigError(f"{key} must be between {minimum:g} and {maximum:g}")
     return value
 
 
@@ -858,6 +967,21 @@ def _core_restore(config: dict[str, str], version: str) -> Path:
         raise ConfigError(str(exc)) from exc
 
 
+def _audit_management(config: dict[str, str], *, action: str, status: str,
+                      details: dict[str, object] | None = None) -> None:
+    """Record root CLI outcomes into the manager-owned common audit log."""
+    if _CoreAuditLog is None:
+        return
+    try:
+        manager = pwd.getpwnam(config["PALWORLD_MANAGER_USER"])
+        _CoreAuditLog(
+            validate_config(config)["state_dir"], expected_uid=manager.pw_uid, expected_gid=manager.pw_gid,
+            secrets=tuple(config.get(key, "") for key in ("DISCORD_BOT_TOKEN", "ADMIN_PASSWORD", "SERVER_PASSWORD")),
+        ).record(source="CLI", who="CLI", action=action, status=status, details=details)
+    except (KeyError, OSError, ValueError, ConfigError):
+        # Management work must not be masked by an observability filesystem
+        # failure; service logs remain the operational fallback.
+        pass
 def _core_restore_preflight(config: dict[str, str], version: str) -> None:
     try:
         _core_backup_engine(config).preflight_restore(version)
@@ -907,6 +1031,7 @@ def _main(argv: list[str] | None = None) -> int:
             return 0
         if args.backup:
             snapshot = _core_backup(config)
+            _audit_management(config, action="backup", status="success", details={"snapshot": snapshot.name})
             print(f"Created backup version: {snapshot.name}")
             return 0
         if args.restore_preflight:
@@ -914,6 +1039,9 @@ def _main(argv: list[str] | None = None) -> int:
             return 0
         if args.restore:
             safety_copy = _core_restore(config, args.restore)
+            _audit_management(config, action="restore", status="success", details={
+                "snapshot": args.restore, "safety_backup": safety_copy.name,
+            })
             print(f"Current pre-restore safety copy: {safety_copy}")
             return 0
         if args.get:

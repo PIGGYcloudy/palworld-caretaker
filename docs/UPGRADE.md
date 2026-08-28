@@ -1,14 +1,14 @@
-# 從既有 `/srv/palworld` 升級至 v0.2.0
+# 從既有 `/srv/palworld` 升級至 v0.3.0
 
 升級器只更新 caretaker 管理程式、Python 環境、sudoers 與動態渲染的 systemd
 units；不下載遊戲、不改寫設定層、不刪除世界存檔，也不碰外部備份目的地。
 本指南假設既有部署的設定位於 `/srv/palworld/config`，包括舊式單一
-`palworld.env` 或新的三層設定檔。
+`palworld.env` 或新的分層設定檔。
 
-v0.2.0 將 REST、備份/還原、診斷、跨行程鎖與 loopback Web UI 的安全決策
-集中在 `src/palworld_caretaker/` Python 核心；systemd、Bash 與 Discord 只作為
-平台入口與 adapter。升級會保留既有設定與世界資料，並讓所有入口共用同一套
-fail-closed 契約。
+v0.3.0 將 REST、備份/還原、設定 schema、maintenance、audit log、跨行程鎖與
+loopback Web UI 的安全決策集中在 `src/palworld_caretaker/` Python 核心；systemd、
+Bash 與 Discord 只作為平台入口與 adapter。升級會保留既有設定與世界資料，並讓
+所有入口共用同一套 fail-closed 契約。
 
 ## 升級前備份
 
@@ -28,7 +28,7 @@ fail-closed 契約。
    ```
 
 3. 另行保存目前 release 原始檔或版本號。若升級後要完整回到舊管理程式，必須
-   重新執行舊 release 的升級器；v0.2.0 的自動 safety copy 保存設定、
+   重新執行舊 release 的升級器；v0.3.0 的自動 safety copy 保存設定、
    `PalWorldSettings.ini`、systemd units 與 sudoers，但不是舊程式碼封包。
 
 請先確認備份目的地已掛載且最新 snapshot 含有 `savegames/`、`config/` 與
@@ -36,7 +36,7 @@ fail-closed 契約。
 
 ## 驗證既有設定
 
-下載並解壓 v0.2.0 release，從解壓目錄執行只讀驗證：
+下載並解壓 v0.3.0 release，從解壓目錄執行只讀驗證：
 
 ```bash
 python3 scripts/palworld_manager.py \
@@ -45,8 +45,10 @@ python3 scripts/palworld_manager.py \
   --config-dir /srv/palworld/config
 ```
 
-舊式 `palworld.env` 仍受支援，升級不要求拆檔。若要改成三層設定，應在另一個
-維護時段依 [設定契約](CONFIGURATION.md) 遷移，避免同時升級與重整設定。
+舊式 `palworld.env` 仍受支援，升級不要求拆檔；若使用 root-level
+`caretaker.env`/`server.env`，v0.3.0 會將可編輯 schema 欄位遷移到
+`config/editable/`。若要自行重整其他設定，應在另一個維護時段依
+[設定契約](CONFIGURATION.md) 操作，避免同時升級與重整設定。
 不要以 `.example` 覆蓋正式設定。
 
 ## 執行升級
@@ -63,7 +65,10 @@ unit 與 REST 設定後會重新啟動；原本關閉則保持關閉。Local Web
 綁定 `127.0.0.1:8765`。Python 核心會先完整發布到
 `/srv/palworld/packages/release-*`，再以原子 symlink 切換
 `/srv/palworld/packages/current`；release 由 `root:root` 擁有，目錄/檔案權限
-為 `0755`/`0644`。Discord token 未設定時 Bot 會保持停用。
+為 `0755`/`0644`。非 secret 的 schema 欄位會遷移至
+`/srv/palworld/config/editable/caretaker.env` 與 `server.env`，由 manager 擁有、
+目錄/檔案權限為 `0750`/`0640`；root-level 配置與 `secrets.env` 仍由 root 保護。
+Discord token 未設定時 Bot 會保持停用。
 
 非預設安裝路徑必須改傳實際部署設定目錄；升級器會拒絕 staging 設定或推測
 路徑：
@@ -116,8 +121,21 @@ Web UI 固定只監聽 `127.0.0.1`，不可用 reverse proxy、公開防火牆�
 ssh -N -L 8765:127.0.0.1:8765 user@palworld-host
 ```
 
-Discord v0.2.0 另提供 `/pal backup`、`/pal backups` 與管理員限定的
-`/pal diagnose`；這些指令也會遵守相同的 maintenance guard 與全域操作鎖。
+升級後可在「世界設定」區塊編輯型別化的遊戲與 caretaker 欄位。Web UI 會先顯示
+差異，並在 `config/editable/` 建立設定 backup 後以 atomic write 套用；
+`secrets.env` 不會出現在編輯器中。若伺服器正在運行，儲存後必須安全重啟才會
+套用遊戲設定。
+
+「SteamCMD 維護」按鈕會啟動固定的 `palworld-maintenance.service`，頁面每 10 秒
+輪詢 `maintenance-state.json` 顯示關服、備份、更新、重啟及 terminal 結果。
+維護中的其他變更操作會被拒絕。Web、CLI 與 Discord 操作會寫入預設的
+`/var/lib/palworld-manager/audit.log`；這是 secret-masked、strict JSONL 的
+manager-owned `0640` 檔案，完整命令輸出仍以 systemd journal 為準。
+
+Discord v0.3.0 另提供 `/pal backup`、`/pal backups` 與管理員限定的
+`/pal diagnose`；`/pal update confirm:true` 會在有已知在線玩家時先發送 graceful
+shutdown 倒數公告，並在維護完成或失敗時通知。這些指令也會遵守相同的
+maintenance guard 與全域操作鎖。
 
 升級後的 backup、restore、update、Web UI、Discord 與 idle watcher 會共用
 `/run/palworld-caretaker/operation.lock`。若升級或另一項維護正在進行，並行
@@ -163,14 +181,14 @@ sudo python3 /srv/palworld/scripts/palworld_manager.py \
    sudo systemctl restart palworld.service
    ```
 
-   三層部署應以相同方式逐一還原 safety copy 中實際存在的 `caretaker.env`、
+   分層部署應以相同方式逐一還原 safety copy 中實際存在的 `caretaker.env`、
    `server.env`、`secrets.env`；`secrets.env` 使用 root:`PALWORLD_MANAGER_USER`、mode `0640`。若某個 glob 或檔案
    不存在就跳過，不要自行從其他 snapshot 猜測補入。
 
 3. 使用先前保存的舊 release 重新執行其升級/安裝管理元件流程，恢復相符的腳本
    與 Python dependencies。不要把新 unit 與舊腳本混用。
 
-4. 若世界資料本身無法載入，使用 v0.2.0 還原工具列出 snapshot，再以精確確認
+4. 若世界資料本身無法載入，使用 v0.3.0 還原工具列出 snapshot，再以精確確認
    字串執行還原：
 
    ```bash

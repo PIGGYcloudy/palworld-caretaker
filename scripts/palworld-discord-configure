@@ -19,15 +19,23 @@ MANAGER="$INSTALL_ROOT/scripts/palworld_manager.py"
 python3 "$MANAGER" --config-dir "$CONFIG_DIR" --no-filesystem >/dev/null || exit $?
 MANAGER_USER="$(python3 "$MANAGER" --config-dir "$CONFIG_DIR" --get PALWORLD_MANAGER_USER)"
 
-if [[ -f "$CONFIG_DIR/secrets.env" || -f "$CONFIG_DIR/server.env" ]]; then
+if [[ -f "$CONFIG_DIR/secrets.env" || -f "$CONFIG_DIR/server.env" || -f "$CONFIG_DIR/editable/server.env" ]]; then
   TOKEN_CONFIG="$CONFIG_DIR/secrets.env"
   IDS_CONFIG="$CONFIG_DIR/server.env"
+  IDS_OWNER="root:$MANAGER_USER"
+  if [[ -f "$CONFIG_DIR/editable/server.env" ]]; then
+    IDS_CONFIG="$CONFIG_DIR/editable/server.env"
+    IDS_OWNER="$MANAGER_USER:$MANAGER_USER"
+  fi
   [[ -f "$TOKEN_CONFIG" && -f "$IDS_CONFIG" ]] || {
     printf 'Layered deployments require both secrets.env and server.env.\n' >&2; exit 1;
   }
+  TOKEN_OWNER="root:$MANAGER_USER"
 else
   TOKEN_CONFIG="$CONFIG_DIR/palworld.env"
   IDS_CONFIG="$TOKEN_CONFIG"
+  TOKEN_OWNER="root:$MANAGER_USER"
+  IDS_OWNER="$TOKEN_OWNER"
   [[ -f "$TOKEN_CONFIG" ]] || { printf 'No supported deployment configuration was found.\n' >&2; exit 1; }
 fi
 [[ -f /etc/systemd/system/palworld-discord-bot.service ]] || {
@@ -70,8 +78,8 @@ backup_config() {
 }
 
 replace_discord_values() {
-  local config=$1 mode=$2 temporary line key replacement matched
-  shift 2
+  local config=$1 mode=$2 owner=$3 temporary line key replacement matched
+  shift 3
   backup_config "$config"
   temporary="$(mktemp "${config}.tmp.XXXXXX")"
   temporary_files+=("$temporary")
@@ -87,13 +95,13 @@ replace_discord_values() {
     printf '%s\n' "$line"
   done < "$config" > "$temporary"
   for line in "$@"; do printf '%s\n' "$line" >> "$temporary"; done
-  chown root:"$MANAGER_USER" "$temporary"
+  chown "$owner" "$temporary"
   chmod "$mode" "$temporary"
   mv -f -- "$temporary" "$config"
 }
 
-replace_discord_values "$TOKEN_CONFIG" 0640 "DISCORD_BOT_TOKEN='$token'"
-replace_discord_values "$IDS_CONFIG" 0640 \
+replace_discord_values "$TOKEN_CONFIG" 0640 "$TOKEN_OWNER" "DISCORD_BOT_TOKEN='$token'"
+replace_discord_values "$IDS_CONFIG" 0640 "$IDS_OWNER" \
   "DISCORD_PALWORLD_ALLOWED_GUILD_IDS=$guild_ids" \
   "DISCORD_PALWORLD_ALLOWED_CHANNEL_IDS=$channel_ids" \
   "DISCORD_PALWORLD_ALLOWED_ROLE_IDS=$role_ids" \

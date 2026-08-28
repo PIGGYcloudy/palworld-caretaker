@@ -8,6 +8,7 @@ import re
 from typing import Callable, Mapping
 
 from .errors import ConfigError
+from .settings import EDITABLE_DEFAULTS, SETTING_SPECS, validate_settings_values
 
 DEFAULTS: dict[str, str] = {
     "PALWORLD_INSTALL_ROOT": "/srv/palworld",
@@ -29,9 +30,16 @@ DEFAULTS: dict[str, str] = {
     "BACKUP_RETENTION_COUNT": "14", "BACKUP_TIME": "04:30",
     "SERVER_PASSWORD": "", "ADMIN_PASSWORD": "", "DISCORD_BOT_TOKEN": "",
     "PALWORLD_WEB_UI_USERNAME": "palworld-manager", "PALWORLD_WEB_UI_PASSWORD": "",
+    **EDITABLE_DEFAULTS,
 }
 CONFIG_FILES = ("caretaker.env", "server.env", "secrets.env")
 LEGACY_CONFIG_FILE = "palworld.env"
+EDITABLE_CONFIG_DIRECTORY = "editable"
+EDITABLE_CONFIG_FILES = ("caretaker.env", "server.env")
+EDITABLE_SETTING_KEYS = frozenset(SETTING_SPECS)
+# This child is deliberately separate from the general manager state files so
+# the web UI can be granted the narrowest possible writable systemd path.
+SETTINGS_BACKUP_DIRECTORY = "settings-backups"
 _KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 _ACCOUNT_RE = re.compile(r"^[a-z_][a-z0-9_-]*[$]?$", re.ASCII)
 _DISCORD_ID_RE = re.compile(r"^[0-9]+$")
@@ -116,17 +124,39 @@ DEFAULT_SCHEMA = ConfigSchema(DEFAULTS)
 
 
 def load_config(directory: str | Path, *, schema: ConfigSchema = DEFAULT_SCHEMA, require_file: bool = True) -> "CaretakerConfig":
-    """Merge defaults → legacy env → caretaker/server/secrets env layers."""
+    """Merge defaults, protected layers, editable layers, then secrets.
+
+    New deployments place the two web-editable files in ``editable/``.  The
+    protected config root remains searchable but non-writable to the manager,
+    so that account can never rename or remove ``secrets.env``.
+    """
     root, values, count = Path(directory), dict(schema.defaults), 0
-    for name in (LEGACY_CONFIG_FILE, *CONFIG_FILES):
+    for name in (LEGACY_CONFIG_FILE, *EDITABLE_CONFIG_FILES):
         source = root / name
         if source.is_file():
             values.update(load_env(source))
             count += 1
+    editable = root / EDITABLE_CONFIG_DIRECTORY
+    for name in EDITABLE_CONFIG_FILES:
+        source = editable / name
+        if source.is_file():
+            editable_values = load_env(source)
+            forbidden = sorted(set(editable_values) - EDITABLE_SETTING_KEYS)
+            if forbidden:
+                raise ConfigError(
+                    f"{source}: editable configuration may contain only setting keys: "
+                    f"{', '.join(forbidden)}"
+                )
+            values.update(editable_values)
+            count += 1
+    source = root / "secrets.env"
+    if source.is_file():
+        values.update(load_env(source))
+        count += 1
     if require_file and not count:
         raise ConfigError(f"{root}: no deployment configuration file found")
     schema.validate(values)
-    return CaretakerConfig(values, schema)
+    return CaretakerConfig(values, schema, root)
 
 
 def _absolute(values: Mapping[str, str], key: str) -> Path:
@@ -190,12 +220,14 @@ def _validate_core(values: Mapping[str, str]) -> None:
         value = values.get(key, "")
         if value != "*" and value and any(not _DISCORD_ID_RE.fullmatch(item.strip()) for item in value.split(",")):
             raise ConfigError(f"{key} must be a comma-separated list of numeric IDs")
+    validate_settings_values(values)
 
 
 @dataclass(frozen=True)
 class CaretakerConfig:
     values: Mapping[str, str]
     schema: ConfigSchema = DEFAULT_SCHEMA
+    directory: Path | None = None
 
     def __post_init__(self) -> None:
         self.schema.validate(self.values)
@@ -223,6 +255,8 @@ class CaretakerConfig:
         return _absolute(self.values, "PALWORLD_BACKUP_MOUNT") if self.values.get("PALWORLD_BACKUP_MOUNT") else None
     @property
     def state_root(self) -> Path: return _absolute(self.values, "PALWORLD_MANAGER_STATE_DIR")
+    @property
+    def settings_backup_root(self) -> Path: return self.state_root / SETTINGS_BACKUP_DIRECTORY
     @property
     def rest_port(self) -> int: return _integer(self.values, "PALWORLD_REST_API_PORT", 1, 65535)
     @property

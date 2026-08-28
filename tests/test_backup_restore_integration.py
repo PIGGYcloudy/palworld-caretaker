@@ -356,6 +356,16 @@ exec /usr/bin/rsync "$@"
         self.assertEqual((safety_copies[0] / "savegames/0/world.sav").read_text(), "live-save")
         self.assertEqual(self.service_state.read_text(), "active")
 
+    def test_web_restore_mode_uses_the_same_validated_noninteractive_workflow(self):
+        self._create_snapshot("palworld-20000101-000000", save="restored", settings="restored-settings")
+        result = self._run("restore-palworld.sh", "--web-restore", "palworld-20000101-000000")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("Type exactly", result.stdout)
+        self.assertIn("Current pre-restore safety copy:", result.stdout)
+        self.assertEqual((self.server_root / "Pal/Saved/SaveGames/0/world.sav").read_text(), "restored")
+        self.assertEqual(self.service_state.read_text(), "active")
+
 
 if __name__ == "__main__":
     unittest.main()

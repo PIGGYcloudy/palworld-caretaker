@@ -13,6 +13,9 @@ User=@SERVICE_USER@
 Group=@SERVICE_USER@
 WorkingDirectory=@SERVER_ROOT@
 Environment=@HOME_ENV@
+# Run as root before the unprivileged game process starts, so settings saved by
+# the local UI are rendered only at a safe restart boundary.
+ExecStartPre=+@SCRIPTS_ROOT@/render-settings.sh
 ExecStart=@PALSERVER@
 Restart=on-failure
 RestartSec=15s

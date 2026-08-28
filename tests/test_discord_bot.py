@@ -159,26 +159,135 @@ class DiscordBotTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("系統維護/更新中", interaction.followup.messages[0][0])
         self.assertEqual(api.announcements, [])
 
-    async def test_update_reads_maintenance_state_once_per_poll(self):
-        group, _backups, _api = self.make_group()
+    async def test_update_announces_countdown_only_when_players_are_online(self):
+        group, _backups, api = self.make_group()
+        group.dependencies.lifecycle = SimpleNamespace(
+            status=lambda: ServerStatus(ServiceState.ACTIVE, True, True, ("A", "B"))
+        )
+        events, messages = [], []
+
+        async def tracked_send(content=None, **kwargs):
+            events.append("countdown" if content and "2 位玩家在線" in content else "notification")
+            messages.append((content, kwargs))
 
         def runner(argv, **_kwargs):
             if argv[-2:] == ["is-active", "palworld-maintenance.service"]:
                 return SimpleNamespace(returncode=3, stdout="inactive\n")
             self.assertEqual(argv, ["sudo", "-n", "/usr/bin/systemctl", "start", "palworld-maintenance.service", "--no-block"])
+            events.append("maintenance-start")
             return SimpleNamespace(returncode=0)
 
         group.dependencies.runner = runner
         states = iter((
-            {"updated_at": "before"},
-            {"updated_at": "after", "phase": "completed", "message": "done"},
+            {"run_id": "previous", "updated_at": "before"},
+            {"run_id": "current", "updated_at": "after", "phase": "completed", "message": "done"},
         ))
         interaction = _Interaction()
+        interaction.followup.send = tracked_send
         with patch.object(BOT, "read_state", side_effect=states) as read:
             await BOT.PalGroup.update.callback(group, interaction, True)
 
         self.assertEqual(read.call_count, 2)
         self.assertEqual(interaction.edits[0]["embed"].footer.text, "最後更新：after")
+        self.assertIn("2 位玩家在線", messages[0][0])
+        self.assertIn("30 秒", messages[0][0])
+        self.assertLess(events.index("countdown"), events.index("maintenance-start"))
+        self.assertEqual(api.announcements, [])
+
+    async def test_update_delivers_completion_and_failure_notifications(self):
+        for phase, expected in (("completed", "✅"), ("failed", "❌")):
+            group, _backups, _api = self.make_group()
+
+            def runner(argv, **_kwargs):
+                if argv[-2:] == ["is-active", "palworld-maintenance.service"]:
+                    return SimpleNamespace(returncode=3, stdout="inactive\n")
+                return SimpleNamespace(returncode=0)
+
+            group.dependencies.runner = runner
+            interaction = _Interaction()
+            with patch.object(BOT, "read_state", side_effect=(
+                {"run_id": "previous", "updated_at": "before"},
+                {"run_id": "current", "updated_at": "after", "phase": phase, "message": phase},
+            )):
+                await BOT.PalGroup.update.callback(group, interaction, True)
+
+            self.assertEqual(interaction.followup.messages[-1][0][:1], expected)
+            self.assertEqual(len(interaction.followup.messages), 1)
+
+    async def test_update_reports_service_failure_before_new_run_id(self):
+        group, _backups, _api = self.make_group()
+        checks = 0
+
+        def runner(argv, **_kwargs):
+            nonlocal checks
+            if argv[-2:] == ["is-active", "palworld-maintenance.service"]:
+                checks += 1
+                # The guard sees no existing maintenance run; the subsequent
+                # poll sees the newly requested unit already failed.
+                return SimpleNamespace(
+                    returncode=3,
+                    stdout="inactive\n" if checks == 1 else "failed\n",
+                )
+            self.assertEqual(
+                argv,
+                ["sudo", "-n", "/usr/bin/systemctl", "start", "palworld-maintenance.service", "--no-block"],
+            )
+            return SimpleNamespace(returncode=0)
+
+        group.dependencies.runner = runner
+        interaction = _Interaction()
+        with patch.object(BOT, "read_state", return_value={"run_id": "previous"}):
+            await BOT.PalGroup.update.callback(group, interaction, True)
+
+        self.assertEqual(checks, 2)
+        self.assertEqual(interaction.followup.messages[-1][0][:1], "❌")
+        self.assertIn("失敗", interaction.edits[0]["embed"].fields[0].value)
+
+    async def test_update_correlates_terminal_state_by_run_id_not_timestamp(self):
+        group, _backups, _api = self.make_group()
+        group.dependencies.runner = self._maintenance_runner()
+        interaction = _Interaction()
+        with patch.object(BOT, "read_state", side_effect=(
+            {"run_id": "previous", "updated_at": "2026-08-28T00:00:00Z"},
+            {
+                "run_id": "current", "updated_at": "2026-08-28T00:00:00Z",
+                "phase": "failed", "message": "preflight failed",
+            },
+        )):
+            await BOT.PalGroup.update.callback(group, interaction, True)
+
+        self.assertEqual(interaction.followup.messages[-1][0][:1], "❌")
+        self.assertEqual(interaction.edits[0]["embed"].footer.text, "最後更新：2026-08-28T00:00:00Z")
+
+    async def test_update_reports_unknown_players_conservatively(self):
+        group, _backups, _api = self.make_group()
+        group.dependencies.runner = self._maintenance_runner()
+        group.dependencies.lifecycle = SimpleNamespace(
+            status=lambda: ServerStatus(ServiceState.ACTIVE, True, True, None)
+        )
+        interaction = _Interaction()
+        with patch.object(BOT, "read_state", side_effect=(
+            {"run_id": "previous"},
+            {"run_id": "current", "phase": "completed", "message": "done"},
+        )):
+            await BOT.PalGroup.update.callback(group, interaction, True)
+
+        self.assertEqual(
+            interaction.edits[0]["content"],
+            "無法取得在線玩家狀態（安全起見執行倒數/保守處理）。",
+        )
+        self.assertNotIn("目前沒有在線玩家", interaction.edits[0]["content"])
+
+    def _maintenance_runner(self):
+        def runner(argv, **_kwargs):
+            if argv[-2:] == ["is-active", "palworld-maintenance.service"]:
+                return SimpleNamespace(returncode=3, stdout="inactive\n")
+            self.assertEqual(
+                argv,
+                ["sudo", "-n", "/usr/bin/systemctl", "start", "palworld-maintenance.service", "--no-block"],
+            )
+            return SimpleNamespace(returncode=0)
+        return runner
 
     async def test_backups_and_diagnose_are_secret_free(self):
         group, _backups, _api = self.make_group()

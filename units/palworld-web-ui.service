@@ -19,6 +19,16 @@ ProtectKernelModules=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true
 ReadOnlyPaths=@CONFIG_ROOT@
+# Only the manager-owned non-secret layer is writable.  The protected config
+# root and secrets.env remain read-only inside this service.
+ReadWritePaths=@CONFIG_ROOT@/editable
+# The installer creates this manager-owned 0640 file.  Keeping the parent
+# read-only prevents the web service from changing maintenance state.
+ReadWritePaths=@STATE_DIR@/audit.log
+ReadOnlyPaths=@STATE_DIR@/maintenance-state.json
+# SettingsStore writes rollback records only below this installer-created
+# manager-owned state child; the rest of the state tree remains read-only.
+ReadWritePaths=@SETTINGS_BACKUP_DIR@
 ReadOnlyPaths=/run/palworld-caretaker
 
 [Install]

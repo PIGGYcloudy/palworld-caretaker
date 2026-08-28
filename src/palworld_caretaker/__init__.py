@@ -5,6 +5,7 @@ filesystem mount checks, and command execution are injected adapters.
 """
 
 from .backup import BackupEngine, BackupManager, BackupResult, RestoreResult, SnapshotError
+from .audit import AuditLog, sanitize
 from .config import CaretakerConfig, ConfigError, ConfigSchema, load_config, load_env
 from .diagnostics import ServerDiagnostic, ServerDiagnostics
 from .rest import ActionResult, ApiError, Metrics, PalworldRESTClient, Player, RESTClient
@@ -12,12 +13,15 @@ from .service import (
     RestCommandChannel, ServerLifecycle,
     ServerStatus, ServiceState, SystemdServiceController,
 )
+from .settings import CaretakerOptions, SettingSpec, WorldSettings
 from .steamcmd import SteamCMD, SteamCMDError
 from .web import WebDependencies, WebServer, create_server
 
+__version__ = "0.3.0"
+
 __all__ = [
-    "ActionResult", "ApiError", "BackupEngine", "BackupManager", "BackupResult", "CaretakerConfig", "ConfigError",
+    "__version__", "ActionResult", "ApiError", "AuditLog", "BackupEngine", "BackupManager", "BackupResult", "CaretakerConfig", "CaretakerOptions", "ConfigError",
     "ConfigSchema", "Metrics", "PalworldRESTClient", "Player", "RESTClient", "RestCommandChannel", "RestoreResult", "ServerDiagnostic",
-    "ServerDiagnostics", "ServerLifecycle", "ServerStatus", "ServiceState", "SnapshotError", "SteamCMD", "SteamCMDError", "SystemdServiceController",
-    "WebDependencies", "WebServer", "create_server", "load_config", "load_env",
+    "ServerDiagnostics", "ServerLifecycle", "ServerStatus", "ServiceState", "SettingSpec", "SnapshotError", "SteamCMD", "SteamCMDError", "SystemdServiceController", "WorldSettings",
+    "WebDependencies", "WebServer", "create_server", "load_config", "load_env", "sanitize",
 ]

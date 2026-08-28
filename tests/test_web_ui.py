@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 from palworld_caretaker.config import CaretakerConfig, DEFAULTS
 from palworld_caretaker.rest import Metrics
 from palworld_caretaker.service import ServerDiagnostics, ServerStatus, ServiceState
-from palworld_caretaker.backup import BackupEngine
+from palworld_caretaker.backup import BackupEngine, RestoreResult
 from palworld_caretaker.operations import OperationLock, OperationLockBusy, OperationLockUnsafe
 from palworld_caretaker.web import WebDependencies, create_server, main
 
@@ -63,6 +63,21 @@ class FakeBackups:
         return 4096
 
 
+class RestoreBackups(FakeBackups):
+    def __init__(self):
+        super().__init__()
+        self.preflight: list[str] = []
+        self.restored: list[str] = []
+
+    def preflight_restore(self, version):
+        self.preflight.append(version)
+        return Path("/safe") / version
+
+    def restore(self, version):
+        self.restored.append(version)
+        return RestoreResult(Path("/safe") / version, Path("/local/pre-restore-20260828-010101"))
+
+
 @dataclass
 class Fixture:
     dependencies: WebDependencies
@@ -98,6 +113,13 @@ def make_fixture(*, maintenance: str = "inactive") -> Fixture:
             return subprocess.CompletedProcess(argv, code, maintenance + "\n", "")
         if argv[-3:] == ["start", "palworld-backup.service", "--wait"]:
             backups.items.insert(0, Path("/safe/palworld-20260827-120001"))
+        if "--web-restore" in argv:
+            return subprocess.CompletedProcess(
+                argv, 0,
+                "Current pre-restore safety copy: /local/pre-restore-20260828-010101\n"
+                "Service state after restore: stopped\n",
+                "",
+            )
         if "palworld-control" in " ".join(argv):
             try:
                 with OperationLock(lock_path, expected_uid=os.getuid(), expected_gid=os.getgid()):
@@ -235,6 +257,42 @@ class WebUITests(unittest.TestCase):
         finally:
             server.shutdown(); server.server_close(); thread.join(timeout=2)
             blocked.dependencies._test_temporary.cleanup()  # type: ignore[attr-defined]
+
+    def test_restore_stops_active_server_then_returns_safety_backup(self):
+        backups = RestoreBackups()
+        self.fixture.dependencies.backups = backups
+        body = json.dumps({"snapshot": "palworld-20260827-120000"}).encode()
+        status, raw, _headers = self.request(
+            "/api/backups/restore", method="POST", body=body,
+            headers={"Content-Type": "application/json", "X-Palworld-CSRF": self.server.csrf_token,
+                     "Origin": self.base},
+        )
+        self.assertEqual(status, 200, raw)
+        payload = json.loads(raw)
+        self.assertEqual(backups.preflight, ["palworld-20260827-120000"])
+        self.assertEqual(backups.restored, [])
+        self.assertEqual(self.fixture.lifecycle.stops, 0)  # root workflow owns shutdown and the lock.
+        self.assertTrue(any("--web-restore" in call for call in self.fixture.calls))
+        self.assertTrue(payload["server_stopped"])
+        self.assertEqual(payload["safety_backup"], "pre-restore-20260828-010101")
+
+    def test_maintenance_trigger_status_and_audit_api(self):
+        state = self.fixture.dependencies.config.state_root
+        state.mkdir()
+        (state / "maintenance-state.json").write_text(json.dumps({
+            "phase": "updating", "message": "SteamCMD update is running", "updated_at": "2026-08-28T00:00:00Z",
+        }), encoding="utf-8")
+        status, raw, _headers = self.request("/api/maintenance/status")
+        self.assertEqual(status, 200, raw)
+        self.assertEqual(json.loads(raw)["phase"], "updating")
+
+        status, raw, _headers = self.post("maintenance/trigger", token=self.server.csrf_token)
+        self.assertEqual(status, 202, raw)
+        self.assertTrue(any("palworld-maintenance.service" in call for call in self.fixture.calls))
+        status, raw, _headers = self.request("/api/audit/logs?limit=1")
+        self.assertEqual(status, 200, raw)
+        entry = json.loads(raw)["entries"][0]
+        self.assertEqual((entry["source"], entry["action"], entry["status"]), ("Web", "update", "requested"))
 
     def test_server_refuses_non_loopback_bindings(self):
         with self.assertRaisesRegex(ValueError, "127.0.0.1"):

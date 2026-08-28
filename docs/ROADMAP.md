@@ -43,6 +43,28 @@ v0.2.0 已完成中期里程碑的第一批核心工作：
 後續 v0.3–v0.4 聚焦於設定 schema/migration、診斷與 audit 可觀察性、Web UI
 的設定與 log 體驗，以及更多 Discord 操作；Docker 與 Windows 仍屬長期目標。
 
+## v0.3.0 狀態
+
+v0.3.0 完成了上述下一批的核心操作體驗：
+
+- Web UI 提供型別化的 in-game settings manager，使用
+  `config/editable/caretaker.env` 與 `server.env` 的分層配置、差異預覽、
+  settings backup 與 atomic write；secret layer 維持 root 保護。
+- CLI 與 Web UI 共用 restore preflight、外部 pre-restore snapshot、
+  `backups-local/pre-restore-*` safety copy、manifest 驗證、容量檢查與 atomic
+  restore/rollback；完成後維持原本的服務開關狀態。
+- Web UI 可觸發固定的 `palworld-maintenance.service`，每 10 秒輪詢並呈現
+  preflight、關服、備份、更新、重啟與 terminal 狀態；Discord 在維護前公告
+  倒數，並發送完成/失敗通知。
+- Web、CLI 與 Discord 共用 `/var/lib/palworld-manager/audit.log` 的 strict
+  JSONL 操作紀錄，寫入與顯示前都遮蔽 secrets。
+- 關鍵檔案與目錄採 regular-file、owner/mode、mount、`O_NOFOLLOW` 與 atomic
+  rename 檢查；Web service 的可寫範圍限縮在 manager-owned editable/settings
+  backup 路徑。
+
+後續 v0.4 聚焦於更多遊戲設定欄位、audit rotation/匯出、診斷報告、migration
+工具與實機升級驗證；Docker 與 Windows 仍屬長期目標。
+
 ## 短期：Linux v0.1
 
 ### 1. 移除主機硬編碼
@@ -140,54 +162,58 @@ v0.1 文件至少涵蓋：
 - 文件足以讓未參與開發的人獨立完成基本部署。
 - 建立 `v0.1.0` tag、GitHub Release、checksum 與 release notes。
 
-## 中期：產品化核心與操作體驗（v0.2.0 已完成首批）
+## 中期：產品化核心與操作體驗（v0.2.0–v0.3.0 已完成）
 
-### 1. 建立 Python 共用核心（v0.2.0 第一批已完成）
+### 1. 建立 Python 共用核心（v0.2.0–v0.3.0 已完成）
 
-v0.2.0 已完成第一批移轉；後續持續擴充核心與 adapter 邊界：
+v0.2.0 完成第一批移轉，v0.3.0 再把設定、還原與操作紀錄納入共用核心；後續
+持續擴充核心與 adapter 邊界：
 
 - 已完成：設定讀取與驗證、SteamCMD adapter、備份/還原與保留策略、
-  伺服器狀態、Palworld REST API client、診斷資料模型。
+  伺服器狀態、Palworld REST API client、診斷資料模型、typed settings schema、
+  atomic restore、audit log 與 maintenance state。
 - 後續：設定 migration、診斷報告與排程任務的通用模型，以及更多平台 adapter。
 
 Bash 保留為 Linux 安裝、權限及 systemd adapter。
 
-### 2. Schema-backed 設定模型
+### 2. Schema-backed 設定模型（v0.3.0 已完成第一版）
 
-採用 YAML 或 TOML，搭配 Pydantic 等 schema 驗證。CLI、Web API、面板、
-Discord Bot 與平台 adapter 必須共用同一設定模型，不直接各自修改 env 或
-`PalWorldSettings.ini`。
+v0.3.0 先以無第三方依賴的 Python schema 建立共用型別邊界；Web UI、CLI、
+Discord Bot 與平台 adapter 讀取同一套分層 env 契約，不直接各自修改
+`PalWorldSettings.ini`。下一步再處理向前 migration、schema 版本與更多可編輯欄位。
 
-### 3. 本機 Web 管理面板（v0.2.0 已完成安全最小版）
+### 3. 本機 Web 管理面板（v0.3.0 已完成核心操作）
 
 目前版本使用無第三方依賴的 server-rendered UI，預設只監聽
-`127.0.0.1:8765`。v0.2.0 已提供狀態、玩家、metrics、snapshot、備份、
-安全停止與重啟；後續面板工作包括：
+`127.0.0.1:8765`。v0.2.0 提供狀態、玩家、metrics、snapshot、備份、安全停止
+與重啟；v0.3.0 再加入設定編輯、restore、maintenance trigger、進度輪詢與
+audit log 檢視；後續面板工作包括：
 
-- 伺服器更新操作與更完整的維護進度呈現。
-- 世界參數分類表單、搜尋、預設值與輸入驗證。
+- 更完整的維護進度、診斷結果與 audit 篩選/匯出。
+- 世界參數搜尋、預設值、版本化 schema 與更多欄位。
 - 安裝及備份路徑設定。
 - 自動更新、閒置關服與 Discord Bot 功能開關。
-- 還原流程與更完整的備份管理。
-- Log 與診斷結果。
-- 套用前差異預覽及自動備份。
+- 更完整的備份管理與還原演練。
 
-### 4. 可觀察性與安全性（部分於 v0.2.0 完成）
+### 4. 可觀察性與安全性（v0.3.0 已完成核心）
 
-- 結構化 log 與管理操作 audit log，不加入遙測。
-- secrets 遮蔽及診斷資料匯出預覽。
+- Web、CLI、Discord 的 strict JSON audit log 與 secrets 遮蔽已完成，不加入遙測。
+- `O_NOFOLLOW`、real-path/owner/mode、mount trust boundary 與 manager writable
+  path isolation 已完成。
+- 後續加入 audit rotation、診斷資料匯出預覽與不可否認性更強的保存策略。
 - 設定修改歷史。
 - snapshot checksum 與定期還原驗證。
-- Web UI Basic Auth、CSRF、同源、no-cache 與禁止嵌入防護；後續再補 session、
-  audit log 與更細緻的權限模型。
+- Web UI Basic Auth、CSRF、同源、no-cache 與禁止嵌入防護；後續再補 session
+  與更細緻的權限模型。
 - 遠端存取另行提供 HTTPS、認證與防火牆指引，不預設開放公網。
 
-### 5. Discord 操作體驗（部分於 v0.2.0 完成）
+### 5. Discord 操作體驗（v0.3.0 已完成維護流程）
 
 - 加入 `/pal backup`、`/pal backups` 與 `/pal diagnose`。
-- 維護開始、完成與失敗通知。
+- 維護前在線玩家倒數公告，以及完成與失敗通知。
 - 更新前在線玩家警告。
-- 指令冷卻、全域操作鎖與重複請求保護已完成；備份、診斷與維護通知仍待後續。
+- 指令冷卻、全域操作鎖、重複請求保護與維護進度輪詢已完成；後續補充更多
+  診斷與 audit 查詢指令。
 - Discord、CLI 與 Web UI 共用相同的操作核心與授權判斷。
 
 ## 長期：跨平台與 v1.0
@@ -243,11 +269,14 @@ Docker 可以作為 Windows 的過渡選項，但不等同完整 Windows 原生�
 2. 將 NAS 專用備份改成可設定目的地。
 3. 讓 install 與 upgrade 可安全重複執行。
 4. 加入 diagnose 與分級 uninstall。
-5. 發布 `v0.2.0` 後，依實機回饋進入 schema/migration、audit 與 adapter 測試。
+5. 發布 `v0.3.0` 後，依實機回饋進入 schema migration、audit rotation、診斷
+   與 adapter 測試。
 
 Web UI、Docker 與 Windows 先以 milestone 追蹤，避免 v0.1 範圍失控。
 
-目前 repository 已完成 v0.2.0 發布所需的通用路徑／三層設定契約、可設定且
-fail-closed 的備份目的地、可重複執行的安裝／升級流程、唯讀 diagnose、分級
-uninstall、可測試 Python 核心、全域操作鎖與最小 Web UI。下一批以實機 Ubuntu
-升級／解除安裝驗證、設定 migration、audit log 與更完整的跨平台 adapter 為主。
+目前 repository 已完成 v0.3.0 發布所需的通用路徑／分層設定契約、typed
+settings manager、可設定且 fail-closed 的備份目的地、pre-restore safety
+backup、atomic restore、可重複執行的安裝／升級流程、唯讀 diagnose、分級
+uninstall、Web maintenance、Discord 維護通知、audit log、全域操作鎖與
+loopback Web UI。下一批以實機 Ubuntu 升級／解除安裝驗證、schema migration、
+audit rotation 與更完整的跨平台 adapter 為主。

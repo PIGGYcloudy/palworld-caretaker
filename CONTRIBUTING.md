@@ -23,7 +23,7 @@ repository and verify archive contents, reproducibility, and checksums.
 To create release artifacts from a clean committed tree:
 
 ```bash
-scripts/package-release.sh --version 0.2.0 --output-dir dist
+scripts/package-release.sh --version 0.3.0 --output-dir dist
 (cd dist && sha256sum --check SHA256SUMS)
 ```
 

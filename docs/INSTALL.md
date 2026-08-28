@@ -6,7 +6,7 @@
 
 ## 系統需求
 
-- Ubuntu 24.04 LTS amd64，使用 systemd 與 APT；其他發行版尚未列入 v0.2.0
+- Ubuntu 24.04 LTS amd64，使用 systemd 與 APT；其他發行版尚未列入 v0.3.0
   的支援範圍。
 - 具 `sudo` 權限的登入帳號，以及可連線至 Ubuntu 套件庫、Steam 與 Discord
   （若啟用 Bot）的網路。
@@ -21,13 +21,13 @@
 
 ## 準備設定
 
-先把 `palworld-caretaker-v0.2.0.tar.gz` 與 `SHA256SUMS` 放在同一目錄，驗證並
+先把 `palworld-caretaker-v0.3.0.tar.gz` 與 `SHA256SUMS` 放在同一目錄，驗證並
 解壓：
 
 ```bash
 sha256sum --check SHA256SUMS
-tar -xzf palworld-caretaker-v0.2.0.tar.gz
-cd palworld-caretaker-v0.2.0
+tar -xzf palworld-caretaker-v0.3.0.tar.gz
+cd palworld-caretaker-v0.3.0
 ```
 
 驗證必須顯示 `OK`。接著在專案根目錄建立不受 Git 管理的部署設定：
@@ -62,6 +62,13 @@ Web UI 一律使用 HTTP Basic Auth。帳號由 `caretaker.env` 的
 受控 release 中：release 目錄與套件目錄為 `0755`，Python 檔案為 `0644`，
 `packages/current` 以原子 symlink 指向完整 release。入口腳本維持固定路徑，
 因此升級不會讓執行中的程序看到半套套件。
+
+安裝時會把 `caretaker.env` 與 `server.env` 中屬於設定 schema 的非 secret 欄位
+遷移到 `<PALWORLD_INSTALL_ROOT>/config/editable/`。這個子目錄由
+`PALWORLD_MANAGER_USER` 擁有、權限為 `0750`，檔案為 `0640`；root-level
+配置目錄與 `secrets.env` 保持 root 保護。日後可用 Web UI 編輯遊戲設定，或
+直接修改 editable layer 後重新執行驗證；不要把 token、密碼或其他受保護欄位
+放入該子目錄。
 
 ### 備份目的地
 
@@ -179,6 +186,54 @@ sudo python3 "<PALWORLD_INSTALL_ROOT>/scripts/palworld_manager.py" \
 所有備份、還原、更新與安全啟停都會共用
 `/run/palworld-caretaker/operation.lock`；若已有另一個操作進行中，命令會立即
 拒絕並等待下一次維護窗口。不要刪除、替換或以 symbolic link 取代這個鎖檔。
+
+## v0.3.0 設定、維護與還原
+
+### Web UI 設定管理
+
+在本機 Web UI 的「世界設定」區塊可編輯伺服器名稱、玩家上限、時間/經驗/掉落
+倍率、Pal 與玩家傷害、guild/base 限制、spawn/drop 參數，以及 idle shutdown
+與備份排程等非 secret caretaker 選項。欄位會執行型別與範圍驗證，按「預覽變更」
+可先查看差異；按「儲存設定」時會建立 settings backup，再以 atomic write
+更新 `config/editable/`。伺服器執行中儲存仍會成功，但必須安全重啟才會套用遊戲
+設定；Web UI 不會顯示或修改 `secrets.env`。
+
+### Pre-restore safety backup
+
+Web UI 的 snapshot 下拉選單與 CLI 使用相同的安全還原流程。先列出可用 snapshot：
+
+```bash
+sudo "<PALWORLD_INSTALL_ROOT>/scripts/restore-palworld.sh" list
+```
+
+CLI 還原必須提供完整名稱並輸入精確確認字串：
+
+```bash
+sudo "<PALWORLD_INSTALL_ROOT>/scripts/restore-palworld.sh" \
+  restore palworld-YYYYMMDD-HHMMSS
+# prompt: RESTORE palworld-YYYYMMDD-HHMMSS
+```
+
+流程會在停止服務前驗證 snapshot manifest、檔案、mount 與容量；接著先建立新的
+外部 snapshot 以及 `<PALWORLD_INSTALL_ROOT>/backups-local/pre-restore-*` 本機
+safety copy，才以 staging 與 atomic publish 覆寫 SaveGames/Config。驗證、備份或
+發布任一步驟失敗，都不會進入 live data 覆寫階段；原本運行中的服務完成後會嘗試
+恢復運行。Web UI 只在能驗證 safety copy 與最終服務狀態時回報成功。
+
+### Web 維護按鈕與 audit log
+
+「SteamCMD 維護」按鈕會背景啟動固定的
+`palworld-maintenance.service`，不在 Web request 中執行任意命令。頁面每 10 秒
+輪詢 `/api/maintenance/status`，顯示 preflight、關服、備份、更新、重啟與
+terminal 狀態；維護期間其他變更操作會被拒絕。Discord 的
+`/pal update confirm:true` 會在已知有玩家時先公告 graceful-shutdown 倒數，並
+在維護完成或失敗時發送通知。
+
+Web、CLI 與 Discord 的管理操作共用多通道 strict JSON audit log，預設位於
+`/var/lib/palworld-manager/audit.log`。每行禁止 NaN/Infinity，寫入及讀取時都會
+遮蔽 token、password、secret、key、auth 與 cookie 等 credential；檔案為 manager
+擁有的 `0640` regular file。此紀錄不是備份，仍應保留 systemd journal 作為完整
+維護輸出。
 
 閒置監看預設應先保持 `PALWORLD_IDLE_WATCHER_DRY_RUN=true`；觀察
 `journalctl -u palworld-idle-watcher.service` 確認判定正確後，再改為 `false`

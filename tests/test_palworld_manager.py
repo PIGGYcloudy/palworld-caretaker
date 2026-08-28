@@ -10,7 +10,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "scripts"))
+sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 import palworld_manager as manager
+from palworld_caretaker.config import SETTINGS_BACKUP_DIRECTORY
+from palworld_caretaker.settings_store import SettingsStore
 from palworld_manager import (
     ApiError, ConfigError, DEFAULT_CONFIG, PalworldAPI, config_value, diagnose_deployment,
     diagnostic_exit_code, env_bool,
@@ -217,6 +220,23 @@ class ManagerTests(unittest.TestCase):
             self.assertEqual(config["ADMIN_PASSWORD"], "safe value")
             self.assertEqual(config["PALWORLD_INSTALL_ROOT"], "/srv/palworld")
 
+    def test_editable_layer_cannot_override_operational_identity_or_paths(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_dir = Path(directory)
+            editable = config_dir / "editable"
+            editable.mkdir()
+            (config_dir / "caretaker.env").write_text(
+                "PALWORLD_SERVICE_USER=protected-service\n"
+                "PALWORLD_MANAGER_STATE_DIR=/var/lib/protected-state\n",
+                encoding="utf-8",
+            )
+            (editable / "server.env").write_text(
+                "MAX_PLAYERS=12\nPALWORLD_SERVICE_USER=attacker\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ConfigError, "editable configuration may contain only setting keys"):
+                load_config(config_dir)
+
     def test_config_loader_fails_when_no_contract_file_exists(self):
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaisesRegex(ConfigError, "no deployment configuration"):
@@ -301,6 +321,15 @@ class ManagerTests(unittest.TestCase):
             self.assertIn('User=pal-service', game)
             self.assertIn('PALWORLD_CONFIG=/opt/Pal World/%%instance/config', bot)
             self.assertIn(r'ReadWritePaths=/var/lib/custom\x20caretaker', bot)
+            web = (Path(directory) / "palworld-web-ui.service").read_text(encoding="utf-8")
+            expected_backup_dir = Path("/var/lib/custom caretaker") / SETTINGS_BACKUP_DIRECTORY
+            self.assertEqual(
+                SettingsStore("/unused/config", "/var/lib/custom caretaker").backup_root,
+                expected_backup_dir,
+            )
+            self.assertIn(
+                r"ReadWritePaths=/var/lib/custom\x20caretaker/settings-backups", web,
+            )
             self.assertIn('OnCalendar=*-*-* 03:17:00', timer)
             self.assertFalse(any("@" in path.read_text(encoding="utf-8") for path in rendered))
 

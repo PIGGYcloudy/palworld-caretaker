@@ -17,7 +17,7 @@ import discord
 from discord import app_commands
 
 from palworld_caretaker import (
-    ApiError, BackupEngine, CaretakerConfig, RESTClient, RestCommandChannel,
+    ApiError, AuditLog, BackupEngine, CaretakerConfig, RESTClient, RestCommandChannel,
     ServerDiagnostics, ServerLifecycle, ServiceState, SnapshotError,
     SystemdServiceController, load_config,
 )
@@ -121,6 +121,7 @@ class BotDependencies:
     backups: BackupEngine
     coordinator: OperationCoordinator
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run
+    audit: AuditLog | None = None
 
     @classmethod
     def create(cls, config: CaretakerConfig) -> "BotDependencies":
@@ -153,17 +154,36 @@ class BotDependencies:
 
     def maintenance_running(self) -> bool:
         """Fail closed unless systemd confirms maintenance is no longer running."""
+        state = self.maintenance_service_state()
+        return state not in {"inactive", "failed"}
+
+    def maintenance_service_state(self) -> str | None:
+        """Return a verified maintenance unit state, or ``None`` if unknown."""
         try:
             result = self.runner(
                 ["sudo", "-n", "/usr/bin/systemctl", "is-active", "palworld-maintenance.service"],
                 capture_output=True, text=True, timeout=15, check=False,
             )
         except (OSError, subprocess.SubprocessError):
-            return True
+            return None
         state = result.stdout.strip()
         if result.returncode not in {0, 3} or state not in {"active", "activating", "deactivating", "inactive", "failed"}:
-            return True
-        return state in {"active", "activating", "deactivating"}
+            return None
+        return state
+
+    def record_audit(self, *, action: str, status: str, user_id: int,
+                     details: dict[str, object] | None = None) -> None:
+        if self.audit is None:
+            self.audit = AuditLog(
+                self.config.state_root,
+                secrets=tuple(self.config.values.get(key, "") for key in
+                              ("DISCORD_BOT_TOKEN", "ADMIN_PASSWORD", "SERVER_PASSWORD", "PALWORLD_WEB_UI_PASSWORD")),
+            )
+        try:
+            self.audit.record(source="Discord", who=f"discord:{user_id}", action=action,
+                              status=status, details=details)
+        except (OSError, ValueError):
+            pass
 
 
 class PalGroup(app_commands.Group):
@@ -211,6 +231,41 @@ class PalGroup(app_commands.Group):
             return True
         return False
 
+    async def maintenance_countdown(self, interaction: discord.Interaction) -> str:
+        """Announce the graceful-shutdown countdown when someone is playing.
+
+        The root-owned maintenance service remains responsible for the actual
+        save and shutdown countdown.  This public Discord message gives the
+        people coordinating in Discord the same advance notice without adding
+        a second delay or taking ownership of the systemd operation.
+        """
+        status = await asyncio.to_thread(self.dependencies.lifecycle.status)
+        if status.service != ServiceState.ACTIVE:
+            return "not-running"
+        if status.players is None:
+            # The root maintenance workflow still takes the conservative
+            # graceful-stop path.  Do not mistake a failed REST query for an
+            # empty player list in the Discord status message.
+            return "unknown"
+        if not status.players:
+            return "none"
+        wait = int(self.dependencies.config.values.get("PALWORLD_SHUTDOWN_WAIT_SECONDS", "30"))
+        await interaction.followup.send(
+            f"⚠️ 目前有 {len(status.players)} 位玩家在線。維護與更新即將開始；"
+            f"伺服器安全關服倒數為 {wait} 秒，請儘速完成動作。"
+        )
+        return "announced"
+
+    async def maintenance_terminal_notification(self, interaction: discord.Interaction,
+                                                phase: str) -> None:
+        """Deliver a distinct public Discord notification for a terminal run."""
+        if phase == "completed":
+            await interaction.followup.send("✅ 伺服器維護與更新已完成。")
+        else:
+            await interaction.followup.send(
+                "❌ 伺服器維護與更新失敗，請管理員查看 `palworld-maintenance.service` 紀錄。"
+            )
+
     @app_commands.command(name="start", description="啟動幻獸帕魯伺服器")
     async def start(self, interaction: discord.Interaction):
         if not self.permitted(interaction): return await self.deny(interaction)
@@ -231,7 +286,9 @@ class PalGroup(app_commands.Group):
                     capture_output=True, text=True, timeout=130, check=False,
                 )
                 if result.returncode:
+                    self.dependencies.record_audit(action="start", status="failed", user_id=interaction.user.id)
                     return await interaction.followup.send("伺服器啟動失敗，請管理員查看伺服器紀錄。")
+                self.dependencies.record_audit(action="start", status="requested", user_id=interaction.user.id)
                 deadline = asyncio.get_running_loop().time() + int(self.dependencies.config.values.get("PALWORLD_START_READY_TIMEOUT_SECONDS", "180"))
                 while asyncio.get_running_loop().time() < deadline:
                     status = await asyncio.to_thread(self.dependencies.lifecycle.status)
@@ -291,7 +348,9 @@ class PalGroup(app_commands.Group):
                 notified = await self.announce(f"管理員要求伺服器將在 {wait} 秒後安全關閉，請儘速完成動作。")
                 result = await asyncio.to_thread(self.dependencies.graceful_stop)
                 if result.returncode:
+                    self.dependencies.record_audit(action="stop", status="failed", user_id=interaction.user.id)
                     return await interaction.followup.send("存檔或關服失敗；已取消後續動作，請管理員查看紀錄。")
+                self.dependencies.record_audit(action="stop", status="success", user_id=interaction.user.id)
                 await interaction.followup.send("世界已安全存檔，伺服器正在正常關閉。" + ("" if notified else "（在線公告未送達）"))
         except (OperationBusy, CommandCooldown) as exc:
             await self.operation_error(interaction, exc)
@@ -315,6 +374,8 @@ class PalGroup(app_commands.Group):
                     return await interaction.followup.send("備份工作已結束，但無法安全確認新快照；請查看備份與服務紀錄。")
                 snapshot = created[0]
                 size = self.dependencies.backups.snapshot_size(snapshot)
+                self.dependencies.record_audit(action="backup", status="success", user_id=interaction.user.id,
+                                               details={"snapshot": snapshot.name, "size_bytes": size})
                 await interaction.followup.send(f"備份完成：`{snapshot.name}`（{format_bytes(size)}）" + ("" if notified else "（在線公告未送達）"))
         except (OperationBusy, CommandCooldown) as exc:
             await self.operation_error(interaction, exc)
@@ -354,31 +415,55 @@ class PalGroup(app_commands.Group):
         try:
             async with self.dependencies.coordinator.hold(interaction.user.id, "update"):
                 if await self.maintenance_guard(interaction): return
-                previous_updated_at = read_state(MAINTENANCE_STATE).get("updated_at")
-                notified = await self.announce("伺服器維護與更新即將開始，請儘速完成動作。")
+                previous_run_id = read_state(MAINTENANCE_STATE).get("run_id")
+                countdown_result = await self.maintenance_countdown(interaction)
                 result = await asyncio.to_thread(self.dependencies.systemd_start, "palworld-maintenance.service", wait=False)
                 if result.returncode:
+                    self.dependencies.record_audit(action="update", status="failed", user_id=interaction.user.id)
                     return await interaction.followup.send("無法啟動更新工作，請管理員查看 `palworld-maintenance.service` 紀錄。")
-                last_phase, received_new_state = "", False
+                self.dependencies.record_audit(action="update", status="requested", user_id=interaction.user.id)
+                last_phase, received_run_state = "", False
                 deadline = time.monotonic() + 15 * 60
                 while True:
                     state = read_state(MAINTENANCE_STATE)
-                    current_updated_at = state.get("updated_at")
+                    current_run_id = state.get("run_id")
                     embed, phase = maintenance_embed(state)
-                    received_new_state = received_new_state or current_updated_at != previous_updated_at
-                    if not received_new_state:
+                    received_run_state = received_run_state or (
+                        isinstance(current_run_id, str) and current_run_id != previous_run_id
+                    )
+                    if not received_run_state:
                         phase = "starting"
                         embed = discord.Embed(title="幻獸帕魯伺服器更新", color=discord.Color.blurple())
                         embed.add_field(name="狀態", value="準備中", inline=True)
                         embed.add_field(name="詳細", value="已接受更新要求，正在啟動維護工作。", inline=False)
+                        # A preflight or flock failure can make the oneshot
+                        # service exit before it has written this invocation's
+                        # run_id.  Do not make the requester wait for the full
+                        # polling deadline in that case.
+                        service_state = await asyncio.to_thread(
+                            self.dependencies.maintenance_service_state
+                        )
+                        if service_state in {"inactive", "failed"}:
+                            phase = "failed"
+                            embed = maintenance_embed({
+                                "phase": "failed",
+                                "message": "維護服務在回報進度前已結束。",
+                            })[0]
                     if phase != last_phase:
-                        await interaction.edit_original_response(content=None if notified else "在線公告未送達。", embed=embed)
+                        await interaction.edit_original_response(
+                            content=maintenance_countdown_note(countdown_result),
+                            embed=embed,
+                        )
                         last_phase = phase
                     if phase in {"completed", "failed"}:
+                        await self.maintenance_terminal_notification(interaction, phase)
                         return
                     if time.monotonic() >= deadline:
                         embed.set_footer(text="更新仍在進行中；請稍後使用 /pal status 確認伺服器狀態。")
-                        await interaction.edit_original_response(content=None if notified else "在線公告未送達。", embed=embed)
+                        await interaction.edit_original_response(
+                            content=maintenance_countdown_note(countdown_result),
+                            embed=embed,
+                        )
                         return
                     await asyncio.sleep(3)
         except (OperationBusy, CommandCooldown) as exc:
@@ -394,6 +479,17 @@ def maintenance_embed(state: dict[str, object]) -> tuple[discord.Embed, str]:
     embed.add_field(name="詳細", value=state.get("message") if isinstance(state.get("message"), str) else "正在等待維護服務回報狀態。", inline=False)
     embed.set_footer(text=f"最後更新：{state.get('updated_at', '剛剛')}")
     return embed, phase
+
+
+def maintenance_countdown_note(result: str) -> str | None:
+    """Describe why no Discord countdown announcement was sent."""
+    if result == "announced":
+        return None
+    if result == "unknown":
+        return "無法取得在線玩家狀態（安全起見執行倒數/保守處理）。"
+    if result == "none":
+        return "目前沒有在線玩家；未發送倒數公告。"
+    return "伺服器目前未執行；未發送倒數公告。"
 
 
 class Client(discord.Client):

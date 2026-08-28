@@ -3,5 +3,6 @@
 @MANAGER_USER@ ALL=(root) NOPASSWD: /usr/local/sbin/palworld-control start, \
     /usr/bin/systemctl is-active palworld-maintenance.service, \
     @GRACEFUL_STOP_SCRIPT@, \
+    @RESTORE_SCRIPT@ --web-restore *, \
     /usr/bin/systemctl start palworld-backup.service --wait, \
     /usr/bin/systemctl start palworld-maintenance.service --no-block

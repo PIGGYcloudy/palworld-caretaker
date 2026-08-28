@@ -17,6 +17,10 @@ if (( $# > 0 )); then
 fi
 [[ -n "$CONFIG_DIR" ]] || die '--config-dir is required (or set PALWORLD_CONFIG_DIR)'
 [[ -r "$MANAGER" ]] || die "configuration manager is missing: $MANAGER"
+SAFE_STATE_SETUP="$STAGING_DIR/scripts/safe-manager-state.py"
+[[ -r "$SAFE_STATE_SETUP" ]] || die "safe manager state helper is missing: $SAFE_STATE_SETUP"
+EDITABLE_MIGRATION="$STAGING_DIR/scripts/migrate-editable-config.py"
+[[ -r "$EDITABLE_MIGRATION" ]] || die "editable configuration migration helper is missing: $EDITABLE_MIGRATION"
 
 # Validate the complete layered value contract before creating backups, users,
 # directories, or systemd state.
@@ -30,6 +34,7 @@ DEPLOYED_CONFIG="$(config_value PALWORLD_CONFIG_ROOT)"
 SCRIPTS_ROOT="$(config_value PALWORLD_SCRIPTS_ROOT)"
 LOCAL_BACKUPS="$(config_value PALWORLD_LOCAL_BACKUP_ROOT)"
 STATE_DIR="$(config_value PALWORLD_MANAGER_STATE_DIR)"
+SETTINGS_BACKUP_DIR="$(config_value PALWORLD_SETTINGS_BACKUP_DIR)"
 MANAGER_USER="$(config_value PALWORLD_MANAGER_USER)"
 VENV_DIR="$INSTALL_ROOT/venv"
 PACKAGE_ROOT="$INSTALL_ROOT/packages"
@@ -69,16 +74,36 @@ log "Configuration and manager backup created at $backup"
 if ! id -u "$MANAGER_USER" >/dev/null 2>&1; then
   useradd --system --home-dir "$STATE_DIR" --shell /usr/sbin/nologin "$MANAGER_USER"
 fi
-install -d -o "$MANAGER_USER" -g "$MANAGER_USER" -m 0750 "$STATE_DIR"
+python3 "$SAFE_STATE_SETUP" "$STATE_DIR" --manager-user "$MANAGER_USER" \
+  --directory-mode 0750 --file audit.log --file-mode 0640 || die 'manager state setup failed'
+python3 "$SAFE_STATE_SETUP" "$SETTINGS_BACKUP_DIR" --manager-user "$MANAGER_USER" \
+  --directory-mode 0700 || die 'settings backup state setup failed'
 install -d -o root -g root -m 0755 "$SCRIPTS_ROOT"
 install -d -o root -g root -m 0755 "$PACKAGE_ROOT"
 install -d -o root -g "$MANAGER_USER" -m 0750 "$DEPLOYED_CONFIG"
-for config_name in palworld.env caretaker.env server.env; do
-  if [[ -f "$DEPLOYED_CONFIG/$config_name" ]]; then
-    chown root:"$MANAGER_USER" "$DEPLOYED_CONFIG/$config_name"
-    chmod 0640 "$DEPLOYED_CONFIG/$config_name"
+EDITABLE_CONFIG_DIR="$DEPLOYED_CONFIG/editable"
+install -d -o "$MANAGER_USER" -g "$MANAGER_USER" -m 0750 "$EDITABLE_CONFIG_DIR"
+# Move only the non-secret layers below the manager-owned child directory.
+# The root remains non-writable to this account, which protects secrets.env
+# from replacement or deletion while still allowing atomic editor writes.
+for config_name in caretaker.env server.env; do
+  source_file="$DEPLOYED_CONFIG/$config_name"
+  destination="$EDITABLE_CONFIG_DIR/$config_name"
+  if [[ -f "$source_file" ]]; then
+    # Old deployments mixed operational fields with UI settings.  Preserve
+    # protected fields in the root-owned base layer and move only keys from
+    # SETTING_SPECS into the manager-writable child.
+    python3 "$EDITABLE_MIGRATION" --manager "$MANAGER" --manager-user "$MANAGER_USER" \
+      "$source_file" "$destination" || die "could not migrate $config_name into the editable layer"
+  elif [[ -f "$destination" ]]; then
+    python3 "$SAFE_STATE_SETUP" "$EDITABLE_CONFIG_DIR" --manager-user "$MANAGER_USER" \
+      --directory-mode 0750 --file "$config_name" --file-mode 0640 || die "editable $config_name setup failed"
   fi
 done
+if [[ -f "$DEPLOYED_CONFIG/palworld.env" ]]; then
+  chown root:"$MANAGER_USER" "$DEPLOYED_CONFIG/palworld.env"
+  chmod 0640 "$DEPLOYED_CONFIG/palworld.env"
+fi
 if [[ -f "$DEPLOYED_CONFIG/secrets.env" ]]; then
   chown root:"$MANAGER_USER" "$DEPLOYED_CONFIG/secrets.env"
   chmod 0640 "$DEPLOYED_CONFIG/secrets.env"
@@ -141,7 +166,8 @@ for unit_file in "$render_dir"/*; do
 done
 sed_replacement() { printf '%s' "$1" | sed 's/[\\&|]/\\&/g'; }
 SUDOERS_GRACEFUL_STOP="$(sed_replacement "${SCRIPTS_ROOT// /\\ }/graceful-stop-palworld.sh")"
-sed -e "s|@MANAGER_USER@|$(sed_replacement "$MANAGER_USER")|g" -e "s|@GRACEFUL_STOP_SCRIPT@|$SUDOERS_GRACEFUL_STOP|g" "$STAGING_DIR/config/palworld-manager.sudoers" \
+SUDOERS_RESTORE="$(sed_replacement "${SCRIPTS_ROOT// /\\ }/restore-palworld.sh")"
+sed -e "s|@MANAGER_USER@|$(sed_replacement "$MANAGER_USER")|g" -e "s|@GRACEFUL_STOP_SCRIPT@|$SUDOERS_GRACEFUL_STOP|g" -e "s|@RESTORE_SCRIPT@|$SUDOERS_RESTORE|g" "$STAGING_DIR/config/palworld-manager.sudoers" \
   > "$render_dir/palworld-manager.sudoers"
 install -o root -g root -m 0440 "$render_dir/palworld-manager.sudoers" "$SUDOERS_DIR/palworld-manager"
 visudo -cf "$SUDOERS_DIR/palworld-manager" >/dev/null

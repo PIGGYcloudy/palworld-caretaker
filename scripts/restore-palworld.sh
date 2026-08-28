@@ -45,10 +45,15 @@ if [[ $# -eq 0 || "${1:-}" == 'list' ]]; then
   exit 0
 fi
 
-[[ $# -eq 2 && "$1" == 'restore' ]] || {
+web_restore=0
+if [[ $# -eq 2 && "$1" == '--web-restore' ]]; then
+  web_restore=1
+elif [[ $# -eq 2 && "$1" == 'restore' ]]; then
+  :
+else
   printf 'Usage:\n  %s\n  %s restore palworld-YYYYMMDD-HHMMSS\n' "$0" "$0" >&2
   exit 2
-}
+fi
 
 VERSION="$2"
 [[ "$VERSION" =~ ^palworld-[0-9]{8}-[0-9]{6}$ ]] || die 'backup version name is invalid'
@@ -67,10 +72,12 @@ if python3 "$MANAGER" --core-engine >/dev/null 2>&1; then
   python3 "$MANAGER" --config-dir "$CONFIG_DIR" --restore-preflight "$VERSION" || exit $?
 fi
 
-printf 'This will stop Palworld, create a fresh pre-restore backup, and overwrite the live save/config.\n'
-printf 'Type exactly "RESTORE %s" to continue: ' "$VERSION"
-read -r confirmation
-[[ "$confirmation" == "RESTORE $VERSION" ]] || die 'restore confirmation did not match'
+if (( web_restore == 0 )); then
+  printf 'This will stop Palworld, create a fresh pre-restore backup, and overwrite the live save/config.\n'
+  printf 'Type exactly "RESTORE %s" to continue: ' "$VERSION"
+  read -r confirmation
+  [[ "$confirmation" == "RESTORE $VERSION" ]] || die 'restore confirmation did not match'
+fi
 
 # The confirmation is deliberately outside the lock; the destructive state
 # check and every subsequent filesystem/service action are inside it.
@@ -84,11 +91,26 @@ stamp="$(date +%Y%m%d-%H%M%S)"
 local_snapshot="$LOCAL_ROOT/pre-restore-$stamp"
 cleanup() {
   local rc=$?
+  local final_state='stopped'
+  trap - EXIT
   if (( was_active == 1 )); then
     if ! systemctl is-active --quiet palworld.service; then
-      systemctl start palworld.service || true
+      if ! systemctl start palworld.service; then
+        final_state='restart-failed'
+        rc=1
+      fi
+    fi
+    if [[ "$final_state" != restart-failed ]] && systemctl is-active --quiet palworld.service; then
+      final_state='restarted'
+    elif [[ "$final_state" != restart-failed ]]; then
+      final_state='restart-failed'
+      rc=1
     fi
   fi
+  # This fixed record is consumed by the local web service.  It is emitted
+  # only after the cleanup action has determined the actual final service
+  # state, not when the restore data copy completes.
+  printf 'Service state after restore: %s\n' "$final_state"
   exit "$rc"
 }
 trap cleanup EXIT

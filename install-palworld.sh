@@ -15,6 +15,10 @@ if [[ $# -gt 0 ]]; then
   CONFIG_SOURCE_DIR="$2"
 fi
 [[ -r "$MANAGER" ]] || die "configuration manager is missing: $MANAGER"
+SAFE_STATE_SETUP="$STAGING_DIR/scripts/safe-manager-state.py"
+[[ -r "$SAFE_STATE_SETUP" ]] || die "safe manager state helper is missing: $SAFE_STATE_SETUP"
+EDITABLE_MIGRATION="$STAGING_DIR/scripts/migrate-editable-config.py"
+[[ -r "$EDITABLE_MIGRATION" ]] || die "editable configuration migration helper is missing: $EDITABLE_MIGRATION"
 
 # This must remain before dpkg, apt, useradd, install, mkdir, or writes to /etc.
 # A fresh deployment has no target directories, so this gate validates values.
@@ -32,6 +36,7 @@ BACKUP_DIR="$(config_value PALWORLD_BACKUP_DIR)"
 BACKUP_MOUNT="$(config_value PALWORLD_BACKUP_MOUNT)"
 BACKUP_REQUIRE_MOUNT="$(config_value PALWORLD_BACKUP_REQUIRE_MOUNT)"
 MANAGER_STATE_DIR="$(config_value PALWORLD_MANAGER_STATE_DIR)"
+SETTINGS_BACKUP_DIR="$(config_value PALWORLD_SETTINGS_BACKUP_DIR)"
 SERVICE_USER="$(config_value PALWORLD_SERVICE_USER)"
 MANAGER_USER="$(config_value PALWORLD_MANAGER_USER)"
 VENV_DIR="$BASE_DIR/venv"
@@ -66,11 +71,19 @@ install -d -o "$SERVICE_USER" -g "$SERVICE_USER" -m 0750 "$SERVER_DIR"
 install -d -o root -g root -m 0755 "$SCRIPT_DIR"
 install -d -o root -g root -m 0755 "$PACKAGE_ROOT"
 install -d -o root -g "$MANAGER_USER" -m 0750 "$CONFIG_DIR"
+EDITABLE_CONFIG_DIR="$CONFIG_DIR/editable"
+install -d -o "$MANAGER_USER" -g "$MANAGER_USER" -m 0750 "$EDITABLE_CONFIG_DIR"
 install -d -o root -g root -m 0700 "$LOCAL_BACKUP_DIR"
-install -d -o "$MANAGER_USER" -g "$MANAGER_USER" -m 0750 "$MANAGER_STATE_DIR"
+# The manager owns these directories.  Validate and repair their actual
+# inodes through O_NOFOLLOW descriptors; never chown/chmod a path supplied by
+# that account after a shell-level existence check.
+python3 "$SAFE_STATE_SETUP" "$MANAGER_STATE_DIR" --manager-user "$MANAGER_USER" \
+  --directory-mode 0750 --file audit.log --file-mode 0640 || die 'manager state setup failed'
+python3 "$SAFE_STATE_SETUP" "$SETTINGS_BACKUP_DIR" --manager-user "$MANAGER_USER" \
+  --directory-mode 0700 || die 'settings backup state setup failed'
 
 copied_config=0
-for config_name in palworld.env caretaker.env server.env secrets.env; do
+for config_name in palworld.env secrets.env; do
   source_file="$CONFIG_SOURCE_DIR/$config_name"
   [[ -f "$source_file" ]] || continue
   destination="$CONFIG_DIR/$config_name"
@@ -78,8 +91,17 @@ for config_name in palworld.env caretaker.env server.env secrets.env; do
   if [[ ! "$source_file" -ef "$destination" ]]; then
     install -o root -g "$MANAGER_USER" -m "$mode" "$source_file" "$destination"
   else
-    chown root:"$MANAGER_USER" "$destination"; chmod "$mode" "$destination"
+    chown root:"$MANAGER_USER" "$destination"
+    chmod "$mode" "$destination"
   fi
+  copied_config=1
+done
+for config_name in caretaker.env server.env; do
+  source_file="$CONFIG_SOURCE_DIR/$config_name"
+  [[ -f "$source_file" ]] || continue
+  python3 "$EDITABLE_MIGRATION" --manager "$MANAGER" --manager-user "$MANAGER_USER" \
+    --protected-destination "$CONFIG_DIR/$config_name" \
+    "$source_file" "$EDITABLE_CONFIG_DIR/$config_name" || die "could not migrate $config_name into the editable layer"
   copied_config=1
 done
 (( copied_config == 1 )) || die "no deployment configuration files found in $CONFIG_SOURCE_DIR"
@@ -147,7 +169,8 @@ for unit_file in "$RENDER_DIR"/*; do
 done
 sed_replacement() { printf '%s' "$1" | sed 's/[\\&|]/\\&/g'; }
 SUDOERS_GRACEFUL_STOP="$(sed_replacement "${SCRIPT_DIR// /\\ }/graceful-stop-palworld.sh")"
-sed -e "s|@MANAGER_USER@|$(sed_replacement "$MANAGER_USER")|g" -e "s|@GRACEFUL_STOP_SCRIPT@|$SUDOERS_GRACEFUL_STOP|g" \
+SUDOERS_RESTORE="$(sed_replacement "${SCRIPT_DIR// /\\ }/restore-palworld.sh")"
+sed -e "s|@MANAGER_USER@|$(sed_replacement "$MANAGER_USER")|g" -e "s|@GRACEFUL_STOP_SCRIPT@|$SUDOERS_GRACEFUL_STOP|g" -e "s|@RESTORE_SCRIPT@|$SUDOERS_RESTORE|g" \
   "$STAGING_DIR/config/palworld-manager.sudoers" > "$RENDER_DIR/palworld-manager.sudoers"
 install -o root -g root -m 0440 "$RENDER_DIR/palworld-manager.sudoers" /etc/sudoers.d/palworld-manager
 visudo -cf /etc/sudoers.d/palworld-manager

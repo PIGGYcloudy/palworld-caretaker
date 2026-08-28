@@ -5,19 +5,24 @@ Linux 維運工具，重點是安全關服、可恢復備份、閒置自動關�
 遠端操作與本機 Web 管理面板；不提供公開 Web 管理介面。
 
 > [!IMPORTANT]
-> v0.2.0 支援 Ubuntu 24.04 LTS amd64 的原生 systemd 部署，並提供可測試的
+> v0.3.0 支援 Ubuntu 24.04 LTS amd64 的原生 systemd 部署，並提供可測試的
 > Python 核心與僅限本機的 Web UI。部署設定契約、
 > 安裝器、備份/還原/更新腳本與 systemd unit 支援任意安全的絕對安裝與備份
-> 路徑。正式存檔仍建議先在測試主機完成安裝、備份與還原演練。
+> 路徑；設定編輯、還原與維護操作均會先驗證並留下安全紀錄。正式存檔仍建議
+> 先在測試主機完成安裝、備份與還原演練。
 
 ## 目前功能
 
 - SteamCMD 安裝、驗證與更新 Palworld Dedicated Server。
 - systemd 管理、崩潰有限重啟與 localhost-only REST API 防護。
 - 安全存檔、正常關服、可設定目的地的版本化備份與互動式還原。
+- 型別驗證的遊戲設定管理器，使用 `config/editable/` 分層設定、差異預覽與原子寫入。
+- Web UI 與 CLI 的 pre-restore safety backup、manifest 驗證與原子還原流程。
 - 無玩家逾時後再次確認，再執行存檔與正常關服。
 - Discord `/pal` 指令、guild/channel/role allowlist 與管理員確認。
 - Local Web UI：僅綁定 `127.0.0.1:8765` 的狀態、快照與安全操作面板。
+- Web UI 維護觸發與即時狀態輪詢；Discord 維護前倒數及完成/失敗通知。
+- Web、CLI 與 Discord 共用的 secret-masked strict JSON audit log。
 - 每日維護保留原本開關服狀態，失敗時避免強制關服或無聲資料損失。
 
 從零部署請見 [`docs/INSTALL.md`](docs/INSTALL.md)，既有 `/srv/palworld` 部署
@@ -37,13 +42,14 @@ idle watcher（永久在線）      Discord Bot（永久在線）      Local Web
 
 各管理服務彼此獨立。遊戲正常關閉不會停止 Bot、watcher 或 Web UI；啟動只會透過 root 擁有、參數固定的 `/usr/local/sbin/palworld-control start` 執行，絕不執行瀏覽器或 Discord 訊息中的任意 shell 指令。
 
-v0.2.0 的共用核心位於 `src/palworld_caretaker/`：`rest.py` 負責
+v0.3.0 的共用核心位於 `src/palworld_caretaker/`：`rest.py` 負責
 loopback-only、禁止 proxy/redirect 的強型別 REST；`backup.py` 負責 mount、
 容量、manifest SHA-256 與原子兩階段 commit；`diagnostics.py` 收集服務、程序、
-REST 與玩家狀態；`operations.py` 提供跨行程 `flock`；`web.py` 提供零第三方
-依賴的本機面板。`service.py`、`config.py` 與 `steamcmd.py` 提供生命週期、設定
-與外部 adapter 邊界。Bash、systemd、Discord 與 Web 入口只組合這些契約，不在
-各入口重複安全決策。
+REST 與玩家狀態；`operations.py` 提供跨行程 `flock`；`settings.py` 與
+`settings_store.py` 提供型別 schema、差異預覽與分層原子設定；`audit.py` 提供
+strict JSON 操作紀錄；`web.py` 提供零第三方依賴的本機面板、維護輪詢與還原入口。
+`service.py`、`config.py` 與 `steamcmd.py` 提供生命週期、設定與外部 adapter 邊界。
+Bash、systemd、Discord 與 Web 入口只組合這些契約，不在各入口重複安全決策。
 
 ## 安全與設定
 
@@ -54,7 +60,10 @@ REST 與玩家狀態；`operations.py` 提供跨行程 `flock`；`web.py` 提供
 Git 排除，不可提交。
 升級器會先在 `<PALWORLD_INSTALL_ROOT>/backups-local/manager-upgrade-*` 建立受保護
 的設定與 manager safety copy。它不會改寫或追加任何設定層，也不會碰觸存檔與
-外部備份。
+外部備份。安裝或升級後，非 secret 設定位於
+`<PALWORLD_INSTALL_ROOT>/config/editable/caretaker.env` 與 `server.env`；
+配置根目錄與 `secrets.env` 仍由 root 保護。預設狀態目錄
+`/var/lib/palworld-manager` 另存 `audit.log` 與維護狀態。
 
 ```env
 PALWORLD_REST_API_HOST=127.0.0.1
@@ -91,9 +100,22 @@ ID 清單可用逗號分隔。`DISCORD_PALWORLD_ALLOWED_CHANNEL_IDS=*` 表示指
 ssh -N -L 8765:127.0.0.1:8765 user@palworld-host
 ```
 
+世界設定頁面提供型別與範圍驗證、套用前差異預覽，以及只寫入
+`config/editable/` 的原子更新；每次修改前會保存設定副本，遊戲運行中則標示需
+安全重啟。備份清單也可從 Web UI 觸發還原：流程會先建立外部 snapshot 與
+`backups-local/pre-restore-*`，完成 preflight 後才停止服務並原子替換 live
+SaveGames/Config。SteamCMD 維護按鈕會以背景方式啟動固定的
+`palworld-maintenance.service`，並每 10 秒輪詢 preflight、關服、備份、更新、
+重啟及完成/失敗狀態；維護中不接受其他變更操作。
+
 面板固定拒絕非 loopback bind；不要用反向 proxy、防火牆或公開 DNS 對外暴露 `8765`。
 
 所有變更操作共用 `/run/palworld-caretaker/operation.lock`；它由 tmpfiles 以 `root:<manager>` 預建，runtime 目錄為 manager 不可寫入的 `0750`。Web、Discord、timer、idle watcher 與 maintenance 皆在取得這把跨行程鎖後才做狀態檢查與執行。無法判定 maintenance 或服務狀態時一律拒絕。備份若伺服器運行，必須先收到 REST `POST /save` 的成功回應，否則絕不停止服務。面板拒絕非 loopback 綁定，所有頁面與 API 都先要求 HTTP Basic Auth（`PALWORLD_WEB_UI_USERNAME` 加 `PALWORLD_WEB_UI_PASSWORD`；未設定後者時使用 `ADMIN_PASSWORD`），再要求 JSON + 行程內 CSRF token，並設有同源、無快取與禁止嵌入的瀏覽器防護。它不是遠端管理入口：不要以 nginx、SSH port forwarding 以外的 proxy、或任何防火牆規則對外公開此埠。
+
+操作紀錄由 Web、CLI 與 Discord 寫入預設的
+`/var/lib/palworld-manager/audit.log`。每行都是禁止 NaN/Infinity 的 strict JSON，
+寫入與 Web 顯示前都會遮蔽 token、password、secret、key、auth 與 cookie 等
+credential；檔案預設為 manager 擁有的 `0640` regular file。
 
 ## 無人自動關服
 
@@ -117,7 +139,7 @@ timeout、認證失敗、連線錯誤、非 200、JSON 無法解析、缺少 `pl
 - `/pal backup`：管理員限定，透過 systemd 備份服務建立並驗證一份新 snapshot。
 - `/pal backups`：列出最近可用的備份快照與大小。
 - `/pal diagnose`：管理員限定，顯示不含 secrets 的服務、REST 與玩家健康摘要。
-- `/pal update confirm:true`：啟動備份與 SteamCMD 更新。Bot 會以同一則嵌入式訊息顯示安全關服、備份、更新與重啟進度；會保留更新開始前的開關服狀態。
+- `/pal update confirm:true`：啟動備份與 SteamCMD 更新。若能確認有在線玩家，Bot 會在維護前先發送包含 graceful shutdown 秒數的倒數公告，再以同一則嵌入式訊息顯示安全關服、備份、更新與重啟進度，最後發送完成或失敗通知；會保留更新開始前的開關服狀態。
 
 Bot 採 slash command，不會重複註冊文字指令。所有變更指令都先取得
 `/run/palworld-caretaker/operation.lock`，再確認 `palworld-maintenance.service`
@@ -154,7 +176,7 @@ sudo systemctl enable --now palworld-discord-bot.service
 ```
 
 升級既有管理元件而不重新下載遊戲時，必須明確提供已部署的設定目錄；安裝
-根目錄、帳號、state 與所有衍生路徑都從三層設定契約解析：
+根目錄、帳號、state 與所有衍生路徑都從分層設定契約解析：
 
 ```bash
 sudo bash ./upgrade-palworld-manager.sh \
@@ -222,6 +244,12 @@ sudo "<PALWORLD_INSTALL_ROOT>/scripts/restore-palworld.sh"
 sudo "<PALWORLD_INSTALL_ROOT>/scripts/restore-palworld.sh" restore palworld-YYYYMMDD-HHMMSS
 ```
 
+CLI 還原會在停止服務前再次驗證 snapshot，要求輸入精確確認字串
+`RESTORE palworld-YYYYMMDD-HHMMSS`，並建立外部 snapshot 與
+`backups-local/pre-restore-*` safety copy；任何 preflight、容量、manifest 或
+原子發布失敗都不會覆寫 live 資料。Web UI 會回報已驗證的 safety backup 與
+最終服務狀態，避免把未完成的還原誤報為成功。
+
 `palworld.service` 維持 `Restart=on-failure` 並將正常結束碼 0、130、143 視為成功。官方 graceful shutdown 正常退出時不會被拉起；crash 才有限度重啟。若實機版本的 API shutdown 產生其他 exit code，先保持 dry-run 並以 journal 驗證，必要時將該已確認的正常碼加入 `SuccessExitStatus`。
 
 ## 開發與安全
@@ -229,10 +257,10 @@ sudo "<PALWORLD_INSTALL_ROOT>/scripts/restore-palworld.sh" restore palworld-YYYY
 提交變更前請閱讀 [`CONTRIBUTING.md`](CONTRIBUTING.md)，安全邊界與漏洞回報
 方式見 [`SECURITY.md`](SECURITY.md)。GitHub Actions 會執行 Python 測試、Python
 編譯、Bash 語法檢查、ShellCheck 與 release 產物驗證。從乾淨且已提交的
-v0.2.0 source tree 建立 tarball 與 checksum：
+v0.3.0 source tree 建立 tarball 與 checksum：
 
 ```bash
-scripts/package-release.sh --version 0.2.0 --output-dir dist
+scripts/package-release.sh --version 0.3.0 --output-dir dist
 (cd dist && sha256sum --check SHA256SUMS)
 ```
 

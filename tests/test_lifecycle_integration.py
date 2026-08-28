@@ -1,4 +1,5 @@
 import os
+import pwd
 import shutil
 import subprocess
 import tempfile
@@ -175,7 +176,12 @@ class UpgradeIntegrationTests(unittest.TestCase):
                 f"PALWORLD_BACKUP_DIR='{backup_dir}'\n"
                 "PALWORLD_BACKUP_MOUNT=\nPALWORLD_BACKUP_REQUIRE_MOUNT=false\n"
                 f"PALWORLD_MANAGER_STATE_DIR='{state_dir}'\n"
-                "PALWORLD_MANAGER_USER=fixture-manager\nPALWORLD_SERVICE_USER=fixture-game\n",
+                # The upgrade now resolves the manager identity through the
+                # kernel account database before repairing state inodes.
+                # Use the current real fixture account rather than a fake
+                # ``id`` result.
+                f"PALWORLD_MANAGER_USER={pwd.getpwuid(os.getuid()).pw_name}\n"
+                "PALWORLD_SERVICE_USER=fixture-game\n",
                 encoding="utf-8",
             )
             (config_dir / "server.env").write_text(
@@ -187,9 +193,7 @@ class UpgradeIntegrationTests(unittest.TestCase):
                 encoding="utf-8",
             )
             secrets.chmod(0o640)
-            original_config = {
-                path.name: path.read_bytes() for path in config_dir.iterdir()
-            }
+            original_secrets = (config_dir / "secrets.env").read_bytes()
             palserver = server_root / "PalServer.sh"
             palserver.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
             palserver.chmod(0o755)
@@ -254,13 +258,26 @@ fi
                 text=True, capture_output=True, check=False, env=env, timeout=30,
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            editable = config_dir / "editable"
+            self.assertEqual((editable / "caretaker.env").read_bytes(), b"")
             self.assertEqual(
-                original_config,
-                {path.name: path.read_bytes() for path in config_dir.iterdir()},
+                (editable / "server.env").read_text(encoding="utf-8"),
+                'SERVER_NAME="Custom Name"\nMAX_PLAYERS=12\n',
             )
+            self.assertEqual((config_dir / "secrets.env").read_bytes(), original_secrets)
+            protected_caretaker = (config_dir / "caretaker.env").read_text(encoding="utf-8")
+            self.assertIn(f'PALWORLD_INSTALL_ROOT="{install_root}"', protected_caretaker)
+            self.assertIn(f'PALWORLD_MANAGER_STATE_DIR="{state_dir}"', protected_caretaker)
+            self.assertIn("PALWORLD_SERVICE_USER=fixture-game", protected_caretaker)
+            self.assertFalse((config_dir / "server.env").exists())
             game_unit = (unit_dir / "palworld.service").read_text(encoding="utf-8")
             self.assertIn("Custom\\x20Palworld", game_unit)
             self.assertNotIn("/srv/palworld", game_unit)
+            web_unit = (unit_dir / "palworld-web-ui.service").read_text(encoding="utf-8")
+            self.assertIn("ReadWritePaths=", web_unit)
+            self.assertIn("/config/editable", web_unit)
+            self.assertIn("/settings-backups", web_unit)
+            self.assertTrue((state_dir / "settings-backups").is_dir())
             self.assertTrue((install_root / "scripts/diagnose-palworld.sh").is_file())
             package_link = install_root / "packages/current"
             self.assertTrue(package_link.is_symlink())

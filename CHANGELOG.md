@@ -6,6 +6,79 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 - 尚無變更。
 
+## [0.3.0] - 2026-08-28
+
+這個版本把遊戲內設定、還原、維護與管理操作紀錄整合到同一套可驗證的
+安全流程；Web UI、CLI 與 Discord 入口仍共用相同的鎖定、驗證與路徑信任邊界。
+
+### 遊戲設定管理
+
+- 新增 schema-backed 的 in-game settings manager，以型別化 schema 驗證整數、
+  數值範圍、布林值、時間格式與嵌入 `PalWorldSettings.ini` 前必須避開的字元。
+  Web UI 依 General、Multipliers、Pal Dynamics、Player & Guild、Drops & Spawns
+  與 Caretaker 分類呈現欄位，儲存前會顯示精確差異；執行中的伺服器會明確標示
+  需要安全重啟才會套用。
+- 非 secret 的可編輯設定改用分層配置：`config/editable/caretaker.env` 與
+  `config/editable/server.env` 覆蓋受保護的相容層，`secrets.env` 仍留在 root-only
+  配置目錄，Web UI 絕不讀取或修改它。舊式 `palworld.env` 與 root-level 設定仍
+  可相容讀取。
+- 設定變更會先在 `settings-backups/` 建立受保護的目前版本副本，再以同一檔案系統
+  的 temporary file、`fsync` 與 atomic rename 寫入；任何 reload 或 rollback
+  失敗都會拒絕發布或回復原內容。
+
+### Pre-restore safety backup 與原子還原
+
+- CLI `restore-palworld.sh restore <snapshot>` 與 Web UI 還原按鈕共用 restore
+  preflight：在提示、停止服務或建立副作用前驗證 snapshot manifest、檔案清單、
+  mount policy、容量與 live path。CLI 仍要求精確輸入
+  `RESTORE palworld-YYYYMMDD-HHMMSS`。
+- 覆寫 SaveGames/Config 前一定建立新的外部 snapshot 與安裝根目錄內
+  `backups-local/pre-restore-*` safety copy；快照以 staging、驗證與 atomic
+  publish 取代 live trees，部分提交失敗時會 rollback。Web UI 會驗證 safety
+  backup 與最終服務狀態，並只回報已確認的 restarted/stopped 結果。
+- 還原完成後保留還原前的服務開關狀態；CLI 與 Web 操作都寫入共用 audit log。
+
+### 維護、Web UI 與 Discord
+
+- Web UI 新增 SteamCMD maintenance trigger。按鈕只會啟動固定的
+  `palworld-maintenance.service`，前端每 10 秒輪詢安全的 maintenance state，
+  即時顯示 preflight、關服、備份、更新、重啟與完成/失敗階段；維護進行中會
+  拒絕其他變更操作。
+- Discord `/pal update confirm:true` 在維護啟動前，若能確認有在線玩家，會先
+  發送包含 graceful-shutdown 秒數的倒數公告；之後以同一則進度訊息追蹤維護，
+  並在 terminal state 發送完成或失敗通知。無法確認玩家時採保守流程，不把未知
+  當成無人。
+- Web、CLI、Discord、timer、idle watcher 與 maintenance 共同使用
+  `/run/palworld-caretaker/operation.lock`，避免還原、備份、更新與啟停交錯。
+
+### 多通道 audit log
+
+- 新增 Web、CLI 與 Discord 共用的多通道管理操作紀錄，預設寫入
+  `/var/lib/palworld-manager/audit.log`（`PALWORLD_MANAGER_STATE_DIR` 可改變根目錄）。
+- 每筆紀錄是單行、UTF-8、strict JSON；禁止 NaN/Infinity，並限制單行大小與讀取
+  筆數。欄位名稱與文字內容都會遮蔽 token、password、secret、key、auth、cookie
+  等 credential，讀取歷史紀錄時還會再次 sanitize。檔案由 manager 擁有、權限為
+  `0640`，Web UI 只提供受限的最近紀錄檢視。
+
+### Symlink 防護與路徑信任邊界
+
+- 配置、audit、maintenance state、settings backup、lock、snapshot 與 live
+  data 都要求 regular file/real directory、受控 owner/mode 與不重疊的絕對路徑；
+  重要開啟使用 `O_NOFOLLOW`，temporary inode 建立後才以 descriptor 操作並
+  `fsync`，拒絕 symlink、hard-link 異常與 mountpoint 失效。
+- install/upgrade 將 Web 可寫範圍限縮到 manager-owned `config/editable/` 和
+  `settings-backups/`；root-owned 配置根目錄、`secrets.env`、manager state
+  父目錄與 systemd trust boundary 不可由 Web UI 帳號替換、刪除或重新導向。
+- Python package 以 root-owned 完整 release 發布，再以 atomic symlink 切換
+  `packages/current`，避免半套程式或不受信任的操作路徑進入執行流程。
+
+### 測試與發布
+
+- 新增 settings schema/persistence、audit log、Web restore/maintenance polling、
+  Discord countdown/terminal notification 與 symlink/path boundary coverage；
+  release package test 改以 v0.3.0 驗證 archive 命名、內容潔淨度、可重現性與
+  `SHA256SUMS`。
+
 ## [0.2.0] - 2026-08-28
 
 這個版本把既有 Linux 維運腳本背後的安全決策整理成可測試、可重用的
@@ -147,5 +220,6 @@ Ubuntu 24.04 systemd 部署工具鏈。
   Bash syntax 與 ShellCheck；涵蓋設定/路徑契約、systemd renderer、生命週期、
   備份/還原失敗邊界、升級、解除安裝及 release 封包潔淨度。
 
+[0.3.0]: https://github.com/PIGGYcloudy/palworld-caretaker/releases/tag/v0.3.0
 [0.2.0]: https://github.com/PIGGYcloudy/palworld-caretaker/releases/tag/v0.2.0
 [0.1.0]: https://github.com/PIGGYcloudy/palworld-caretaker/releases/tag/v0.1.0

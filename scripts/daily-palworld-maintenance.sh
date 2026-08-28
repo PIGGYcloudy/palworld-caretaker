@@ -14,6 +14,10 @@ UPDATE_SCRIPT="$SCRIPT_HOME/update-palworld.sh"
 GRACEFUL_STOP_SCRIPT="$SCRIPT_HOME/graceful-stop-palworld.sh"
 LOCK_FILE="${PALWORLD_OPERATION_LOCK_FILE:-/run/palworld-caretaker/operation.lock}"
 STATE_FILE="$STATE_ROOT/maintenance-state.json"
+# This identifies this invocation independently of the second-resolution
+# display timestamp.  The Discord bot uses it to avoid confusing a terminal
+# state from an earlier maintenance run with this one.
+RUN_ID="$(cat /proc/sys/kernel/random/uuid)"
 
 log() {
   printf '[%s] %s\n' "$(date --iso-8601=seconds)" "$*"
@@ -27,9 +31,25 @@ die() {
 write_state() {
   local phase=$1
   local message=$2
-  local temporary="$STATE_FILE.$$"
-  printf '{"phase":"%s","message":"%s","updated_at":"%s"}\n' \
-    "$phase" "$message" "$(date --iso-8601=seconds)" > "$temporary"
+  # STATE_ROOT is manager-owned, so a PID-derived name would let that account
+  # pre-create or replace a file that this root workflow later chmods.  mktemp
+  # creates a fresh, non-predictable inode in the same filesystem for rename.
+  if [[ ! -d "$STATE_ROOT" || -L "$STATE_ROOT" ]]; then
+    log "ERROR: maintenance state directory is unsafe: $STATE_ROOT"
+    return 1
+  fi
+  local temporary
+  if ! temporary="$(mktemp -p "$STATE_ROOT" '.maintenance-state.XXXXXX')"; then
+    log 'ERROR: could not create maintenance state file'
+    return 1
+  fi
+  if [[ ! -f "$temporary" || -L "$temporary" ]]; then
+    rm -f -- "$temporary"
+    log 'ERROR: maintenance state temporary file is unsafe'
+    return 1
+  fi
+  printf '{"run_id":"%s","phase":"%s","message":"%s","updated_at":"%s"}\n' \
+    "$RUN_ID" "$phase" "$message" "$(date --iso-8601=seconds)" > "$temporary"
   chmod 0644 "$temporary"
   mv -f -- "$temporary" "$STATE_FILE"
 }
@@ -39,19 +59,15 @@ write_state() {
 [[ -x "$UPDATE_SCRIPT" ]] || die "update script is missing: $UPDATE_SCRIPT"
 [[ -x "$GRACEFUL_STOP_SCRIPT" ]] || die "graceful stop script is missing: $GRACEFUL_STOP_SCRIPT"
 
-[[ -f "$LOCK_FILE" && ! -L "$LOCK_FILE" ]] || die "operation lock is unsafe or missing: $LOCK_FILE"
-exec 9<"$LOCK_FILE"
-flock -n 9 || die 'another Palworld operation is already running'
-export PALWORLD_OPERATION_LOCK_HELD=1
-write_state 'starting' '已接受更新要求，正在檢查伺服器狀態。'
-
 was_active=0
-if systemctl is-active --quiet "$SERVICE"; then
-  was_active=1
-fi
 
 restore_service_state() {
   local rc=$?
+  # This handler also covers failures before the lock is acquired and before
+  # preflight starts.  Disable itself and make state reporting best-effort so
+  # an unsafe/unavailable state directory cannot obscure the original error.
+  trap - EXIT
+  set +e
   if (( was_active == 1 )) && ! systemctl is-active --quiet "$SERVICE"; then
     write_state 'restarting' '維護中斷，正在恢復伺服器。'
     log 'Restoring the previously running Palworld service.'
@@ -65,6 +81,16 @@ restore_service_state() {
   exit "$rc"
 }
 trap restore_service_state EXIT
+
+[[ -f "$LOCK_FILE" && ! -L "$LOCK_FILE" ]] || die "operation lock is unsafe or missing: $LOCK_FILE"
+exec 9<"$LOCK_FILE"
+flock -n 9 || die 'another Palworld operation is already running'
+export PALWORLD_OPERATION_LOCK_HELD=1
+write_state 'starting' '已接受更新要求，正在檢查伺服器狀態。'
+
+if systemctl is-active --quiet "$SERVICE"; then
+  was_active=1
+fi
 
 write_state 'starting' '正在檢查備份空間與來源資料。'
 log 'Validating backup storage and sources before stopping Palworld.'

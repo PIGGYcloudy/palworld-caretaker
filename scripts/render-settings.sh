@@ -36,6 +36,20 @@ SERVER_DESCRIPTION="$(config_value SERVER_DESCRIPTION)"
 PUBLIC_PORT="$(config_value PUBLIC_PORT)"
 PALWORLD_REST_API_PORT="$(config_value PALWORLD_REST_API_PORT)"
 SERVICE_USER="$(config_value PALWORLD_SERVICE_USER)"
+DAY_TIME_SPEED_RATE="$(config_value DAY_TIME_SPEED_RATE)"
+NIGHT_TIME_SPEED_RATE="$(config_value NIGHT_TIME_SPEED_RATE)"
+EXP_RATE="$(config_value EXP_RATE)"
+PAL_CAPTURE_RATE="$(config_value PAL_CAPTURE_RATE)"
+COLLECTION_DROP_RATE="$(config_value COLLECTION_DROP_RATE)"
+ENEMY_DROP_ITEM_RATE="$(config_value ENEMY_DROP_ITEM_RATE)"
+PAL_DAMAGE_RATE_ATTACK="$(config_value PAL_DAMAGE_RATE_ATTACK)"
+PAL_DAMAGE_RATE_DEFENSE="$(config_value PAL_DAMAGE_RATE_DEFENSE)"
+PLAYER_DAMAGE_RATE_ATTACK="$(config_value PLAYER_DAMAGE_RATE_ATTACK)"
+PLAYER_DAMAGE_RATE_DEFENSE="$(config_value PLAYER_DAMAGE_RATE_DEFENSE)"
+GUILD_PLAYER_MAX_NUM="$(config_value GUILD_PLAYER_MAX_NUM)"
+PAL_SPAWN_NUM_RATE="$(config_value PAL_SPAWN_NUM_RATE)"
+DROP_ITEM_MAX_NUM="$(config_value DROP_ITEM_MAX_NUM)"
+PAL_EGG_DEFAULT_HATCHING_TIME="$(config_value PAL_EGG_DEFAULT_HATCHING_TIME)"
 
 validate_ini_value() {
   local name="$1"
@@ -64,6 +78,20 @@ PW_SERVER_NAME="$SERVER_NAME" \
 PW_SERVER_DESCRIPTION="$SERVER_DESCRIPTION" \
 PW_PUBLIC_PORT="$PUBLIC_PORT" \
 PW_REST_API_PORT="$PALWORLD_REST_API_PORT" \
+PW_DAY_TIME_SPEED_RATE="$DAY_TIME_SPEED_RATE" \
+PW_NIGHT_TIME_SPEED_RATE="$NIGHT_TIME_SPEED_RATE" \
+PW_EXP_RATE="$EXP_RATE" \
+PW_PAL_CAPTURE_RATE="$PAL_CAPTURE_RATE" \
+PW_COLLECTION_DROP_RATE="$COLLECTION_DROP_RATE" \
+PW_ENEMY_DROP_ITEM_RATE="$ENEMY_DROP_ITEM_RATE" \
+PW_PAL_DAMAGE_RATE_ATTACK="$PAL_DAMAGE_RATE_ATTACK" \
+PW_PAL_DAMAGE_RATE_DEFENSE="$PAL_DAMAGE_RATE_DEFENSE" \
+PW_PLAYER_DAMAGE_RATE_ATTACK="$PLAYER_DAMAGE_RATE_ATTACK" \
+PW_PLAYER_DAMAGE_RATE_DEFENSE="$PLAYER_DAMAGE_RATE_DEFENSE" \
+PW_GUILD_PLAYER_MAX_NUM="$GUILD_PLAYER_MAX_NUM" \
+PW_PAL_SPAWN_NUM_RATE="$PAL_SPAWN_NUM_RATE" \
+PW_DROP_ITEM_MAX_NUM="$DROP_ITEM_MAX_NUM" \
+PW_PAL_EGG_DEFAULT_HATCHING_TIME="$PAL_EGG_DEFAULT_HATCHING_TIME" \
 perl -0pe '
   my %numeric = (
     ServerPlayerMaxNum => $ENV{PW_MAX_PLAYERS},
@@ -84,6 +112,32 @@ perl -0pe '
     my $value = $string{$key};
     my $count = s/(\Q$key\E=)(?:"[^"]*"|[^,)]*)/$1 . chr(34) . $value . chr(34)/ge;
     die "required setting missing\n" if $count == 0;
+  }
+  my %option = (
+    DayTimeSpeedRate => $ENV{PW_DAY_TIME_SPEED_RATE},
+    NightTimeSpeedRate => $ENV{PW_NIGHT_TIME_SPEED_RATE},
+    ExpRate => $ENV{PW_EXP_RATE},
+    PalCaptureRate => $ENV{PW_PAL_CAPTURE_RATE},
+    CollectionDropRate => $ENV{PW_COLLECTION_DROP_RATE},
+    EnemyDropItemRate => $ENV{PW_ENEMY_DROP_ITEM_RATE},
+    PalDamageRateAttack => $ENV{PW_PAL_DAMAGE_RATE_ATTACK},
+    PalDamageRateDefense => $ENV{PW_PAL_DAMAGE_RATE_DEFENSE},
+    PlayerDamageRateAttack => $ENV{PW_PLAYER_DAMAGE_RATE_ATTACK},
+    PlayerDamageRateDefense => $ENV{PW_PLAYER_DAMAGE_RATE_DEFENSE},
+    GuildPlayerMaxNum => $ENV{PW_GUILD_PLAYER_MAX_NUM},
+    PalSpawnNumRate => $ENV{PW_PAL_SPAWN_NUM_RATE},
+    DropItemMaxNum => $ENV{PW_DROP_ITEM_MAX_NUM},
+    PalEggDefaultHatchingTime => $ENV{PW_PAL_EGG_DEFAULT_HATCHING_TIME},
+  );
+  for my $key (keys %option) {
+    my $value = $option{$key};
+    if (!/\b\Q$key\E=/) {
+      s/(OptionSettings=\(.*)\)/$1 . "," . $key . "=" . $value . ")"/se
+        or die "OptionSettings block missing\n";
+    } else {
+      s/(\Q$key\E=)(?:"[^"]*"|[^,)])*/$1 . $value/ge
+        or die "world setting missing\n";
+    }
   }
   if (!/\bbIsUseBackupSaveData=/) {
     s/(OptionSettings=\(.*)\)/$1 . ",bIsUseBackupSaveData=True)"/se
