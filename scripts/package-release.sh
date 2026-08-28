@@ -65,7 +65,7 @@ gzip -n -9 < "$TEMPORARY/release.tar" > "$TEMPORARY/$ARCHIVE_NAME"
 tar -tzf "$TEMPORARY/$ARCHIVE_NAME" > "$TEMPORARY/contents.txt"
 grep -qx "palworld-caretaker-v$VERSION/docs/INSTALL.md" "$TEMPORARY/contents.txt" || die 'archive is missing docs/INSTALL.md'
 grep -qx "palworld-caretaker-v$VERSION/docs/UPGRADE.md" "$TEMPORARY/contents.txt" || die 'archive is missing docs/UPGRADE.md'
-if grep -Eq '(^|/)(\.git|__pycache__|\.pytest_cache|\.DS_Store|server|venv|backups-local|SaveGames|Saved|\.local-backups)(/|$)|(^|/)[^/]+\.env$|(^|/)\.pre-|\.pyc$|\.sav$|\.tar(\.gz)?$' "$TEMPORARY/contents.txt"; then
+if grep -v -E '(^|/)docker/default-config/[^/]+\.env$' "$TEMPORARY/contents.txt" | grep -Eq '(^|/)(\.git|__pycache__|\.pytest_cache|\.DS_Store|server|venv|backups-local|SaveGames|Saved|\.local-backups)(/|$)|(^|/)[^/]+\.env$|(^|/)\.pre-|\.pyc$|\.sav$|\.tar(\.gz)?$'; then
   die 'archive contains repository metadata, local configuration, or generated files'
 fi
 
