@@ -273,6 +273,17 @@ class ManagerTests(unittest.TestCase):
         with self.assertRaisesRegex(ConfigError, "must be different"):
             validate_config(config)
 
+    def test_config_rejects_malformed_web_authorities(self):
+        for key, value, message in (
+            ("PALWORLD_WEB_PUBLIC_ORIGIN", "https://bad.example/path", "HTTP\\(S\\) origins"),
+            ("PALWORLD_WEB_ALLOWED_HOSTS", "bad host", "host\[:port\]"),
+        ):
+            with self.subTest(key=key, value=value):
+                config = dict(DEFAULT_CONFIG)
+                config[key] = value
+                with self.assertRaisesRegex(ConfigError, message):
+                    validate_config(config)
+
     def test_config_rejects_relative_root_and_overlapping_backup(self):
         config = dict(DEFAULT_CONFIG)
         config["PALWORLD_INSTALL_ROOT"] = "relative/path"
@@ -333,6 +344,8 @@ class ManagerTests(unittest.TestCase):
             self.assertIn(
                 r"ReadWritePaths=/var/lib/custom\x20caretaker/settings-backups", web,
             )
+            self.assertIn('Environment="PALWORLD_CONFIG=/opt/Pal World/%%instance/config"', web)
+            self.assertNotIn("EnvironmentFile=", web)
             self.assertIn('OnCalendar=*-*-* 03:17:00', timer)
             self.assertFalse(any("@" in path.read_text(encoding="utf-8") for path in rendered))
 

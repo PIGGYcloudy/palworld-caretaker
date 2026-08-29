@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -24,11 +25,12 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 from palworld_caretaker.config import CaretakerConfig, DEFAULTS
 from palworld_caretaker.errors import ApiError
 from palworld_caretaker.rest import Metrics, Player
+from palworld_caretaker.settings import SETTING_SPECS
 from palworld_caretaker.web import _Handler
 from palworld_caretaker.service import ServerDiagnostics, ServerStatus, ServiceState
 from palworld_caretaker.backup import BackupEngine, RestoreResult
 from palworld_caretaker.operations import OperationLock, OperationLockBusy, OperationLockUnsafe
-from palworld_caretaker.web import WebDependencies, create_server, main
+from palworld_caretaker.web import WebDependencies, WebUIError, create_server, main
 
 
 class FakeAPI:
@@ -210,6 +212,22 @@ class WebUITests(unittest.TestCase):
         self.assertIn("text/html", headers["Content-Type"])
         self.assertIn("default-src 'self'", headers["Content-Security-Policy"])
         self.assertNotIn(b"admin-secret-never-rendered", page)
+        self.assertIn(b"help-tooltip", page)
+        self.assertIn(b"reset-setting", page)
+        self.assertIn(b"field.description", page)
+        self.assertIn(b"field.default", page)
+        self.assertIn(b"label.htmlFor=inputId", page)
+        self.assertIn(b"reset.type='button'", page)
+        self.assertIn(b"input.value=field.default", page)
+
+        status, raw, _headers = self.request("/api/settings")
+        self.assertEqual(status, 200)
+        fields = [field for category in json.loads(raw)["categories"] for field in category["fields"]]
+        self.assertEqual(len(fields), 40)
+        self.assertEqual({field["key"] for field in fields}, {
+            key for key, spec in SETTING_SPECS.items() if not spec.secret
+        })
+        self.assertTrue(all(field["description"] and field["default"] != "" for field in fields))
 
         status, raw, _headers = self.request("/api/status")
         payload = json.loads(raw)
@@ -221,6 +239,37 @@ class WebUITests(unittest.TestCase):
         status, raw, _headers = self.request("/api/backups")
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(raw)["snapshots"][0]["size"], "4.0 KiB")
+
+    def test_settings_frontend_builds_accessible_controls_and_binds_actions(self):
+        """Keep the dynamic DOM contract testable without a browser runtime."""
+        _status, page, _headers = self.request("/")
+        script = page.decode("utf-8")
+        # ``loadSettings`` constructs controls only from the API schema and
+        # keeps display strings in textContent rather than HTML injection.
+        self.assertIn("async function loadSettings()", script)
+        self.assertIn("root.replaceChildren()", script)
+        self.assertIn("document.createElement('fieldset')", script)
+        self.assertIn("document.createElement('legend')", script)
+        self.assertIn("document.createElement('label')", script)
+        self.assertIn("document.createElement('button')", script)
+        self.assertIn("document.createElement(field.kind==='choice'||field.kind==='boolean'?'select':'input')", script)
+        self.assertIn("label.htmlFor=inputId", script)
+        self.assertIn("input.id=inputId", script)
+        self.assertIn("input.name=field.key", script)
+        self.assertIn("input.setAttribute('aria-describedby',tooltip.id)", script)
+        self.assertIn("tooltip.setAttribute('role','tooltip')", script)
+        self.assertIn("tooltip.textContent=field.description", script)
+        self.assertIn("input.min=field.minimum", script)
+        self.assertIn("input.max=field.maximum", script)
+        self.assertIn("input.value=field.value", script)
+        # Reset, preview, and submit handlers must retain their safe,
+        # schema-driven behavior as the UI evolves.
+        self.assertIn("reset.addEventListener('click'", script)
+        self.assertIn("input.value=field.default", script)
+        self.assertIn("input.dispatchEvent(new Event('input',{bubbles:true}))", script)
+        self.assertIn("document.querySelector('#preview-settings').addEventListener('click'", script)
+        self.assertIn("settingsForm.addEventListener('submit'", script)
+        self.assertIn("JSON.stringify({values:settingsValues()})", script)
 
     def test_player_controls_announce_and_savegames_export(self):
         status, raw, _headers = self.request("/api/players")
@@ -374,12 +423,20 @@ class WebUITests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(self.fixture.lifecycle.stops, 1)
 
-    def test_container_dynamic_origin_accepts_lan_host_and_rejects_cross_origin(self):
+    def test_non_loopback_uses_explicit_host_and_origin_allowlists_against_dns_rebinding(self):
+        reserve = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        reserve.bind(("127.0.0.1", 0))
+        port = reserve.getsockname()[1]
+        reserve.close()
+        trusted_origin = f"http://192.168.50.10:{port}"
         with patch.dict(os.environ, {
-            "PALWORLD_CONTAINER_MODE": "1",
             "PALWORLD_WEB_PUBLIC_ORIGIN": "",
+            "PALWORLD_WEB_ALLOWED_ORIGINS": trusted_origin,
+            "PALWORLD_WEB_ALLOWED_HOSTS": "",
         }):
-            server = create_server(self.fixture.dependencies, host="0.0.0.0", port=0)
+            server = create_server(self.fixture.dependencies, host="0.0.0.0", port=port)
+            self.assertIn(f"192.168.50.10:{port}", server.trusted_hosts)
+            self.assertNotIn("attacker.invalid", server.trusted_hosts)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             try:
@@ -400,14 +457,18 @@ class WebUITests(unittest.TestCase):
                 response.read()
                 connection.close()
 
+                # DNS rebinding lets an attacker control both headers.  A
+                # dynamic Origin == Host comparison would accept this pair.
+                headers["Host"] = "attacker.invalid"
                 headers["Origin"] = "http://attacker.invalid"
                 connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=3)
                 connection.request("POST", "/api/start", body=b"{}", headers=headers)
                 response = connection.getresponse()
-                self.assertEqual(response.status, 403)
+                self.assertEqual(response.status, 400)
                 response.read()
                 connection.close()
 
+                headers["Host"] = lan_host
                 headers.pop("Origin")
                 headers["Referer"] = f"http://{lan_host}/"
                 connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=3)
@@ -418,6 +479,41 @@ class WebUITests(unittest.TestCase):
                 connection.close()
             finally:
                 server.shutdown(); server.server_close(); thread.join(timeout=2)
+
+    def test_default_port_proxy_authorities_match_browser_origin_and_host_headers(self):
+        cases = (
+            ("https://pal.example.net:443", "https://pal.example.net", "pal.example.net:443"),
+            ("http://pal.example.net:80", "http://pal.example.net", "pal.example.net:80"),
+        )
+        for configured_origin, browser_origin, host_header in cases:
+            with self.subTest(configured_origin=configured_origin), patch.dict(os.environ, {
+                "PALWORLD_WEB_PUBLIC_ORIGIN": configured_origin,
+                "PALWORLD_WEB_ALLOWED_ORIGINS": "",
+                "PALWORLD_WEB_ALLOWED_HOSTS": "",
+            }):
+                server = create_server(self.fixture.dependencies, host="0.0.0.0", port=0)
+                self.assertIn(browser_origin, server.trusted_origins)
+                self.assertIn("pal.example.net", server.trusted_hosts)
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    headers = {
+                        "Authorization": "Basic " + base64.b64encode(
+                            b"palworld-manager:admin-secret-never-rendered"
+                        ).decode(),
+                        "Content-Type": "application/json",
+                        "X-Palworld-CSRF": server.csrf_token,
+                        "Host": host_header,
+                        "Origin": browser_origin,
+                    }
+                    connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=3)
+                    connection.request("POST", "/api/announce", body=b'{"message":"check"}', headers=headers)
+                    response = connection.getresponse()
+                    self.assertEqual(response.status, 200)
+                    response.read()
+                    connection.close()
+                finally:
+                    server.shutdown(); server.server_close(); thread.join(timeout=2)
 
     def test_backup_and_restart_check_maintenance_before_any_mutation(self):
         status, raw, _headers = self.post("backup", token=self.server.csrf_token)
@@ -489,9 +585,31 @@ class WebUITests(unittest.TestCase):
         entry = json.loads(raw)["entries"][0]
         self.assertEqual((entry["source"], entry["action"], entry["status"]), ("Web", "update", "requested"))
 
-    def test_server_refuses_non_loopback_bindings(self):
-        with self.assertRaisesRegex(ValueError, "127.0.0.1"):
-            create_server(self.fixture.dependencies, host="0.0.0.0", port=0)
+    def test_server_accepts_valid_non_loopback_bindings_and_rejects_invalid_addresses(self):
+        server = create_server(self.fixture.dependencies, host="0.0.0.0", port=0)
+        server.server_close()
+        with self.assertRaisesRegex(ValueError, "IPv4"):
+            create_server(self.fixture.dependencies, host="::1", port=0)
+
+    def test_server_binds_the_normalized_canonical_address(self):
+        server = create_server(self.fixture.dependencies, host=" 127.0.0.1 ", port=0)
+        try:
+            self.assertEqual(server.server_address[0], "127.0.0.1")
+            self.assertIn(f"127.0.0.1:{server.server_port}", server.trusted_hosts)
+            self.assertIn(f"localhost:{server.server_port}", server.trusted_hosts)
+        finally:
+            server.server_close()
+
+    def test_web_authority_configuration_rejects_malformed_origins_and_hosts(self):
+        with patch.dict(os.environ, {"PALWORLD_WEB_PUBLIC_ORIGIN": "https://pal.example.net/path"}):
+            with self.assertRaisesRegex(ValueError, "HTTP\\(S\\) origins"):
+                create_server(self.fixture.dependencies, host="0.0.0.0", port=0)
+        with patch.dict(os.environ, {
+            "PALWORLD_WEB_PUBLIC_ORIGIN": "",
+            "PALWORLD_WEB_ALLOWED_HOSTS": "attacker.invalid/path",
+        }):
+            with self.assertRaisesRegex(ValueError, "host\[:port\]"):
+                create_server(self.fixture.dependencies, host="0.0.0.0", port=0)
 
     def test_global_file_lock_rejects_a_web_mutation_before_state_check(self):
         self.fixture.lifecycle.state = ServiceState.INACTIVE
@@ -520,12 +638,39 @@ class WebUITests(unittest.TestCase):
             def serve_forever(self, **_kwargs): raise KeyboardInterrupt
             def server_close(self): pass
 
+        config = type("Config", (), {"values": {"PALWORLD_WEB_BIND_IP": "127.0.0.1"}})()
         with patch.dict(os.environ, {"PALWORLD_CONFIG": "/custom/config"}, clear=False), \
-             patch("palworld_caretaker.web.load_config", return_value=object()) as loader, \
+             patch("palworld_caretaker.web.load_config", return_value=config) as loader, \
              patch.object(WebDependencies, "create", return_value=object()), \
-             patch("palworld_caretaker.web.create_server", return_value=_Server()):
+             patch("palworld_caretaker.web.create_server", return_value=_Server()) as create:
             self.assertEqual(main([]), 0)
         loader.assert_called_once_with("/custom/config")
+        self.assertEqual(create.call_args.kwargs["host"], "127.0.0.1")
+
+    def test_main_uses_layered_configuration_bind_when_cli_is_omitted(self):
+        class _Server:
+            def serve_forever(self, **_kwargs): raise KeyboardInterrupt
+            def server_close(self): pass
+
+        config = type("Config", (), {"values": {"PALWORLD_WEB_BIND_IP": "192.168.50.10"}})()
+        with patch.dict(os.environ, {"PALWORLD_WEB_BIND_IP": "0.0.0.0"}, clear=False), \
+             patch("palworld_caretaker.web.load_config", return_value=config), \
+             patch.object(WebDependencies, "create", return_value=object()), \
+            patch("palworld_caretaker.web.create_server", return_value=_Server()) as create:
+            self.assertEqual(main([]), 0)
+        self.assertEqual(create.call_args.kwargs["host"], "192.168.50.10")
+
+    def test_main_cli_bind_explicitly_overrides_layered_configuration(self):
+        class _Server:
+            def serve_forever(self, **_kwargs): raise KeyboardInterrupt
+            def server_close(self): pass
+
+        config = type("Config", (), {"values": {"PALWORLD_WEB_BIND_IP": "192.168.50.10"}})()
+        with patch("palworld_caretaker.web.load_config", return_value=config), \
+             patch.object(WebDependencies, "create", return_value=object()), \
+             patch("palworld_caretaker.web.create_server", return_value=_Server()) as create:
+            self.assertEqual(main(["--bind", "0.0.0.0"]), 0)
+        self.assertEqual(create.call_args.kwargs["host"], "0.0.0.0")
 
 
 @unittest.skipUnless(os.name == "posix", "web lock integration uses POSIX ownership checks")

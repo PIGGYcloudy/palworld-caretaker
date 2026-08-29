@@ -1,6 +1,6 @@
 # Docker / Compose
 
-Palworld Caretaker v0.7.0 runs the dedicated server, caretaker Web UI, optional
+Palworld Caretaker v0.8.0 runs the dedicated server, caretaker Web UI, optional
 Discord bot, SteamCMD update, and graceful shutdown in one container. Docker
 is not a systemd deployment: the container supervisor owns its child
 processes and sends the Palworld REST `save` and `shutdown` commands on
@@ -32,13 +32,13 @@ processes and sends the Palworld REST `save` and `shutdown` commands on
    ```
 
    The initial SteamCMD install is large and can take several minutes.
-   Open `http://localhost:8765` or `http://<server-LAN-IP>:8765` and use the
-   Web UI credentials. The default `0.0.0.0` listener also supports a private
-   Hamachi, Tailscale, or ZeroTier address. By default the UI validates each
-   browser Origin (or supplied Referer) against its request Host, so direct
-   LAN IP, DNS, and private VPN access work without a fixed
-   `PALWORLD_WEB_PUBLIC_ORIGIN`. Set that variable to an exact origin (for
-   example `https://pal.example.net`) when using a reverse proxy.
+   Open `http://localhost:8765` and use the Web UI credentials. Docker keeps
+   the process bound to container `0.0.0.0`, but Compose publishes it only to
+   host loopback by default. For private LAN, Hamachi, Tailscale, or ZeroTier
+   access, set both `PALWORLD_WEB_PUBLISH_IP=0.0.0.0` (or one host LAN IP) and
+   an exact `PALWORLD_WEB_ALLOWED_ORIGINS`, for example
+   `http://192.168.1.20:8765`. A TLS reverse proxy instead uses exact
+   `PALWORLD_WEB_PUBLIC_ORIGIN=https://pal.example.net`.
 
 ## Persistent data and ports
 
@@ -50,18 +50,29 @@ processes and sends the Palworld REST `save` and `shutdown` commands on
 
 `8211/udp` is the game port. `25575/tcp` is Palworld REST and is bound to
 loopback by default (`PALWORLD_REST_BIND_IP` changes that only when explicitly
-needed). `8765/tcp` is the authenticated Web UI and is bound to `0.0.0.0` by
-default so a host administrator can use it from the LAN. It uses HTTP Basic
-authentication over plaintext HTTP: never expose it directly to the Internet.
-The dynamic Origin/Host check is for trusted LAN/VPN paths, not an Internet
-access-control boundary.
-For public remote access, keep
-`PALWORLD_WEB_BIND_IP=127.0.0.1` and terminate TLS in a trusted reverse proxy
-on the same host. Set `PALWORLD_WEB_PUBLIC_ORIGIN=https://pal.example.net` to
-the exact HTTPS origin served by that proxy. Only set `PALWORLD_WEB_BIND_IP`
-to a non-loopback address when an upstream network boundary provides TLS and
-access control. When the public-origin variable is unset, the proxy must
-preserve the public `Host` header for dynamic same-origin validation.
+needed). `PALWORLD_WEB_BIND_IP` is the **container internal** listener and is
+`0.0.0.0` in Docker's `caretaker.env`; that value lets Docker forward the host
+port into the container. v0.7 persisted volumes that omit it receive the same
+container-mode default on upgrade. In contrast,
+`PALWORLD_WEB_PUBLISH_IP` controls the **host-side Compose publication** and
+defaults to `127.0.0.1`. It is deliberately a separate variable.
+
+Before exposing `8765/tcp` beyond localhost, configure exact browser origins:
+
+```env
+PALWORLD_WEB_PUBLISH_IP=0.0.0.0
+PALWORLD_WEB_ALLOWED_ORIGINS=http://192.168.1.20:8765
+# TLS reverse proxy alternative:
+# PALWORLD_WEB_PUBLIC_ORIGIN=https://pal.example.net
+# PALWORLD_WEB_ALLOWED_HOSTS=pal.example.net
+```
+
+The Web UI strictly whitelists both `Host` and mutation `Origin`/`Referer`; it
+never trusts a browser-supplied `Origin == Host`, preventing DNS rebinding.
+`PALWORLD_WEB_ALLOWED_HOSTS` is only for a trusted proxy that sends a Host
+different from the public origin authority. It uses HTTP Basic authentication
+over plaintext HTTP: never expose it directly to the Internet. These browser
+checks do not replace TLS, a VPN, or firewall access control.
 
 The entrypoint runs as root only long enough to align those volume inode
 owners with `PUID`/`PGID`, then uses the non-root `steam` account. It only
@@ -84,9 +95,16 @@ or config trees. A crashed child is reaped into a restartable failed state.
 Configuration is parsed as data, never shell-sourced. Defaults are followed
 by `caretaker.env`, then `server.env`, optional `editable/*.env`, and finally
 `secrets.env`. A later layer wins. Docker environment variables deliberately
-control only the container runtime (`PUID`, `PGID`, update behavior, browser
-origin, and development placeholder opt-in); they do not silently overwrite
-server or secret settings. This keeps a mounted configuration reproducible.
+control only the container runtime (`PUID`, `PGID`, update behavior, explicit
+browser origin/host allowlists, and development placeholder opt-in); they do
+not silently overwrite server or secret settings. This keeps a mounted
+configuration reproducible. The three Web authority variables are the explicit
+exception: Compose passes them to the Web process so an operator can set a
+deployment-specific public address without editing the mounted file.
+
+`PALWORLD_WEB_PUBLISH_IP` is not a container-process environment variable. It
+is evaluated by Compose on the **host** when it builds the `ports` mapping, and
+both supplied Compose files default it to `127.0.0.1`.
 
 `STEAMCMD_UPDATE_ON_START=true` updates app 2394010 before launch. Set it to
 `false` to restart an already installed server without checking Steam.

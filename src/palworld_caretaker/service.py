@@ -70,6 +70,24 @@ class SystemdServiceController:
     def stop(self) -> None: self._action("stop")
 
 
+class UnsupportedServiceController:
+    """Explicitly decline lifecycle control on platforms without an adapter.
+
+    Keeping this separate from :class:`SystemdServiceController` makes the
+    platform boundary visible to callers: a Windows web process must never
+    accidentally turn a status or start request into a ``systemctl`` call.
+    """
+
+    def state(self) -> ServiceState:
+        return ServiceState.UNKNOWN
+
+    def start(self) -> None:
+        raise RuntimeError("service control is unavailable on this platform")
+
+    def stop(self) -> None:
+        raise RuntimeError("service control is unavailable on this platform")
+
+
 class ContainerServiceController:
     """Container adapter: lifecycle authority stays with the PID 1 supervisor."""
 

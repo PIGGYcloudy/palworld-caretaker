@@ -1,12 +1,12 @@
-# 從既有 `/srv/palworld` 升級至 v0.4.1
+# 從既有 `/srv/palworld` 升級至 v0.8.0
 
 升級器只更新 caretaker 管理程式、Python 環境、sudoers 與動態渲染的 systemd
 units；不下載遊戲、不改寫設定層、不刪除世界存檔，也不碰外部備份目的地。
 本指南假設既有部署的設定位於 `/srv/palworld/config`，包括舊式單一
 `palworld.env` 或新的分層設定檔。
 
-v0.4.1 將 REST、備份/還原、設定 schema、maintenance、audit log、跨行程鎖與
-loopback Web UI 的安全決策集中在 `src/palworld_caretaker/` Python 核心；systemd、
+v0.8.0 將 REST、備份/還原、設定 schema、maintenance、audit log、跨行程鎖與
+可設定 Web UI listener 的安全決策集中在 `src/palworld_caretaker/` Python 核心；systemd、
 Bash 與 Discord 只作為平台入口與 adapter。升級會保留既有設定與世界資料，並讓
 所有入口共用同一套 fail-closed 契約。
 
@@ -28,7 +28,7 @@ Bash 與 Discord 只作為平台入口與 adapter。升級會保留既有設定�
    ```
 
 3. 另行保存目前 release 原始檔或版本號。若升級後要完整回到舊管理程式，必須
-   重新執行舊 release 的升級器；v0.4.1 的自動 safety copy 保存設定、
+   重新執行舊 release 的升級器；v0.8.0 的自動 safety copy 保存設定、
    `PalWorldSettings.ini`、systemd units 與 sudoers，但不是舊程式碼封包。
 
 請先確認備份目的地已掛載且最新 snapshot 含有 `savegames/`、`config/` 與
@@ -36,7 +36,7 @@ Bash 與 Discord 只作為平台入口與 adapter。升級會保留既有設定�
 
 ## 驗證既有設定
 
-下載並解壓 v0.4.1 release，從解壓目錄執行只讀驗證：
+下載並解壓 v0.8.0 release，從解壓目錄執行只讀驗證：
 
 ```bash
 python3 scripts/palworld_manager.py \
@@ -46,10 +46,26 @@ python3 scripts/palworld_manager.py \
 ```
 
 舊式 `palworld.env` 仍受支援，升級不要求拆檔；若使用 root-level
-`caretaker.env`/`server.env`，v0.4.1 會將可編輯 schema 欄位遷移到
+`caretaker.env`/`server.env`，v0.8.0 會將可編輯 schema 欄位遷移到
 `config/editable/`。若要自行重整其他設定，應在另一個維護時段依
 [設定契約](CONFIGURATION.md) 操作，避免同時升級與重整設定。
 不要以 `.example` 覆蓋正式設定。
+
+### Docker Compose：v0.7 設定 volume 升級
+
+v0.7 建立的 Docker `config/` volume 沒有
+`PALWORLD_WEB_BIND_IP`。v0.8 會在 container mode 自動將這個**未宣告**的 internal
+listener 補為 `0.0.0.0`，因此既有 `8765` port mapping 在升級後仍可連線；不必為了這項
+相容性覆寫或重建 volume。若要明確寫入，請在 `config/caretaker.env` 設定：
+
+```env
+PALWORLD_WEB_BIND_IP=0.0.0.0
+```
+
+這與 host-side 發布位址不同：Compose 的 host-side 變數名稱是
+`PALWORLD_WEB_PUBLISH_IP`，預設為 `127.0.0.1`。要從 LAN/VPN 存取，設定它為
+`0.0.0.0`（或特定 host LAN IP），並同時設定精確的
+`PALWORLD_WEB_ALLOWED_ORIGINS`；完整說明見 [Docker / Compose](DOCKER.md)。
 
 ## 執行升級
 
@@ -61,7 +77,7 @@ sudo bash ./upgrade-palworld-manager.sh \
 升級器會先在
 `/srv/palworld/backups-local/manager-upgrade-YYYYMMDD-HHMMSS/` 建立 mode
 `0700` safety copy，之後才替換管理工具與 units。若遊戲原本運行，套用新的
-unit 與 REST 設定後會重新啟動；原本關閉則保持關閉。Local Web UI 會啟用並只
+unit 與 REST 設定後會重新啟動；原本關閉則保持關閉。Local Web UI 會啟用並預設
 綁定 `127.0.0.1:8765`。Python 核心會先完整發布到
 `/srv/palworld/packages/release-*`，再以原子 symlink 切換
 `/srv/palworld/packages/current`；release 由 `root:root` 擁有，目錄/檔案權限
@@ -115,14 +131,30 @@ sudo systemctl restart palworld-web-ui.service
 
 備份、啟動、安全關閉與重啟按鈕都會受全域 operation `flock` 保護，並在實際
 變更前再次確認 maintenance service 狀態；save 或狀態檢查失敗時會拒絕操作。
-Web UI 固定只監聽 `127.0.0.1`，不可用 reverse proxy、公開防火牆或 DNS 對外
-暴露。遠端管理請使用 SSH tunnel 後仍開啟同一個 URL 並輸入 Basic Auth：
+Web UI 預設監聽 `127.0.0.1`。遠端管理可使用 SSH tunnel 後仍開啟同一個 URL 並
+輸入 Basic Auth：
 
 ```bash
 ssh -N -L 8765:127.0.0.1:8765 user@palworld-host
 ```
 
-升級後可在「世界設定」區塊編輯型別化的遊戲與 caretaker 欄位。Web UI 會先顯示
+若 LAN/VPN 已由可信上游提供 TLS 與存取控制，可在 root-level `caretaker.env` 將
+`PALWORLD_WEB_BIND_IP` 改為 `0.0.0.0` 或指定的 IPv4，並登錄精確來源後執行
+`sudo systemctl restart palworld-web-ui.service`：
+
+```env
+PALWORLD_WEB_BIND_IP=0.0.0.0
+PALWORLD_WEB_ALLOWED_ORIGINS=http://192.168.1.20:8765
+# TLS reverse proxy: PALWORLD_WEB_PUBLIC_ORIGIN=https://pal.example.net
+```
+
+舊部署放在 `server.env` 的 bind 值仍相容讀取，但新範本只由 `caretaker.env` 宣告。
+非 loopback listener 的 `Host` 與 mutation `Origin`／`Referer` 都必須命中明確
+白名單，不能以動態 `Origin == Host` 比對，因而防範 DNS rebinding；它們仍不能取代
+網路邊界，請勿直接公開 plaintext HTTP。
+
+升級後可在「世界設定」區塊編輯型別化的遊戲與 caretaker 欄位；每個欄位都有「?」
+說明及可立即填入系統預設值的「重置」按鈕。Web UI 會先顯示
 差異，並在 `config/editable/` 建立設定 backup 後以 atomic write 套用；
 `secrets.env` 不會出現在編輯器中。若伺服器正在運行，儲存後必須安全重啟才會
 套用遊戲設定。
@@ -151,7 +183,7 @@ ID，`*` 不會作為警示目標。
 
 Web UI 另外提供遊戲內公告、線上玩家踢出／封鎖，以及 SaveGames ZIP 匯出。匯出會
 先要求 REST API 存檔，受 `PALWORLD_SAVEGAMES_EXPORT_MAX_BYTES`（預設 8 GiB）、
-symlink／regular-file 與可用空間檢查保護，下載後不保留暫存 archive；Web UI 仍只
+symlink／regular-file 與可用空間檢查保護，下載後不保留暫存 archive；Web UI 預設
 監聽 `127.0.0.1:8765`，並要求 Basic Auth 與 CSRF token。
 
 升級後的 backup、restore、update、Web UI、Discord 與 idle watcher 會共用

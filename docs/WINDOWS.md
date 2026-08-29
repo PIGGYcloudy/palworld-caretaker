@@ -1,6 +1,6 @@
 # Windows 原生部署與維運
 
-v0.7.0 提供不依賴 systemd 的 Windows 原生 PowerShell 維運入口。下載並解壓
+v0.8.0 提供不依賴 systemd 的 Windows 原生 PowerShell 維運入口。下載並解壓
 release archive 後，可從專案根目錄或已部署的 `scripts/windows/` 目錄執行；建議使用
 PowerShell 7（`pwsh`）。這套入口與 Python 核心共用設定格式、備份命名與操作鎖，
 但不會替 Windows 主機自動註冊 PalServer service。
@@ -18,11 +18,42 @@ PALWORLD_BACKUP_DIR=D:\PalworldBackups
 PALWORLD_BACKUP_MOUNT=
 PALWORLD_BACKUP_REQUIRE_MOUNT=false
 PALWORLD_MANAGER_STATE_DIR=C:\ProgramData\Palworld\state
+PALWORLD_WEB_BIND_IP=127.0.0.1
+# Only needed for non-loopback LAN/VPN access:
+# PALWORLD_WEB_ALLOWED_ORIGINS=http://192.168.1.20:8765
 ```
 
 `PALWORLD_BACKUP_DIR` 必須是安裝根目錄與 server root 之外的獨立目錄。將
 `secrets.env` 與 `caretaker.env`、`server.env` 放在同一個設定目錄，並只授予需要
 執行維運的 Windows 帳號存取權。若路徑包含空白，可用單引號或雙引號包住整個值。
+
+`PALWORLD_WEB_BIND_IP` 預設為 `127.0.0.1`，並可改為 `0.0.0.0` 或指定的 IPv4
+以供受信任的 LAN/VPN 維運。新設定只應放在 `caretaker.env`；loader 仍相容讀取舊
+`server.env` 的值。任何 non-loopback listener 都必須同時設定精確
+`PALWORLD_WEB_ALLOWED_ORIGINS`，或 TLS proxy 的
+`PALWORLD_WEB_PUBLIC_ORIGIN=https://pal.example.net`；需要不同 proxy Host 才加入
+`PALWORLD_WEB_ALLOWED_HOSTS=pal.example.net`。Web UI 分別白名單檢查 Host 與
+Origin/Referer，不接受動態 `Origin == Host`，可防 DNS rebinding。請以 TLS、VPN 或
+防火牆保護任何非 loopback listener，勿將 plaintext Web UI 直接公開到 Internet。
+
+若要在 Windows 執行 Web UI，從含有已安裝套件的 Python 環境執行：
+
+```powershell
+python -m palworld_caretaker.web --config-dir $ConfigDir
+```
+
+未指定 `--bind` 時，程式使用 `load_config` 合併後的 `PALWORLD_WEB_BIND_IP`；只有
+`--bind` 會覆寫該值。
+
+### Windows Web UI 支援範圍
+
+Windows Web UI 可安全提供 REST 狀態、玩家公告／管理與設定編輯。
+但原生 Windows 部署目前沒有等效的 systemd privileged workflow，因此「啟動／停止／
+重啟」、「建立 backup」、「還原 snapshot」與「maintenance update」按鈕會明確回報不
+支援；程式不會嘗試執行 `sudo`、`/usr/bin/systemctl` 或
+`/usr/local/sbin/palworld-control`。請改用本文件的 PowerShell
+`palworld-service.ps1`、`backup-palworld.ps1` 與 `restore-palworld.ps1` 完成這些
+操作。
 
 Palworld 的 live tree 預期位於：
 

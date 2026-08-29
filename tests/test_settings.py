@@ -15,12 +15,14 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
+from palworld_caretaker import __version__
 from palworld_caretaker.config import CaretakerConfig, DEFAULTS, load_config
 from palworld_caretaker.errors import ConfigError
 from palworld_caretaker.operations import OperationLock
 from palworld_caretaker.service import ServerDiagnostics, ServerStatus, ServiceState
 from palworld_caretaker.settings import (
-    SETTING_SPECS, caretaker_options_from, normalize_value, world_settings_from,
+    SETTING_SPECS, canonical_web_host, canonical_web_origin, caretaker_options_from,
+    normalize_value, world_settings_from,
 )
 from palworld_caretaker.settings_store import SettingsPersistenceError, SettingsStore
 from palworld_caretaker.web import WebDependencies, create_server
@@ -112,6 +114,87 @@ class SettingsSchemaTests(unittest.TestCase):
             "AUTO_RESET_WORKER_PAL_WHEN_SERVER_RESTART",
             "PALWORLD_IDLE_SHUTDOWN_ENABLED",
         })
+
+    def test_every_editable_setting_has_a_description(self):
+        self.assertEqual(len(SETTING_SPECS), 40)
+        self.assertTrue(all(spec.description for spec in SETTING_SPECS.values()))
+
+    def test_web_bind_ip_requires_ipv4(self):
+        values = next(self.values())
+        values["PALWORLD_WEB_BIND_IP"] = "not-an-ip"
+        with self.assertRaisesRegex(ConfigError, "PALWORLD_WEB_BIND_IP"):
+            CaretakerConfig(values)
+        values["PALWORLD_WEB_BIND_IP"] = "0.0.0.0"
+        self.assertEqual(CaretakerConfig(values).values["PALWORLD_WEB_BIND_IP"], "0.0.0.0")
+
+    def test_web_authorities_reject_malformed_origins_and_hosts_at_config_load(self):
+        for key, value, message in (
+            ("PALWORLD_WEB_PUBLIC_ORIGIN", "https://bad.example/path", "HTTP\\(S\\) origins"),
+            ("PALWORLD_WEB_ALLOWED_ORIGINS", "https://bad.example/path", "HTTP\\(S\\) origins"),
+            ("PALWORLD_WEB_ALLOWED_HOSTS", "bad host", "host\[:port\]"),
+        ):
+            with self.subTest(key=key, value=value):
+                values = next(self.values())
+                values[key] = value
+                with self.assertRaisesRegex(ConfigError, message):
+                    CaretakerConfig(values)
+
+    def test_web_authorities_normalize_default_ports_like_browser_origins(self):
+        cases = (
+            ("https://pal.example.net:443", "https://pal.example.net", "pal.example.net:443", "pal.example.net"),
+            ("http://pal.example.net:80", "http://pal.example.net", "pal.example.net:80", "pal.example.net"),
+            ("https://pal.example.net:8443", "https://pal.example.net:8443", "pal.example.net:8443", "pal.example.net:8443"),
+            ("http://pal.example.net:8765", "http://pal.example.net:8765", "pal.example.net:8765", "pal.example.net:8765"),
+        )
+        for raw_origin, expected_origin, raw_host, expected_host in cases:
+            with self.subTest(origin=raw_origin):
+                origin = canonical_web_origin(raw_origin)
+                self.assertEqual(origin, expected_origin)
+                self.assertEqual(canonical_web_host(raw_host), expected_host)
+                self.assertEqual(
+                    canonical_web_host(origin.split("://", 1)[1]), expected_host,
+                )
+
+    def test_runtime_version_matches_the_release(self):
+        self.assertEqual(__version__, "0.8.0")
+
+    def test_server_env_can_override_caretaker_web_bind_ip(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "caretaker.env").write_text(
+                f"PALWORLD_INSTALL_ROOT={root}/install\nPALWORLD_BACKUP_DIR={root}/backup\n"
+                f"PALWORLD_MANAGER_STATE_DIR={root}/state\nPALWORLD_BACKUP_MOUNT=\n"
+                "PALWORLD_BACKUP_REQUIRE_MOUNT=false\nPALWORLD_WEB_BIND_IP=127.0.0.1\n",
+                encoding="utf-8",
+            )
+            (root / "server.env").write_text("PALWORLD_WEB_BIND_IP=0.0.0.0\n", encoding="utf-8")
+            self.assertEqual(load_config(root).values["PALWORLD_WEB_BIND_IP"], "0.0.0.0")
+
+    def test_secrets_env_overrides_earlier_web_bind_layers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "caretaker.env").write_text(
+                f"PALWORLD_INSTALL_ROOT={root}/install\nPALWORLD_BACKUP_DIR={root}/backup\n"
+                f"PALWORLD_MANAGER_STATE_DIR={root}/state\nPALWORLD_BACKUP_MOUNT=\n"
+                "PALWORLD_BACKUP_REQUIRE_MOUNT=false\nPALWORLD_WEB_BIND_IP=127.0.0.1\n",
+                encoding="utf-8",
+            )
+            (root / "server.env").write_text("PALWORLD_WEB_BIND_IP=0.0.0.0\n", encoding="utf-8")
+            (root / "secrets.env").write_text(
+                "PALWORLD_WEB_BIND_IP=192.168.50.10\n", encoding="utf-8",
+            )
+            self.assertEqual(load_config(root).values["PALWORLD_WEB_BIND_IP"], "192.168.50.10")
+
+    def test_web_listener_template_has_one_authoritative_declaration(self):
+        root = Path(__file__).parents[1]
+        caretaker = (root / "config/caretaker.env.example").read_text(encoding="utf-8")
+        server = (root / "config/server.env.example").read_text(encoding="utf-8")
+        docker_caretaker = (root / "docker/default-config/caretaker.env").read_text(encoding="utf-8")
+        docker_server = (root / "docker/default-config/server.env").read_text(encoding="utf-8")
+        self.assertEqual(caretaker.count("PALWORLD_WEB_BIND_IP="), 1)
+        self.assertNotIn("PALWORLD_WEB_BIND_IP=", server)
+        self.assertEqual(docker_caretaker.count("PALWORLD_WEB_BIND_IP="), 1)
+        self.assertNotIn("PALWORLD_WEB_BIND_IP=", docker_server)
 
     def test_string_settings_reject_trailing_backslashes(self):
         for spec in SETTING_SPECS.values():
@@ -253,9 +336,17 @@ class SettingsWebTests(unittest.TestCase):
         self.assertIn("General", [category["name"] for category in settings["categories"]])
         self.assertTrue({"Survival & Penalties", "Stamina & Health", "Building & Decay"}.issubset(
             {category["name"] for category in settings["categories"]}))
-        fields = {field["key"]: field for category in settings["categories"] for field in category["fields"]}
+        listed_fields = [field for category in settings["categories"] for field in category["fields"]]
+        fields = {field["key"]: field for field in listed_fields}
+        self.assertEqual(len(listed_fields), 40)
+        self.assertEqual(len(fields), 40)
+        self.assertEqual(set(fields), {key for key, spec in SETTING_SPECS.items() if not spec.secret})
+        self.assertTrue(all(field["description"] for field in listed_fields))
+        self.assertTrue(all(field["default"] != "" for field in listed_fields))
         self.assertEqual(fields["AUTO_RESET_WORKER_PAL_WHEN_SERVER_RESTART"]["kind"], "boolean")
         self.assertEqual(fields["PALWORLD_IDLE_SHUTDOWN_ENABLED"]["kind"], "boolean")
+        self.assertEqual(fields["MAX_PLAYERS"]["default"], "10")
+        self.assertTrue(fields["MAX_PLAYERS"]["description"])
 
         status, preview = self.request("/api/settings/preview", method="POST", payload={"values": {"MAX_PLAYERS": "12"}})
         self.assertEqual(status, 200); self.assertEqual(preview["changes"][0]["key"], "MAX_PLAYERS")

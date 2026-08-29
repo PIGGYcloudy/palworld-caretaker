@@ -1,5 +1,5 @@
 [Unit]
-Description=Palworld Caretaker local web UI (loopback only)
+Description=Palworld Caretaker web UI
 Wants=network-online.target
 After=network-online.target
 

@@ -6,9 +6,11 @@ provides the typed boundary used by the web UI and other frontends.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+import ipaddress
 import re
 from typing import Mapping
+from urllib.parse import urlsplit
 
 from .errors import ConfigError
 
@@ -25,6 +27,7 @@ class SettingSpec:
     maximum: float | None = None
     choices: tuple[str, ...] = ()
     secret: bool = False
+    description: str = ""
 
 
 @dataclass(frozen=True)
@@ -90,6 +93,153 @@ class CaretakerOptions:
     backup_time: str
 
 
+DEFAULT_WEB_BIND_IP = "127.0.0.1"
+_DNS_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z", re.ASCII)
+
+
+class WebAuthorityError(ValueError):
+    """A protected Web UI origin or Host authority is malformed."""
+
+
+def _valid_web_authority_hostname(hostname: str) -> bool:
+    """Accept only an IP literal or an ASCII DNS hostname in an authority."""
+    try:
+        ipaddress.ip_address(hostname)
+        return True
+    except ValueError:
+        pass
+    return (
+        len(hostname) <= 253
+        and bool(hostname)
+        and all(_DNS_LABEL.fullmatch(label) for label in hostname.split("."))
+    )
+
+
+def canonical_web_origin(value: str, *, require_origin_only: bool = True) -> str | None:
+    """Return a normalized HTTP(S) origin, rejecting ambiguous URL forms."""
+    try:
+        parsed = urlsplit(value)
+        # Accessing ``port`` validates malformed port values such as ``:abc``.
+        port = parsed.port
+    except ValueError:
+        return None
+    if (
+        parsed.scheme.lower() not in {"http", "https"}
+        or not parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or (require_origin_only and parsed.path)
+        or port == 0
+    ):
+        return None
+    hostname = parsed.hostname
+    if hostname is None or not _valid_web_authority_hostname(hostname):
+        return None
+    # Rebuild from parsed components so case changes cannot bypass comparison.
+    rendered_host = f"[{hostname.lower()}]" if ":" in hostname else hostname.lower()
+    scheme = parsed.scheme.lower()
+    # Browsers serialize an origin without its scheme's default port.  Treat
+    # an explicitly supplied default port as the same origin so a configured
+    # proxy origin and the browser's Origin header compare identically.
+    rendered_port = "" if port in ({"http": 80, "https": 443}[scheme], None) else f":{port}"
+    return f"{scheme}://{rendered_host}{rendered_port}"
+
+
+def canonical_web_host(value: str) -> str | None:
+    """Return a normalized Host authority, rejecting every other URL part."""
+    if not value or value != value.strip() or any(char.isspace() for char in value):
+        return None
+    try:
+        parsed = urlsplit(f"http://{value}")
+        port = parsed.port
+    except ValueError:
+        return None
+    if (
+        not parsed.netloc
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.hostname is None
+        or port == 0
+    ):
+        return None
+    hostname = parsed.hostname.lower()
+    if not _valid_web_authority_hostname(hostname):
+        return None
+    rendered_host = f"[{hostname}]" if ":" in hostname else hostname
+    # Host headers do not identify their scheme.  Both 80 and 443 are
+    # browser-default authority spellings, so canonicalize either explicit
+    # spelling to the portless form.  This keeps Host comparison aligned with
+    # canonical_web_origin(), whose default ports are likewise omitted.
+    rendered_port = "" if port in {None, 80, 443} else f":{port}"
+    return f"{rendered_host}{rendered_port}"
+
+
+def _split_web_authorities(value: object, name: str) -> tuple[str, ...]:
+    """Split one protected CSV authority setting without allowing empty items."""
+    if not isinstance(value, str):
+        raise WebAuthorityError(f"{name} must be a string")
+    if not value.strip():
+        return ()
+    items = tuple(item.strip() for item in value.split(","))
+    if any(not item for item in items):
+        raise WebAuthorityError(f"{name} must not contain empty entries")
+    return items
+
+
+def normalize_web_authorities(values: Mapping[str, object]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Validate and canonicalize protected Web UI origin and Host settings.
+
+    The result contains explicit trusted origins and explicit trusted hosts.
+    Listener-derived loopback authorities remain a runtime concern for ``web``.
+    """
+    public_origin = values.get("PALWORLD_WEB_PUBLIC_ORIGIN", "")
+    if not isinstance(public_origin, str):
+        raise WebAuthorityError("PALWORLD_WEB_PUBLIC_ORIGIN must be a string")
+    origin_values = (public_origin.strip(), *_split_web_authorities(
+        values.get("PALWORLD_WEB_ALLOWED_ORIGINS", ""), "PALWORLD_WEB_ALLOWED_ORIGINS",
+    ))
+    origins: list[str] = []
+    for value in origin_values:
+        if not value:
+            continue
+        origin = canonical_web_origin(value)
+        if origin is None:
+            raise WebAuthorityError(
+                "PALWORLD_WEB_PUBLIC_ORIGIN and PALWORLD_WEB_ALLOWED_ORIGINS "
+                "must contain exact HTTP(S) origins without paths"
+            )
+        origins.append(origin)
+    hosts: list[str] = []
+    for value in _split_web_authorities(
+        values.get("PALWORLD_WEB_ALLOWED_HOSTS", ""), "PALWORLD_WEB_ALLOWED_HOSTS",
+    ):
+        host = canonical_web_host(value)
+        if host is None:
+            raise WebAuthorityError(
+                "PALWORLD_WEB_ALLOWED_HOSTS must contain exact host[:port] authorities"
+            )
+        hosts.append(host)
+    return tuple(origins), tuple(hosts)
+
+
+def normalize_web_bind_ip(value: object) -> str:
+    """Validate the IPv4 listener address accepted by the Web UI."""
+    if not isinstance(value, str):
+        raise ConfigError("PALWORLD_WEB_BIND_IP must be an IPv4 address")
+    try:
+        address = ipaddress.ip_address(value.strip())
+    except ValueError as exc:
+        raise ConfigError("PALWORLD_WEB_BIND_IP must be a valid IPv4 address") from exc
+    if address.version != 4:
+        raise ConfigError("PALWORLD_WEB_BIND_IP must be an IPv4 address")
+    return str(address)
+
+
 _SPECS = (
     SettingSpec("SERVER_NAME", "Server name", "General", "server", "string", "Palworld Dedicated Server"),
     SettingSpec("SERVER_DESCRIPTION", "Server description", "General", "server", "string", "Private Palworld Dedicated Server"),
@@ -132,6 +282,52 @@ _SPECS = (
     SettingSpec("BACKUP_RETENTION_COUNT", "Backup retention count", "Caretaker", "caretaker", "integer", "14", 1, 1000),
     SettingSpec("BACKUP_TIME", "Daily backup time", "Caretaker", "caretaker", "string", "04:30"),
 )
+
+_DESCRIPTIONS = {
+    "SERVER_NAME": "The public server name shown to players in the game browser.",
+    "SERVER_DESCRIPTION": "A short server description shown with the server name.",
+    "MAX_PLAYERS": "Maximum number of players that may connect at the same time.",
+    "DAY_TIME_SPEED_RATE": "Multiplier for the speed of the in-game day; 1.0 is vanilla.",
+    "NIGHT_TIME_SPEED_RATE": "Multiplier for the speed of the in-game night; 1.0 is vanilla.",
+    "EXP_RATE": "Multiplier for experience gained by players and Pals.",
+    "PAL_CAPTURE_RATE": "Multiplier for Pal capture probability; 1.0 is vanilla.",
+    "COLLECTION_DROP_RATE": "Multiplier for resources collected from the world.",
+    "ENEMY_DROP_ITEM_RATE": "Multiplier for items dropped by defeated enemies.",
+    "PAL_DAMAGE_RATE_ATTACK": "Multiplier for damage dealt by Pals.",
+    "PAL_DAMAGE_RATE_DEFENSE": "Multiplier for damage received by Pals; lower values reduce damage.",
+    "PAL_STAMINA_DECREACE_RATE": "Multiplier for how quickly Pal stamina is consumed.",
+    "PAL_AUTO_HP_REGENE_RATE": "Multiplier for Pal health regeneration while awake.",
+    "PAL_AUTO_HP_REGENE_RATE_IN_SLEEP": "Multiplier for Pal health regeneration while sleeping.",
+    "PAL_STOMACH_DECREACE_RATE": "Multiplier for how quickly Pal hunger decreases.",
+    "PLAYER_DAMAGE_RATE_ATTACK": "Multiplier for damage dealt by players.",
+    "PLAYER_DAMAGE_RATE_DEFENSE": "Multiplier for damage received by players; lower values reduce damage.",
+    "PLAYER_STAMINA_DECREACE_RATE": "Multiplier for how quickly player stamina is consumed.",
+    "PLAYER_AUTO_HP_REGENE_RATE": "Multiplier for player health regeneration while awake.",
+    "PLAYER_AUTO_HP_REGENE_RATE_IN_SLEEP": "Multiplier for player health regeneration while sleeping.",
+    "PLAYER_STOMACH_DECREACE_RATE": "Multiplier for how quickly player hunger decreases.",
+    "GUILD_PLAYER_MAX_NUM": "Maximum number of players that can join one guild.",
+    "BASE_CAMP_MAX_NUM_IN_GUILD": "Maximum number of base camps a guild can build.",
+    "BASE_CAMP_WORKER_MAX_NUM": "Maximum number of working Pals assigned to each base camp.",
+    "AUTO_RESET_WORKER_PAL_WHEN_SERVER_RESTART": "Whether working Pals are reset when the server restarts.",
+    "PAL_SPAWN_NUM_RATE": "Multiplier for the number of Pals that spawn in the world.",
+    "DROP_ITEM_MAX_NUM": "Maximum number of dropped items allowed in the world.",
+    "DROP_ITEM_ALIVE_MAX_HOURS": "How many hours dropped items remain before they expire.",
+    "PAL_EGG_DEFAULT_HATCHING_TIME": "Default time in hours required to hatch a Pal egg.",
+    "WORK_SPEED_RATE": "Multiplier for Pal work speed at bases.",
+    "ITEM_WEIGHT_RATE": "Multiplier for item weight; lower values let players carry more.",
+    "EQUIPMENT_DURABILITY_DAMAGE_RATE": "Multiplier for equipment durability loss; lower values preserve durability.",
+    "DEATH_PENALTY": "Items and equipment lost when a player dies.",
+    "BUILD_OBJECT_HP_RATE": "Multiplier for the health of built structures.",
+    "BUILD_OBJECT_DAMAGE_RATE": "Multiplier for damage received by built structures.",
+    "BUILD_OBJECT_DETERIORATION_DAMAGE_RATE": "Multiplier for passive structure deterioration; 0 disables it.",
+    "PALWORLD_IDLE_SHUTDOWN_ENABLED": "Automatically stop the server after it has been empty for the configured period.",
+    "PALWORLD_IDLE_TIMEOUT_MINUTES": "Minutes with no players before the idle shutdown watcher stops the server.",
+    "BACKUP_RETENTION_COUNT": "Number of completed backups to retain; older backups are pruned safely.",
+    "BACKUP_TIME": "Daily local time at which the scheduled backup runs, in 24-hour HH:MM format.",
+}
+if set(_DESCRIPTIONS) != {spec.key for spec in _SPECS}:  # pragma: no cover - schema authoring guard
+    raise AssertionError("every editable setting requires a description")
+_SPECS = tuple(replace(spec, description=_DESCRIPTIONS[spec.key]) for spec in _SPECS)
 
 SETTING_SPECS: dict[str, SettingSpec] = {spec.key: spec for spec in _SPECS}
 EDITABLE_DEFAULTS: dict[str, str] = {spec.key: spec.default for spec in _SPECS}

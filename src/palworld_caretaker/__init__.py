@@ -17,7 +17,7 @@ from .settings import CaretakerOptions, SettingSpec, WorldSettings
 from .steamcmd import SteamCMD, SteamCMDError
 from .web import WebDependencies, WebServer, create_server
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"
 
 __all__ = [
     "__version__", "ActionResult", "ApiError", "AuditLog", "BackupEngine", "BackupManager", "BackupResult", "CaretakerConfig", "CaretakerOptions", "ConfigError",

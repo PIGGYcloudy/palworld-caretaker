@@ -105,8 +105,26 @@ class DockerDeploymentTests(unittest.TestCase):
             compose = (self.root / name).read_text(encoding="utf-8")
             self.assertIn("no-new-privileges:true", compose)
             self.assertIn("8765:8765", compose)
+            self.assertIn("PALWORLD_WEB_PUBLISH_IP", compose)
+            self.assertIn("curl --fail --silent http://127.0.0.1:8765/healthz", compose)
+        compose = (self.root / "docker-compose.yml").read_text(encoding="utf-8")
+        self.assertIn("PALWORLD_WEB_PUBLISH_IP", compose)
+        self.assertNotIn("${PALWORLD_WEB_BIND_IP:-", compose)
         dockerfile = (self.root / "Dockerfile").read_text(encoding="utf-8")
         self.assertIn("-perm /6000 -exec chmod a-s", dockerfile)
+
+    def test_compose_example_passes_web_authority_overrides_like_primary_compose(self):
+        primary = (self.root / "docker-compose.yml").read_text(encoding="utf-8")
+        example = (self.root / "docker-compose.example.yml").read_text(encoding="utf-8")
+        for name in (
+            "PALWORLD_WEB_PUBLIC_ORIGIN",
+            "PALWORLD_WEB_ALLOWED_ORIGINS",
+            "PALWORLD_WEB_ALLOWED_HOSTS",
+        ):
+            expected = f"{name}: ${{{name}:-}}"
+            with self.subTest(name=name):
+                self.assertIn(expected, primary)
+                self.assertIn(expected, example)
 
     def test_docker_config_mount_uses_documented_layer_precedence(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -123,6 +141,25 @@ class DockerDeploymentTests(unittest.TestCase):
             with (config / "secrets.env").open("a", encoding="utf-8") as handle:
                 handle.write("\nSERVER_NAME='secret layer'\n")
             self.assertEqual(load_config(config).get("SERVER_NAME"), "secret layer")
+
+    def test_v07_persisted_docker_config_without_web_bind_uses_container_default(self):
+        """Existing v0.7 config volumes lack PALWORLD_WEB_BIND_IP."""
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory)
+            defaults = self.root / "docker/default-config"
+            for name in ("caretaker.env", "server.env", "secrets.env"):
+                content = (defaults / name).read_text(encoding="utf-8")
+                content = "\n".join(
+                    line for line in content.splitlines()
+                    if not line.startswith("PALWORLD_WEB_BIND_IP=")
+                ) + "\n"
+                (config / name).write_text(content, encoding="utf-8")
+            with mock.patch.dict(os.environ, {"PALWORLD_CONTAINER_MODE": "1"}):
+                self.assertEqual(load_config(config).get("PALWORLD_WEB_BIND_IP"), "0.0.0.0")
+
+            # The container-only fallback must not loosen native deployments.
+            with mock.patch.dict(os.environ, {}, clear=True):
+                self.assertEqual(load_config(config).get("PALWORLD_WEB_BIND_IP"), "127.0.0.1")
 
     def test_supervisor_shutdown_saves_before_shutdown_and_preserves_game_tree(self):
         tree = ast.parse(self.supervisor.read_text(encoding="utf-8"))

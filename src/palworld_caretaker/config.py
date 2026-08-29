@@ -9,7 +9,14 @@ from typing import Callable, Mapping
 
 from .errors import ConfigError
 from .paths import has_parent_reference, is_filesystem_root, native_path, physical_path
-from .settings import EDITABLE_DEFAULTS, SETTING_SPECS, validate_settings_values
+from .settings import (
+    DEFAULT_WEB_BIND_IP,
+    EDITABLE_DEFAULTS,
+    SETTING_SPECS,
+    normalize_web_bind_ip,
+    normalize_web_authorities,
+    validate_settings_values,
+)
 
 
 def _platform_defaults() -> dict[str, str]:
@@ -56,6 +63,11 @@ DEFAULTS: dict[str, str] = {
     "BACKUP_RETENTION_COUNT": "14", "BACKUP_TIME": "04:30",
     "SERVER_PASSWORD": "", "ADMIN_PASSWORD": "", "DISCORD_BOT_TOKEN": "",
     "PALWORLD_WEB_UI_USERNAME": "palworld-manager", "PALWORLD_WEB_UI_PASSWORD": "",
+    "PALWORLD_WEB_BIND_IP": DEFAULT_WEB_BIND_IP,
+    # Web request authorities are intentionally part of the protected
+    # deployment configuration, never editable through the browser.
+    "PALWORLD_WEB_PUBLIC_ORIGIN": "", "PALWORLD_WEB_ALLOWED_ORIGINS": "",
+    "PALWORLD_WEB_ALLOWED_HOSTS": "",
     # The archive is assembled in the manager state directory.  This cap is
     # deliberately independent from backup retention so a browser request
     # cannot consume arbitrary local disk.
@@ -161,10 +173,17 @@ def load_config(directory: str | Path, *, schema: ConfigSchema = DEFAULT_SCHEMA,
     so that account can never rename or remove ``secrets.env``.
     """
     root, values, count = native_path(directory), dict(schema.defaults), 0
+    # Docker v0.7 volumes predate this setting.  Do not let their absence
+    # inherit the host-safe loopback default: a listener inside a container
+    # must accept traffic from Docker's port-forwarding interface.  An
+    # explicitly declared value in any configuration layer always wins.
+    web_bind_ip_declared = False
     for name in (LEGACY_CONFIG_FILE, *EDITABLE_CONFIG_FILES):
         source = root / name
         if source.is_file():
-            values.update(load_env(source))
+            layer = load_env(source)
+            values.update(layer)
+            web_bind_ip_declared = web_bind_ip_declared or "PALWORLD_WEB_BIND_IP" in layer
             count += 1
     editable = root / EDITABLE_CONFIG_DIRECTORY
     for name in EDITABLE_CONFIG_FILES:
@@ -178,13 +197,18 @@ def load_config(directory: str | Path, *, schema: ConfigSchema = DEFAULT_SCHEMA,
                     f"{', '.join(forbidden)}"
                 )
             values.update(editable_values)
+            web_bind_ip_declared = web_bind_ip_declared or "PALWORLD_WEB_BIND_IP" in editable_values
             count += 1
     source = root / "secrets.env"
     if source.is_file():
-        values.update(load_env(source))
+        layer = load_env(source)
+        values.update(layer)
+        web_bind_ip_declared = web_bind_ip_declared or "PALWORLD_WEB_BIND_IP" in layer
         count += 1
     if require_file and not count:
         raise ConfigError(f"{root}: no deployment configuration file found")
+    if os.environ.get("PALWORLD_CONTAINER_MODE") == "1" and not web_bind_ip_declared:
+        values["PALWORLD_WEB_BIND_IP"] = "0.0.0.0"
     schema.validate(values)
     return CaretakerConfig(values, schema, root)
 
@@ -256,6 +280,11 @@ def _validate_core(values: Mapping[str, str]) -> None:
         raise ConfigError("PUBLIC_PORT and PALWORLD_REST_API_PORT must be different")
     if values.get("PALWORLD_REST_API_HOST") != "127.0.0.1":
         raise ConfigError("PALWORLD_REST_API_HOST must be 127.0.0.1")
+    normalize_web_bind_ip(values.get("PALWORLD_WEB_BIND_IP", ""))
+    try:
+        normalize_web_authorities(values)
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
     if not re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", values.get("BACKUP_TIME", "")):
         raise ConfigError("BACKUP_TIME must use 24-hour HH:MM format")
     for key in ("PALWORLD_SERVICE_USER", "PALWORLD_MANAGER_USER"):

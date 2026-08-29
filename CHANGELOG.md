@@ -2,6 +2,28 @@
 
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.8.0] - 2026-08-30
+
+### Web UI remote binding and settings ergonomics
+
+- Added `PALWORLD_WEB_BIND_IP`, validated as an IPv4 address and defaulting to
+  `127.0.0.1`. Native systemd, Docker, and direct Python entry points now use
+  the configured/environment listener unless `--bind` explicitly overrides it.
+- Non-loopback listeners retain HTTP Basic Auth, CSRF, and browser security
+  headers, while `Host` and `Origin`/`Referer` now each use strict explicit
+  allowlists. This removes the unsafe dynamic `Origin == Host` path and blocks
+  DNS rebinding. `PALWORLD_WEB_PUBLIC_ORIGIN`, `PALWORLD_WEB_ALLOWED_ORIGINS`,
+  and (for trusted proxy upstream hosts) `PALWORLD_WEB_ALLOWED_HOSTS` provide
+  the configuration/systemd/Docker environment pipeline.
+- Docker now distinguishes `PALWORLD_WEB_PUBLISH_IP` (host Compose port
+  publication, default loopback) from the container-internal
+  `PALWORLD_WEB_BIND_IP=0.0.0.0`, preserving the `127.0.0.1:8765` healthcheck.
+- `PALWORLD_WEB_BIND_IP` appears only in the authoritative `caretaker.env`
+  templates; legacy root-level `server.env` values remain load-compatible.
+- All 40 Web UI settings now expose schema-backed `?` help tooltips and an
+  immediate Reset control that restores the field's system default before the
+  usual preview-and-save confirmation.
+
 ## [0.7.0] - 2026-08-29
 
 ### Windows 原生支援與維運工具
@@ -390,6 +412,7 @@ Ubuntu 24.04 systemd 部署工具鏈。
 
 [0.5.0]: https://github.com/PIGGYcloudy/palworld-caretaker/releases/tag/v0.5.0
 [0.7.0]: https://github.com/PIGGYcloudy/palworld-caretaker/releases/tag/v0.7.0
+[0.8.0]: https://github.com/PIGGYcloudy/palworld-caretaker/releases/tag/v0.8.0
 [0.6.0]: https://github.com/PIGGYcloudy/palworld-caretaker/releases/tag/v0.6.0
 [0.4.1]: https://github.com/PIGGYcloudy/palworld-caretaker/releases/tag/v0.4.1
 [0.4.0]: https://github.com/PIGGYcloudy/palworld-caretaker/releases/tag/v0.4.0

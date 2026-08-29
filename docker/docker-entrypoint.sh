@@ -79,13 +79,15 @@ if [[ "$(id -u steam)" != "$PUID" || "$(id -g steam)" != "$PGID" ]]; then
 fi
 
 install -d -m 0755 "$SERVER_DIR" "$BACKUP_DIR" "$CONFIG_DIR" /run/palworld-caretaker
+# Mark the mode before validation too: persisted v0.7 Docker volumes did not
+# contain PALWORLD_WEB_BIND_IP, and their safe container default is 0.0.0.0.
+export PALWORLD_CONTAINER_MODE=1
 initialise_config
 repair_ownership
 validate_config
 
 export PALWORLD_CONFIG="$CONFIG_DIR"
 export PALWORLD_CONFIG_DIR="$CONFIG_DIR"
-export PALWORLD_CONTAINER_MODE=1
 export HOME="$SERVER_DIR"
 
 case "${1:-run}" in

@@ -6,6 +6,7 @@ import argparse
 import base64
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass
+import ipaddress
 import json
 import math
 import os
@@ -23,6 +24,28 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+
+# The installer invokes this staging copy before the release is deployed.  In
+# that layout the shared package sits in the sibling ``src`` directory; after
+# installation it is available through the scripts-directory package link.
+_STAGING_SOURCE = Path(__file__).resolve().parents[1] / "src"
+if _STAGING_SOURCE.is_dir() and str(_STAGING_SOURCE) not in sys.path:
+    sys.path.insert(0, str(_STAGING_SOURCE))
+try:
+    from palworld_caretaker.settings import normalize_web_authorities
+except ModuleNotFoundError as exc:
+    if exc.name != "palworld_caretaker":
+        raise
+
+    def normalize_web_authorities(values):
+        """Keep legacy package-less uninstalls fail-closed for new settings."""
+        if any(values.get(key, "").strip() for key in (
+            "PALWORLD_WEB_PUBLIC_ORIGIN", "PALWORLD_WEB_ALLOWED_ORIGINS",
+            "PALWORLD_WEB_ALLOWED_HOSTS",
+        )):
+            raise ValueError("Web authority validation requires palworld_caretaker.settings")
+        return (), ()
+
 try:
     import fcntl
 except ImportError:  # pragma: no cover - the deployed adapter is Linux-only
@@ -112,6 +135,10 @@ DEFAULT_CONFIG: dict[str, str] = {
     "DISCORD_PALWORLD_ALLOWED_CHANNEL_IDS": "",
     "PALWORLD_WEB_UI_USERNAME": "palworld-manager",
     "PALWORLD_WEB_UI_PASSWORD": "",
+    "PALWORLD_WEB_BIND_IP": "127.0.0.1",
+    "PALWORLD_WEB_PUBLIC_ORIGIN": "",
+    "PALWORLD_WEB_ALLOWED_ORIGINS": "",
+    "PALWORLD_WEB_ALLOWED_HOSTS": "",
     "PALWORLD_SAVEGAMES_EXPORT_MAX_BYTES": str(8 * 1024 ** 3),
     "BACKUP_RETENTION_COUNT": "14",
     "BACKUP_TIME": "04:30",
@@ -339,6 +366,16 @@ def validate_config(config: dict[str, str]) -> dict[str, Path | None]:
     rest_port = env_int(config, "PALWORLD_REST_API_PORT", 8212, 1, 65535)
     if public_port == rest_port:
         raise ConfigError("PUBLIC_PORT and PALWORLD_REST_API_PORT must be different")
+    try:
+        web_bind = ipaddress.ip_address(config["PALWORLD_WEB_BIND_IP"].strip())
+    except ValueError as exc:
+        raise ConfigError("PALWORLD_WEB_BIND_IP must be a valid IPv4 address") from exc
+    if web_bind.version != 4:
+        raise ConfigError("PALWORLD_WEB_BIND_IP must be an IPv4 address")
+    try:
+        normalize_web_authorities(config)
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
     env_int(config, "PALWORLD_API_TIMEOUT_SECONDS", 5, 1, 30)
     env_int(config, "PALWORLD_SAVEGAMES_EXPORT_MAX_BYTES", 8 * 1024 ** 3, 1, 64 * 1024 ** 3)
     env_int(config, "PALWORLD_IDLE_TIMEOUT_MINUTES", 10, 1, 1440)

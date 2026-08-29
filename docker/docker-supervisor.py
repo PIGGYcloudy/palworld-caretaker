@@ -82,7 +82,7 @@ class Supervisor:
     def start_frontends(self) -> None:
         web = subprocess.Popen([
             sys.executable, "-m", "palworld_caretaker.web", "--config-dir", str(CONFIG_DIR),
-            "--bind", "0.0.0.0", "--port", os.environ.get("PALWORLD_WEB_PORT", "8765"),
+            "--port", os.environ.get("PALWORLD_WEB_PORT", "8765"),
         ], cwd=APP_DIR)
         self.children.append(web)
         token = self.config.get("DISCORD_BOT_TOKEN", "")

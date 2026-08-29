@@ -3,7 +3,7 @@
 services:
   palworld-caretaker:
     build: .
-    image: palworld-caretaker:0.7.0
+    image: palworld-caretaker:0.8.0
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
@@ -11,9 +11,10 @@ services:
       PUID: 1000
       PGID: 1000
       STEAMCMD_UPDATE_ON_START: "true"
-      # Empty supports direct LAN IP/DNS access; set an exact public origin
-      # when a reverse proxy terminates TLS.
-      PALWORLD_WEB_PUBLIC_ORIGIN: ""
+      # Set exact browser origins before publishing beyond localhost.
+      PALWORLD_WEB_PUBLIC_ORIGIN: ${PALWORLD_WEB_PUBLIC_ORIGIN:-}
+      PALWORLD_WEB_ALLOWED_ORIGINS: ${PALWORLD_WEB_ALLOWED_ORIGINS:-}
+      PALWORLD_WEB_ALLOWED_HOSTS: ${PALWORLD_WEB_ALLOWED_HOSTS:-}
       PALWORLD_DOCKER_ALLOW_INSECURE_DEFAULTS: "false"
     volumes:
       - ./data/server:/srv/palworld
@@ -22,7 +23,7 @@ services:
     ports:
       - "8211:8211/udp"              # Palworld game traffic
       - "127.0.0.1:25575:25575/tcp"  # optional REST host exposure
-      - "0.0.0.0:8765:8765/tcp"      # Caretaker Web UI
+      - "${PALWORLD_WEB_PUBLISH_IP:-127.0.0.1}:8765:8765/tcp"  # host-side UI publication
     healthcheck:
       test: ["CMD-SHELL", "curl --fail --silent http://127.0.0.1:8765/healthz >/dev/null"]
       interval: 30s

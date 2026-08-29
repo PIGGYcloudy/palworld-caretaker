@@ -5,11 +5,12 @@
 遠端操作與受驗證的 Web 管理面板；不建議直接將管理介面暴露到 Internet。
 
 > [!IMPORTANT]
-> v0.7.0 支援 Ubuntu 24.04 LTS amd64 的原生 systemd 部署、Docker Compose
-> 一鍵容器化開服，以及 Windows 原生 PowerShell 維運腳本。Docker 模式以
-> `0.0.0.0:8765` 發布 Web 面板，並以動態
-> `Origin`／`Host` 同源檢查相容於區網、Hamachi、Tailscale 與 ZeroTier 位址；原生
-> systemd 模式仍維持 loopback-only Web UI。部署設定契約、
+> v0.8.0 支援 Ubuntu 24.04 LTS amd64 的原生 systemd 部署、Docker Compose
+> 一鍵容器化開服，以及 Windows 原生 PowerShell 維運腳本。Docker 模式維持 container
+> `0.0.0.0:8765` listener、預設只發布到 host loopback；若要 LAN/VPN 存取，需登錄
+> 精確的 Host/Origin 白名單。原生 systemd 模式預設維持 loopback Web UI，並可透過
+> 受驗證的 IPv4 bind 設定安全地
+> 部署於可信 LAN/VPN。部署設定契約、
 > 安裝器、備份/還原/更新腳本與 systemd unit 支援任意安全的絕對安裝與備份
 > 路徑；設定編輯、還原與維護操作均會先驗證並留下安全紀錄。正式存檔仍建議
 > 先在測試主機完成安裝、備份與還原演練。
@@ -30,9 +31,9 @@
 - 無玩家逾時後再次確認，再執行存檔與正常關服。
 - Discord `/pal` 指令、guild/channel/role permission matrix 與管理員確認；
   `/pal status` 支援分區 rich embeds，並可主動發送主機記憶體警示。
-- Local Web UI：原生 systemd 綁定 `127.0.0.1:8765`；Docker Compose 預設綁定
-  `0.0.0.0:8765`，提供遊戲內公告、玩家踢出／封鎖、SaveGames ZIP 匯出、狀態、
-  快照與安全操作面板。
+- Local Web UI：`PALWORLD_WEB_BIND_IP` 預設為 `127.0.0.1`；Docker 內部監聽
+  `0.0.0.0`、Compose 預設只發布到 host loopback，提供遊戲內公告、玩家踢出／封鎖、SaveGames ZIP 匯出、狀態、快照、
+  安全操作，以及 40 個設定欄位的說明與單欄預設值重置。
 - Docker 一鍵容器化開服：`Dockerfile`、`docker-compose.yml` 與 PID 1
   `docker/docker-supervisor.py` 管理遊戲、Web UI、可選 Discord Bot、更新、備份與
   優雅停服；完整流程見 [`docs/DOCKER.md`](docs/DOCKER.md)。
@@ -105,6 +106,7 @@ PALWORLD_START_READY_TIMEOUT_SECONDS=180
 PALWORLD_MEMORY_ALERT_PERCENT=85
 PALWORLD_MEMORY_ALERT_COOLDOWN_SECONDS=1800
 PALWORLD_WEB_UI_USERNAME=palworld-manager
+PALWORLD_WEB_BIND_IP=127.0.0.1
 PALWORLD_WEB_UI_PASSWORD=''
 DISCORD_BOT_TOKEN='...'
 DISCORD_PALWORLD_ALLOWED_GUILD_IDS=123
@@ -119,21 +121,25 @@ ID 清單可用逗號分隔。只有 `DISCORD_PALWORLD_ALLOWED_CHANNEL_IDS=*` �
 
 ## Local Web UI
 
-原生 systemd 安裝或升級後 `palworld-web-ui.service` 會常駐於 `127.0.0.1:8765`；在
-伺服器本機瀏覽器開啟 [`http://127.0.0.1:8765/`](http://127.0.0.1:8765/)。Docker
-Compose 則預設由 `0.0.0.0:8765` 接收連線，可用伺服器的區網 IP、Hamachi、Tailscale
-或 ZeroTier 私有位址開啟 `http://<private-IP>:8765/`。瀏覽器跳出的 HTTP Basic Auth
+原生 systemd 安裝或升級後 `palworld-web-ui.service` 預設常駐於
+`127.0.0.1:8765`；在伺服器本機瀏覽器開啟
+[`http://127.0.0.1:8765/`](http://127.0.0.1:8765/)。將受保護設定中的
+`PALWORLD_WEB_BIND_IP` 改為 `0.0.0.0` 或指定私有 IPv4、填入允許的 browser origin，
+並重啟服務，即可在已受 TLS、VPN 與防火牆保護的 LAN/VPN 使用。Docker 預設僅發布
+`127.0.0.1:8765`；LAN/VPN 需設定 `PALWORLD_WEB_PUBLISH_IP` 與允許的 origin，詳見
+[`docs/DOCKER.md`](docs/DOCKER.md)。瀏覽器跳出的 HTTP Basic Auth
 帳號是 `PALWORLD_WEB_UI_USERNAME`（預設 `palworld-manager`），密碼是
 `PALWORLD_WEB_UI_PASSWORD`；後者留空時相容地使用 `ADMIN_PASSWORD`。建議正式部署
 設定獨立的 `PALWORLD_WEB_UI_PASSWORD`，不要把密碼放進 URL、shell history 或聊天。
 通過 Basic Auth 後，頁面才會提供行程內 CSRF token。
 
-Docker 直連且未設定 `PALWORLD_WEB_PUBLIC_ORIGIN` 時，mutation request 的
-`Origin`（或提供時的 `Referer`）會以請求 `Host` 動態驗證；因此不同區網／VPN IP
-不需逐一預先登錄 origin。使用反向 proxy 終止 TLS 時，請將
-`PALWORLD_WEB_PUBLIC_ORIGIN` 設為完整且精確的公開 origin，例如
-`https://pal.example.net`，並由 proxy 保留相同的公開 `Host`。這不會取代 Basic Auth、
-CSRF token 或 TLS；不要直接把 plaintext `8765` 暴露在 Internet。
+對非 loopback 使用，必須明確設定完整且精確的
+`PALWORLD_WEB_ALLOWED_ORIGINS`（LAN/VPN）或
+`PALWORLD_WEB_PUBLIC_ORIGIN=https://pal.example.net`（TLS reverse proxy）。Host 與
+Origin/Referer 分別經過白名單驗證，不接受由瀏覽器控制的動態 `Origin == Host`，以防
+DNS rebinding。只有 proxy 的 upstream Host 不同時才加入
+`PALWORLD_WEB_ALLOWED_HOSTS`。這不會取代 Basic Auth、CSRF token 或 TLS；不要直接把
+plaintext `8765` 暴露在 Internet。
 
 面板顯示 service/REST/玩家與 REST 可提供的 CPU、記憶體摘要，以及安全驗證過的 snapshot 清單。遊戲內公告表單會直接廣播訊息；玩家清單提供確認後的踢出／封鎖按鈕與可選原因。SaveGames 匯出會先由 REST API 存檔，再建立目前 SaveGames 的 ZIP 下載；`PALWORLD_SAVEGAMES_EXPORT_MAX_BYTES` 預設限制為 8 GiB，symlink、非 regular file、容量或空間檢查失敗時會拒絕，暫存檔不會留在下載目錄。立即備份會先發送固定公告，再啟動既有的 systemd 備份服務；安全關閉與重啟必先由 REST 成功存檔。若從管理者電腦操作，可先建立 SSH tunnel，再仍以相同 URL 與 Basic Auth 登入：
 
@@ -141,7 +147,8 @@ CSRF token 或 TLS；不要直接把 plaintext `8765` 暴露在 Internet。
 ssh -N -L 8765:127.0.0.1:8765 user@palworld-host
 ```
 
-世界設定頁面提供型別與範圍驗證、套用前差異預覽，以及只寫入
+世界設定頁面提供型別與範圍驗證、每個欄位的 `?` 說明及立即重設為系統預設值的
+按鈕、套用前差異預覽，以及只寫入
 `config/editable/` 的原子更新；每次修改前會保存設定副本，遊戲運行中則標示需
 安全重啟。備份清單也可從 Web UI 觸發還原：流程會先建立外部 snapshot 與
 `backups-local/pre-restore-*`，完成 preflight 後才停止服務並原子替換 live
@@ -149,8 +156,9 @@ SaveGames/Config。SteamCMD 維護按鈕會以背景方式啟動固定的
 `palworld-maintenance.service`，並每 10 秒輪詢 preflight、關服、備份、更新、
 重啟及完成/失敗狀態；維護中不接受其他變更操作。
 
-原生 systemd 模式固定拒絕非 loopback bind；Docker 模式只允許設定為 `0.0.0.0` 的
-容器 Web listener，並應限制在可信的區網／VPN 或受 TLS 與存取控制保護的 proxy 後方。
+原生 systemd 接受 `PALWORLD_WEB_BIND_IP` 的有效 IPv4 值；Docker 的該值是 container
+internal bind，host publication 則使用 `PALWORLD_WEB_PUBLISH_IP`。兩者都應限制在可信
+區網／VPN 或受 TLS 與存取控制保護的 proxy 後方，切勿直接公開 plaintext HTTP。
 
 原生 systemd 的所有變更操作共用 `/run/palworld-caretaker/operation.lock`；它由 tmpfiles
 以 `root:<manager>` 預建，runtime 目錄為 manager 不可寫入的 `0750`。Docker 則由
@@ -308,7 +316,7 @@ sudo systemctl status palworld-web-ui.service --no-pager
 
 ## Docker / Compose 部署
 
-v0.7.0 提供 [`Dockerfile`](Dockerfile)、[`docker-compose.yml`](docker-compose.yml)、
+v0.8.0 提供 [`Dockerfile`](Dockerfile)、[`docker-compose.yml`](docker-compose.yml)、
 PID 1 [`docker/docker-supervisor.py`](docker/docker-supervisor.py) 與完整的
 [`docs/DOCKER.md`](docs/DOCKER.md)。快速建立一次性設定並啟動：
 
@@ -320,10 +328,12 @@ docker compose up -d
 docker compose logs -f palworld-caretaker
 ```
 
-容器預設將 Web UI 發布為 `0.0.0.0:8765`、遊戲發布為 `8211/udp`，並將遊戲、備份
-與分層設定保存到上述三個目錄。entrypoint 以 root 完成 `PUID`／`PGID` bootstrap
-後即降權為 non-root `steam`；詳細的來源掛載、反向 proxy、備份還原與停服流程請先
-閱讀 [`docs/DOCKER.md`](docs/DOCKER.md)。
+容器內的 Web UI 監聽 `0.0.0.0:8765`，但 Compose 預設僅發布至 host
+`127.0.0.1:8765`；遊戲發布為 `8211/udp`，並將遊戲、備份與分層設定保存到上述三個
+目錄。LAN/VPN 發布請設定 host-side `PALWORLD_WEB_PUBLISH_IP`，並登錄精確的
+`PALWORLD_WEB_ALLOWED_ORIGINS`。entrypoint 以 root 完成 `PUID`／`PGID` bootstrap 後
+即降權為 non-root `steam`；詳細的來源掛載、反向 proxy、備份還原與停服流程請先閱讀
+[`docs/DOCKER.md`](docs/DOCKER.md)。
 
 ## 診斷與安全解除安裝
 

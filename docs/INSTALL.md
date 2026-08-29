@@ -2,11 +2,11 @@
 
 本指南適用於全新的 Palworld Dedicated Server。安裝器會安裝 SteamCMD、建立受
 限系統帳號、下載遊戲、渲染 systemd units，並啟用遊戲、REST 防火牆、閒置
-監看、備份排程與僅限本機的 Web UI。Discord Bot 只有在 token 已設定時才會啟動。
+監看、備份排程與受認證的 Web UI。Discord Bot 只有在 token 已設定時才會啟動。
 
 ## 系統需求
 
-- Ubuntu 24.04 LTS amd64，使用 systemd 與 APT；其他發行版尚未列入 v0.4.1
+- Ubuntu 24.04 LTS amd64，使用 systemd 與 APT；其他發行版尚未列入 v0.8.0
   的支援範圍。
 - 具 `sudo` 權限的登入帳號，以及可連線至 Ubuntu 套件庫、Steam 與 Discord
   （若啟用 Bot）的網路。
@@ -14,20 +14,21 @@
   「目前 SaveGames 與 Config 合計兩倍，再加 1 GiB」的可用空間。
 - 對外開放遊戲 UDP port（預設 `8211`）時需自行設定路由器或雲端防火牆。
   REST TCP port（預設 `8212`）必須維持 localhost-only，不可公開。
-  Local Web UI 固定只監聽 `127.0.0.1:8765`，不可透過 proxy 或防火牆公開。
+  Local Web UI 預設監聽 `127.0.0.1:8765`。需要 LAN/VPN 維運時可明確設定
+  `PALWORLD_WEB_BIND_IP`，但不可直接以 plaintext HTTP 暴露到 Internet。
 
 安裝會加入 i386 architecture，並透過 APT 安裝 `steamcmd:i386`、
 `python3-venv` 與 `iptables`。Valve 授權條款仍由操作者在 APT 流程中確認。
 
 ## 準備設定
 
-先把 `palworld-caretaker-v0.4.1.tar.gz` 與 `SHA256SUMS` 放在同一目錄，驗證並
+先把 `palworld-caretaker-v0.8.0.tar.gz` 與 `SHA256SUMS` 放在同一目錄，驗證並
 解壓：
 
 ```bash
 sha256sum --check SHA256SUMS
-tar -xzf palworld-caretaker-v0.4.1.tar.gz
-cd palworld-caretaker-v0.4.1
+tar -xzf palworld-caretaker-v0.8.0.tar.gz
+cd palworld-caretaker-v0.8.0
 ```
 
 驗證必須顯示 `OK`。接著在專案根目錄建立不受 Git 管理的部署設定：
@@ -168,13 +169,32 @@ sudo systemctl status palworld-web-ui.service --no-pager
 token。建議使用獨立的 `PALWORLD_WEB_UI_PASSWORD`，修改 `secrets.env` 後以
 `root:<PALWORLD_MANAGER_USER>`、`0640` 保存並重啟 Web UI。
 
-Web UI 永遠只監聽 IPv4 loopback，不能直接從其他主機連線，也不可用 reverse
-proxy 或防火牆公開。若需要遠端維運，先從管理者電腦建立 SSH tunnel，再在
-管理者瀏覽器開啟同一個 URL，並照常輸入 Basic Auth：
+Web UI 預設只監聽 IPv4 loopback。若需要遠端維運，最簡單且建議的方式是從管理者
+電腦建立 SSH tunnel，再在管理者瀏覽器開啟同一個 URL，並照常輸入 Basic Auth：
 
 ```bash
 ssh -N -L 8765:127.0.0.1:8765 user@palworld-host
 ```
+
+若由可信 LAN/VPN 的上游防火牆與 TLS 存取控制保護，可在受 root 保護的
+`caretaker.env` 設定 IPv4 位址及精確 browser origin，然後重啟服務：
+
+```env
+PALWORLD_WEB_BIND_IP=0.0.0.0
+PALWORLD_WEB_ALLOWED_ORIGINS=http://192.168.1.20:8765
+# 或只監聽指定私有介面：PALWORLD_WEB_BIND_IP=192.168.1.20
+```
+
+```bash
+sudo systemctl restart palworld-web-ui.service
+```
+
+非 loopback 綁定仍要求 HTTP Basic Auth、CSRF token，且 `Host` 與
+`Origin`／`Referer` 都必須分別命中明確白名單。反向 proxy 請改設
+`PALWORLD_WEB_PUBLIC_ORIGIN=https://pal.example.net`；多個來源使用
+`PALWORLD_WEB_ALLOWED_ORIGINS`，而 proxy 需要不同 upstream Host 時再加入
+`PALWORLD_WEB_ALLOWED_HOSTS`。不會接受動態的 `Origin == Host`，以防 DNS
+rebinding。這些防護不能取代 TLS、VPN 或防火牆。
 
 正式維護前可先只檢查備份來源、mount 與可用空間，不會存檔、停止或啟動服務：
 
@@ -219,7 +239,7 @@ CPU load、存檔磁碟）、`game`（服務、REST、程序 uptime）或 `playe
 
 ### Web UI 公告、玩家管理與 SaveGames 匯出
 
-登入僅限 loopback 的 Web UI 後：
+登入 Web UI 後：
 
 - 「遊戲內公告」表單會將訊息廣播給遊戲內玩家。
 - 線上玩家清單提供「踢出」與「封鎖」按鈕；每次操作先確認，並可輸入原因。
@@ -234,11 +254,12 @@ SaveGames 匯出另外受 maintenance guard 與操作鎖保護。REST port `8212
 
 ### Web UI 設定管理
 
-在本機 Web UI 的「世界設定」區塊可編輯共 40 個 typed world/event settings，包含
+在 Web UI 的「世界設定」區塊可編輯共 40 個 typed world/event settings，包含
 伺服器名稱、玩家上限、時間/經驗/掉落倍率、Pal 與玩家傷害、guild/base 限制、
 spawn/drop 參數，以及 `Survival & Penalties`、`Stamina & Health`、
 `Building & Decay`、`Pal Dynamics` 四個新增重點分類；另有 idle shutdown
 與備份排程等非 secret caretaker 選項。完整欄位與範圍見[設定契約](CONFIGURATION.md)。
+每個欄位標籤旁都有「?」說明提示，輸入框旁的「重置」會立即填入系統預設值。
 欄位會執行型別與範圍驗證，按「預覽變更」可先查看差異；按「儲存設定」時會建立
 settings backup，再以 atomic write 更新 `config/editable/`。伺服器執行中儲存仍會
 成功，但必須安全重啟才會套用遊戲設定；Web UI 不會顯示或修改 `secrets.env`。

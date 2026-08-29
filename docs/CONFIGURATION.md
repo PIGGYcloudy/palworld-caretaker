@@ -33,6 +33,34 @@ deleted by the Web UI account.
 `ADMIN_PASSWORD`，因此任何部署預設仍需要認證。建議在多使用者主機設定獨立的
 `PALWORLD_WEB_UI_PASSWORD`。
 
+`PALWORLD_WEB_BIND_IP` 是 Web UI 的 IPv4 listener，預設為 `127.0.0.1`，且只在
+`caretaker.env.example` 宣告；不要把它加回 `server.env` 範本。為相容既有單檔或
+server-centric 配置，loader 仍接受 root-level `server.env` 的舊值，並依正常優先序
+覆寫 `caretaker.env`。有效值是 `127.0.0.1`、`0.0.0.0` 或指定 IPv4 位址。這不是
+Web editor 可寫入的欄位：變更後重啟 Web UI 服務才會生效。
+
+Web UI 會對每一個應用程式請求嚴格檢查 `Host`，並對 mutation 的 `Origin`／`Referer`
+做獨立白名單檢查；絕不以瀏覽器提供的 `Origin == Host` 作為信任依據，因此 DNS
+rebinding 不能藉由同時偽造兩者繞過檢查。指定非 `0.0.0.0` 的 IPv4 綁定時，該
+`IP:8765`（實際 port）與本機 `127.0.0.1`／`localhost` 會自動受信任。對
+`0.0.0.0`、DNS 名稱或反向 proxy，必須在受保護的 `caretaker.env` 明確設定：
+
+```env
+# 一個主要 origin；適合 TLS reverse proxy。
+PALWORLD_WEB_PUBLIC_ORIGIN=https://pal.example.net
+# 或多個直接 LAN/VPN 來源；均為完整、無 path 的 exact origin。
+PALWORLD_WEB_ALLOWED_ORIGINS=http://192.168.1.20:8765,http://vpn.example.internal:8765
+# 只有在 proxy 傳入的 Host 與上述 origin authority 不同時才另外加入。
+PALWORLD_WEB_ALLOWED_HOSTS=pal.example.net
+```
+
+`PALWORLD_WEB_PUBLIC_ORIGIN` 與 `PALWORLD_WEB_ALLOWED_ORIGINS` 的 host:port 同時會
+加入 Host 白名單；`PALWORLD_WEB_ALLOWED_HOSTS` 僅供可信 proxy 的不同 upstream Host
+使用，不會放寬 Origin。systemd 僅傳入設定目錄，Web UI 在啟動時由 `load_config` 讀取
+所有設定層；未指定 `--bind` 時，`PALWORLD_WEB_BIND_IP` 也遵循相同優先序。Docker
+Compose 的三個 Web authority 環境變數則可明確覆寫相應設定。非 loopback 綁定仍只適合受
+TLS、VPN／防火牆與存取控制保護的網路；Basic Auth 與 CSRF 不等同網路存取控制。
+
 ## v0.7.0 Discord status, alerts, and SaveGames export
 
 Discord 權限由四個 numeric ID 設定共同決定：
@@ -76,7 +104,7 @@ Palworld 程序只匹配精確 executable basename `PalServer`、`PalServer-Linu
 
 ## Local visual world settings
 
-The loopback-only Web UI includes a schema-validated World Settings editor for
+The authenticated Web UI includes a schema-validated World Settings editor for
 server name/player limits, rate multipliers, Pal and player dynamics, guild
 limits, drops/spawns, and non-secret caretaker options. It shows an exact diff
 before saving. Each save creates a private copy of the current `server.env`
@@ -100,7 +128,10 @@ Drops & Spawns, and Caretaker. Every field uses the same typed boundary for
 Web JSON, editable environment files, and `PalWorldSettings.ini` rendering;
 the exact environment keys and ranges are defined by the editor schema.
 
-The editor never exposes or edits `secrets.env`. If the game is active it
+Every one of the 40 fields includes a keyboard-accessible `?` help tooltip
+whose text comes from the shared schema, plus a Reset button that immediately
+sets that field to the schema's system default. Reset is local until the usual
+preview-and-save flow is confirmed. The editor never exposes or edits `secrets.env`. If the game is active it
 marks the change as requiring a restart. The service renders the saved values
 into `PalWorldSettings.ini` in its root-only start pre-step, so a normal safe
 restart is the boundary at which world settings take effect.

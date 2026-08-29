@@ -1,9 +1,9 @@
-"""A deliberately small, loopback-only web control surface.
+"""A deliberately small, authenticated web control surface.
 
 The module has no third-party dependencies.  It is intended to be run as the
 restricted ``palworld-manager`` account, behind the existing sudoers allowlist.
-It must never be used as a public web service: :func:`create_server` rejects
-every address except the IPv4 loopback address.
+The listener is IPv4-only and defaults to loopback.  Deployments that bind it
+to a private LAN/VPN address retain HTTP Basic Auth and same-origin checks.
 """
 from __future__ import annotations
 
@@ -34,13 +34,16 @@ from .errors import ApiError, ConfigError, SnapshotError
 from .operations import OperationLock, OperationLockBusy
 from .rest import RESTClient
 from .service import (ContainerCommandChannel, ContainerServiceController, RestCommandChannel,
-                      ServerDiagnostics, ServerLifecycle, ServiceState, SystemdServiceController)
+                      ServerDiagnostics, ServerLifecycle, ServiceState, SystemdServiceController,
+                      UnsupportedServiceController)
 from .container import SupervisorControlClient, container_mode
-from .settings import categories
+from .settings import (
+    canonical_web_host, canonical_web_origin, categories, normalize_web_authorities,
+    normalize_web_bind_ip,
+)
 from .settings_store import SettingsStore
 
 
-DEFAULT_BIND = "127.0.0.1"
 DEFAULT_PORT = 8765
 _MAINTENANCE_UNIT = "palworld-maintenance.service"
 _BACKUP_UNIT = "palworld-backup.service"
@@ -48,34 +51,9 @@ _SAFE_STATES = {"active", "activating", "deactivating", "inactive", "failed"}
 _EXPORT_PREFIX = "palworld-savegames-"
 _EXPORT_SUFFIX = ".zip"
 _EXPORT_CHUNK = 64 * 1024
-
-
-def _canonical_origin(value: str, *, require_origin_only: bool) -> str | None:
-    """Return a normalized HTTP origin, rejecting ambiguous URL forms."""
-    try:
-        parsed = urlsplit(value)
-        # Accessing ``port`` validates malformed port values such as ``:abc``.
-        port = parsed.port
-    except ValueError:
-        return None
-    if (
-        parsed.scheme.lower() not in {"http", "https"}
-        or not parsed.netloc
-        or parsed.username is not None
-        or parsed.password is not None
-        or parsed.query
-        or parsed.fragment
-        or (require_origin_only and parsed.path)
-    ):
-        return None
-    hostname = parsed.hostname
-    if hostname is None:
-        return None
-    # urlsplit has already checked bracketed IPv6 syntax.  Rebuild from its
-    # parsed components so case changes and a Host header cannot bypass a
-    # string comparison.
-    rendered_host = f"[{hostname.lower()}]" if ":" in hostname else hostname.lower()
-    return f"{parsed.scheme.lower()}://{rendered_host}{f':{port}' if port is not None else ''}"
+def _configured_values(config: CaretakerConfig, name: str) -> str:
+    """Return a Docker/explicit-process override for web authority values."""
+    return os.environ.get(name, config.values.get(name, "")).strip()
 
 
 class _BoundedWriter:
@@ -230,8 +208,13 @@ class WebDependencies:
     def create(cls, config: CaretakerConfig) -> "WebDependencies":
         api = RESTClient(config)
         supervisor = SupervisorControlClient() if container_mode() else None
+        service = (
+            ContainerServiceController(supervisor) if supervisor else
+            UnsupportedServiceController() if os.name == "nt" else
+            SystemdServiceController()
+        )
         lifecycle = ServerLifecycle(
-            ContainerServiceController(supervisor) if supervisor else SystemdServiceController(),
+            service,
             ContainerCommandChannel(supervisor) if supervisor else RestCommandChannel(api), api=api,
         )
         backups = BackupEngine(
@@ -252,12 +235,19 @@ class WebDependencies:
         )
 
     def maintenance_running(self) -> bool:
-        """Fail closed when systemd cannot prove maintenance is inactive."""
+        """Fail closed when systemd cannot prove maintenance is inactive.
+
+        Windows has no systemd maintenance unit.  Its systemd-only mutation
+        endpoints reject requests explicitly, so treating that absent unit as
+        inactive keeps status/settings pages usable without invoking sudo.
+        """
         if self.supervisor is not None:
             try:
                 return bool(self.supervisor.request("status").get("maintenance"))
             except RuntimeError:
                 return True
+        if os.name == "nt":
+            return False
         try:
             result = self.runner(
                 ["sudo", "-n", "/usr/bin/systemctl", "is-active", _MAINTENANCE_UNIT],
@@ -294,6 +284,7 @@ class WebDependencies:
             raise MaintenanceInProgress("maintenance is active")
 
     def _sudo_start(self, unit: str, *, wait: bool) -> subprocess.CompletedProcess[str]:
+        self._require_systemd_support()
         # The unit names and arguments are constants covered by the deployment
         # sudoers policy; no browser value reaches command execution.
         return self.runner(
@@ -301,10 +292,17 @@ class WebDependencies:
             capture_output=True, text=True, timeout=35 * 60 if wait else 15, check=False,
         )
 
+    @staticmethod
+    def _require_systemd_support() -> None:
+        """Reject Linux deployment operations before constructing a sudo command."""
+        if os.name == "nt":
+            raise WebUIError("this operation requires the Linux systemd deployment")
+
     def _start_server(self) -> None:
         if self.supervisor is not None:
             self.supervisor.request("start")
             return
+        self._require_systemd_support()
         result = self.runner(
             ["sudo", "-n", self.control_path, "start"],
             capture_output=True, text=True, timeout=130, check=False,
@@ -351,6 +349,8 @@ class WebDependencies:
         """
         if action not in {"backup", "start", "stop", "restart"}:
             raise WebUIError("unsupported operation")
+        if self.supervisor is None:
+            self._require_systemd_support()
         if action == "backup":
             return self._backup()
         if action == "start":
@@ -385,6 +385,8 @@ class WebDependencies:
             raise OperationInProgress(str(exc)) from exc
 
     def _backup(self) -> dict[str, Any]:
+        if self.supervisor is None:
+            self._require_systemd_support()
         before = {item.name for item in self.backups.list_snapshots()}
         announced = True
         try:
@@ -423,6 +425,8 @@ class WebDependencies:
         version = payload.get("snapshot")
         if not isinstance(version, str):
             raise WebUIError("snapshot name is required")
+        if self.supervisor is None:
+            self._require_systemd_support()
         try:
             # This duplicate preflight protects an active server before the
             # privileged workflow is entered.  The root workflow repeats it
@@ -492,6 +496,9 @@ class WebDependencies:
             except RuntimeError:
                 return {"service": "unknown", "running": True, "phase": None,
                         "latest_log_summary": None, "updated_at": None}
+        if os.name == "nt":
+            return {"service": "unsupported", "running": False, "phase": None,
+                    "latest_log_summary": None, "updated_at": None}
         try:
             result = self.runner(
                 ["sudo", "-n", "/usr/bin/systemctl", "is-active", _MAINTENANCE_UNIT],
@@ -715,7 +722,8 @@ class WebDependencies:
             fields.append({"name": category, "fields": [
                 {"key": spec.key, "label": spec.label, "kind": spec.kind,
                  "minimum": spec.minimum, "maximum": spec.maximum,
-                 "choices": spec.choices, "value": current.values[spec.key]}
+                 "choices": spec.choices, "value": current.values[spec.key],
+                 "default": spec.default, "description": spec.description}
                 for spec in specifications if not spec.secret
             ]})
         return {"categories": fields, "restart_required": self._restart_required()}
@@ -756,8 +764,8 @@ def _page(token: str) -> bytes:
     return f"""<!doctype html>
 <html lang=\"zh-Hant\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">
 <title>Palworld Caretaker</title><style nonce={token}>
-body{{font:16px system-ui,sans-serif;margin:2rem;max-width:58rem;color:#17212b;background:#f8fafc}}h1{{margin-bottom:.2rem}}section{{background:#fff;border:1px solid #d9e1ea;border-radius:.5rem;padding:1rem;margin:1rem 0}}button{{padding:.55rem .8rem;margin:.2rem}}#message{{min-height:1.5rem}}ul{{padding-left:1.3rem}}fieldset{{border:0;border-top:1px solid #d9e1ea;margin:1rem 0;padding:1rem 0}}legend{{font-weight:650}}label{{display:grid;grid-template-columns:minmax(13rem,1fr) minmax(12rem,2fr);gap:.75rem;align-items:center;margin:.55rem 0}}input,select{{font:inherit;padding:.35rem}}#settings-diff{{white-space:pre-wrap}}.notice{{color:#8a4b00}}
-</style></head><body><h1>Palworld Caretaker</h1><p>僅限本機環回位址。</p>
+body{{font:16px system-ui,sans-serif;margin:2rem;max-width:58rem;color:#17212b;background:#f8fafc}}h1{{margin-bottom:.2rem}}section{{background:#fff;border:1px solid #d9e1ea;border-radius:.5rem;padding:1rem;margin:1rem 0}}button{{padding:.55rem .8rem;margin:.2rem}}#message{{min-height:1.5rem}}ul{{padding-left:1.3rem}}fieldset{{border:0;border-top:1px solid #d9e1ea;margin:1rem 0;padding:1rem 0}}legend{{font-weight:650}}.setting-row{{display:grid;grid-template-columns:minmax(12rem,1fr) auto minmax(12rem,2fr) auto;gap:.5rem;align-items:center;margin:.55rem 0}}input,select{{font:inherit;padding:.35rem}}#settings-diff{{white-space:pre-wrap}}.notice{{color:#8a4b00}}.help{{position:relative;border:1px solid #64748b;border-radius:50%;width:1.35rem;height:1.35rem;padding:0;margin:0;background:#fff;color:#334155;font-weight:700;line-height:1;cursor:help}}.help-tooltip{{display:none;position:absolute;z-index:1;left:calc(100% + .45rem);top:-.5rem;width:min(21rem,70vw);padding:.55rem;border-radius:.35rem;background:#17212b;color:#fff;font-weight:400;font-size:.875rem;line-height:1.35;text-align:left;box-shadow:0 .2rem .7rem #0004}}.help:hover .help-tooltip,.help:focus .help-tooltip{{display:block}}.reset-setting{{white-space:nowrap}}@media(max-width:42rem){{.setting-row{{grid-template-columns:1fr auto}}.setting-row input,.setting-row select{{grid-column:1/-1}}.help-tooltip{{left:0;top:calc(100% + .35rem)}}}}
+</style></head><body><h1>Palworld Caretaker</h1><p>受認證的管理介面；請只透過受信任的本機、LAN 或 VPN 網路使用。</p>
 <section><h2>伺服器狀態</h2><div id=\"status\">讀取中…</div></section>
 <section><h2>線上玩家</h2><ul id=\"players\"></ul></section>
 <section><h2>遊戲內公告</h2><form id=\"announce-form\"><label><span>公告內容</span><input id=\"announce-message\" name=\"message\" maxlength=\"1024\" required></label><button type=\"submit\">發送公告</button></form></section>
@@ -784,7 +792,7 @@ document.querySelector('#announce-form').addEventListener('submit',async event=>
 document.querySelector('#savegames-download').addEventListener('click',async()=>{{const button=document.querySelector('#savegames-download');button.disabled=true;try{{const response=await fetch('/api/savegames/download',{{method:'POST',headers:{{'Content-Type':'application/json','X-Palworld-CSRF':csrf}},body:'{{}}'}});if(!response.ok){{const data=await response.json();throw Error(data.error||'匯出失敗');}}const blob=await response.blob(),url=URL.createObjectURL(blob),link=document.createElement('a');link.href=url;link.download='palworld-savegames.zip';link.click();URL.revokeObjectURL(url);document.querySelector('#message').textContent='SaveGames 匯出完成。';await refresh();}}catch(e){{document.querySelector('#message').textContent=e.message;}}finally{{button.disabled=false;}}}});
 const settingsForm=document.querySelector('#settings-form');const settingsValues=()=>Object.fromEntries(new FormData(settingsForm).entries());
 const showDiff=data=>{{const changes=data.changes||[];document.querySelector('#settings-diff').textContent=changes.length?changes.map(x=>`${{x.category}} — ${{x.label}}: ${{x.old}} → ${{x.new}}`).join('\\n'):'沒有變更。';document.querySelector('#restart-notice').hidden=!data.restart_required;}};
-async function loadSettings(){{try{{const data=await request('/api/settings');const root=document.querySelector('#settings-fields');root.replaceChildren();for(const category of data.categories){{const fieldset=document.createElement('fieldset'),legend=document.createElement('legend');legend.textContent=category.name;fieldset.append(legend);for(const field of category.fields){{const label=document.createElement('label'),caption=document.createElement('span'),input=document.createElement(field.kind==='choice'?'select':'input');caption.textContent=field.label;input.name=field.key;input.required=true;if(field.kind==='boolean'){{for(const optionValue of ['true','false']){{const option=document.createElement('option');option.value=optionValue;option.textContent=optionValue==='true'?'Enabled':'Disabled';input.append(option);}}}}else if(field.kind==='integer'||field.kind==='number'){{input.type='number';input.step=field.kind==='integer'?'1':'0.1';if(field.minimum!==null)input.min=field.minimum;if(field.maximum!==null)input.max=field.maximum;}}else input.type='text';if(field.kind==='choice')for(const optionValue of field.choices){{const option=document.createElement('option');option.value=optionValue;option.textContent=optionValue;input.append(option);}}input.value=field.value;label.append(caption,input);fieldset.append(label);}}root.append(fieldset);}}showDiff({{changes:[],restart_required:data.restart_required}});}}catch(e){{document.querySelector('#settings-fields').textContent=e.message;}}}}
+async function loadSettings(){{try{{const data=await request('/api/settings');const root=document.querySelector('#settings-fields');root.replaceChildren();for(const category of data.categories){{const fieldset=document.createElement('fieldset'),legend=document.createElement('legend');legend.textContent=category.name;fieldset.append(legend);for(const field of category.fields){{const row=document.createElement('div'),label=document.createElement('label'),help=document.createElement('button'),tooltip=document.createElement('span'),input=document.createElement(field.kind==='choice'||field.kind==='boolean'?'select':'input'),reset=document.createElement('button'),inputId='setting-'+field.key;row.className='setting-row';label.htmlFor=inputId;label.textContent=field.label;help.type='button';help.className='help';help.setAttribute('aria-label',field.label+' 的說明');help.setAttribute('aria-describedby','help-'+field.key);help.textContent='?';tooltip.id='help-'+field.key;tooltip.className='help-tooltip';tooltip.setAttribute('role','tooltip');tooltip.textContent=field.description;help.append(tooltip);input.id=inputId;input.name=field.key;input.required=true;input.setAttribute('aria-describedby',tooltip.id);if(field.kind==='boolean'){{for(const optionValue of ['true','false']){{const option=document.createElement('option');option.value=optionValue;option.textContent=optionValue==='true'?'Enabled':'Disabled';input.append(option);}}}}else if(field.kind==='integer'||field.kind==='number'){{input.type='number';input.step=field.kind==='integer'?'1':'0.1';if(field.minimum!==null)input.min=field.minimum;if(field.maximum!==null)input.max=field.maximum;}}else input.type='text';if(field.kind==='choice')for(const optionValue of field.choices){{const option=document.createElement('option');option.value=optionValue;option.textContent=optionValue;input.append(option);}}input.value=field.value;reset.type='button';reset.className='reset-setting';reset.textContent='重置';reset.title='重置為預設值：'+field.default;reset.setAttribute('aria-label',field.label+' 重置為預設值 '+field.default);reset.addEventListener('click',()=>{{input.value=field.default;input.dispatchEvent(new Event('input',{{bubbles:true}}));input.focus();}});row.append(label,help,input,reset);fieldset.append(row);}}root.append(fieldset);}}showDiff({{changes:[],restart_required:data.restart_required}});}}catch(e){{document.querySelector('#settings-fields').textContent=e.message;}}}}
 const settingsRequest=path=>request(path,{{method:'POST',headers:{{'Content-Type':'application/json','X-Palworld-CSRF':csrf}},body:JSON.stringify({{values:settingsValues()}})}});
 document.querySelector('#preview-settings').addEventListener('click',async()=>{{if(!settingsForm.reportValidity())return;try{{showDiff(await settingsRequest('/api/settings/preview'));}}catch(e){{document.querySelector('#settings-diff').textContent=e.message;}}}});
 settingsForm.addEventListener('submit',async event=>{{event.preventDefault();if(!settingsForm.reportValidity())return;try{{const preview=await settingsRequest('/api/settings/preview');showDiff(preview);if(preview.changes.length&&!confirm('套用以上變更？'))return;const saved=await settingsRequest('/api/settings');showDiff(saved);document.querySelector('#message').textContent=saved.message+(saved.backup?' Backup: '+saved.backup:'');}}catch(e){{document.querySelector('#settings-diff').textContent=e.message;}}}});loadSettings();
@@ -879,6 +887,9 @@ class _Handler(BaseHTTPRequestHandler):
         if self.path == "/healthz":
             self._send(HTTPStatus.OK, b'{"status":"ok"}', "application/json; charset=utf-8")
             return
+        if not self._host_allowed():
+            self._error(HTTPStatus.BAD_REQUEST, "Request host is not allowed.")
+            return
         if self._auth_required():
             return
         request = urlsplit(self.path)
@@ -942,24 +953,21 @@ class _Handler(BaseHTTPRequestHandler):
             return None
 
     def _origin_matches(self, supplied: str, *, require_origin_only: bool) -> bool:
-        origin = _canonical_origin(supplied, require_origin_only=require_origin_only)
-        if origin is None:
-            return False
-        configured = self.server.public_origin
-        if configured is not None:
-            return hmac.compare_digest(origin, configured)
-        # In Docker's direct 0.0.0.0 mode no single public hostname is known.
-        # Bind the Origin (or Referer) to the browser-controlled Host header,
-        # retaining same-origin CSRF protection for LAN IP and DNS access. A
-        # reverse proxy should set PALWORLD_WEB_PUBLIC_ORIGIN explicitly when
-        # it cannot preserve the public Host header.
-        scheme = origin.split("://", 1)[0]
-        host_origin = _canonical_origin(
-            f"{scheme}://{self.headers.get('Host', '')}", require_origin_only=True,
+        origin = canonical_web_origin(supplied, require_origin_only=require_origin_only)
+        return origin is not None and any(
+            hmac.compare_digest(origin, trusted) for trusted in self.server.trusted_origins
         )
-        return host_origin is not None and hmac.compare_digest(origin, host_origin)
+
+    def _host_allowed(self) -> bool:
+        host = canonical_web_host(self.headers.get("Host", ""))
+        return host is not None and any(
+            hmac.compare_digest(host, trusted) for trusted in self.server.trusted_hosts
+        )
 
     def do_POST(self) -> None:  # noqa: N802
+        if not self._host_allowed():
+            self._error(HTTPStatus.BAD_REQUEST, "Request host is not allowed.")
+            return
         if self._auth_required():
             return
         request = urlsplit(self.path)
@@ -1088,16 +1096,17 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 class WebServer(ThreadingHTTPServer):
-    """An HTTP server whose constructor enforces the loopback-only boundary."""
+    """An authenticated HTTP server with a validated IPv4 listener."""
 
     daemon_threads = True
     allow_reuse_address = True
 
     def __init__(self, address: tuple[str, int], dependencies: WebDependencies):
         host, port = address
-        container_mode = os.environ.get("PALWORLD_CONTAINER_MODE") == "1"
-        if host != DEFAULT_BIND and not (container_mode and host == "0.0.0.0"):
-            raise ValueError("web UI must bind only to 127.0.0.1 outside container mode")
+        try:
+            host = normalize_web_bind_ip(host)
+        except ConfigError as exc:
+            raise ValueError(str(exc)) from exc
         if not isinstance(port, int) or not 0 <= port <= 65535:
             raise ValueError("web UI port must be between 0 and 65535")
         # A response-owned archive has no durable purpose.  Anything matching
@@ -1106,7 +1115,6 @@ class WebServer(ThreadingHTTPServer):
         dependencies.scavenge_export_archives()
         self.dependencies = dependencies
         self.csrf_token = secrets.token_urlsafe(32)
-        configured_origin = os.environ.get("PALWORLD_WEB_PUBLIC_ORIGIN", "").strip()
         self.auth_username = dependencies.config.values["PALWORLD_WEB_UI_USERNAME"]
         self.auth_password = (
             dependencies.config.values.get("PALWORLD_WEB_UI_PASSWORD")
@@ -1114,36 +1122,66 @@ class WebServer(ThreadingHTTPServer):
         )
         if not self.auth_username or not self.auth_password:
             raise ValueError("web UI authentication credentials must be configured")
-        super().__init__(address, _Handler)
-        self.public_origin = _canonical_origin(configured_origin, require_origin_only=True) if configured_origin else None
-        if configured_origin and self.public_origin is None:
-            raise ValueError("PALWORLD_WEB_PUBLIC_ORIGIN must be an HTTP origin without a path")
-        if not configured_origin and not (container_mode and host == "0.0.0.0"):
-            # Keep the host installation loopback-only contract strict. The
-            # dynamic Host policy is exclusively for Docker's LAN listener.
-            self.public_origin = f"http://{DEFAULT_BIND}:{self.server_port}"
+        # Use the canonical address rather than the original user input.  In
+        # particular, Python's socket layer must never receive a value such as
+        # ``' 127.0.0.1 '`` which passed validation only after trimming.
+        # Validate explicit config before allocating the listening socket so a
+        # bad deployment configuration cannot leave a half-constructed server
+        # and an open descriptor behind.
+        try:
+            configured_origins, configured_hosts = normalize_web_authorities({
+                name: _configured_values(dependencies.config, name)
+                for name in (
+                    "PALWORLD_WEB_PUBLIC_ORIGIN", "PALWORLD_WEB_ALLOWED_ORIGINS",
+                    "PALWORLD_WEB_ALLOWED_HOSTS",
+                )
+            })
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
+        super().__init__((host, port), _Handler)
+
+        origins = set(configured_origins)
+
+        # A concrete listener has a stable address, so direct HTTP access can
+        # be safe without trusting arbitrary DNS.  The loopback aliases keep
+        # local administration and Docker's localhost port publication usable.
+        port_suffix = "" if self.server_port == 80 else f":{self.server_port}"
+        automatic_hosts = {f"127.0.0.1{port_suffix}", f"localhost{port_suffix}"}
+        if host != "0.0.0.0":
+            automatic_hosts.add(f"{host}{port_suffix}")
+        for authority in automatic_hosts:
+            origins.add(f"http://{authority}")
+
+        hosts: set[str] = set()
+        for origin in origins:
+            authority = canonical_web_host(origin.split("://", 1)[1])
+            assert authority is not None  # derived from canonical_web_origin
+            hosts.add(authority)
+        hosts.update(configured_hosts)
+        self.trusted_origins = tuple(sorted(origins))
+        self.trusted_hosts = tuple(sorted(hosts))
 
 
-def create_server(dependencies: WebDependencies, *, host: str = DEFAULT_BIND, port: int = DEFAULT_PORT) -> WebServer:
-    return WebServer((host, port), dependencies)
+def create_server(dependencies: WebDependencies, *, host: str | None = None, port: int = DEFAULT_PORT) -> WebServer:
+    return WebServer((dependencies.config.values["PALWORLD_WEB_BIND_IP"] if host is None else host, port), dependencies)
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Palworld Caretaker local web UI")
+    parser = argparse.ArgumentParser(description="Palworld Caretaker web UI")
     parser.add_argument(
         "--config-dir", default=os.environ.get("PALWORLD_CONFIG", "/srv/palworld/config"),
         help="configuration directory (defaults to PALWORLD_CONFIG)",
     )
-    parser.add_argument("--bind", default=DEFAULT_BIND, help=argparse.SUPPRESS)
+    parser.add_argument("--bind", help="IPv4 address to listen on (overrides PALWORLD_WEB_BIND_IP)")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     args = parser.parse_args(argv)
-    if args.bind != DEFAULT_BIND and not (
-        os.environ.get("PALWORLD_CONTAINER_MODE") == "1" and args.bind == "0.0.0.0"
-    ):
-        parser.error("the web UI may bind only to 127.0.0.1 outside container mode")
     try:
         config = load_config(args.config_dir)
-        server = create_server(WebDependencies.create(config), host=args.bind, port=args.port)
+        # ``load_config`` owns all configuration-layer precedence.  The CLI is
+        # the sole bind override, so a service process environment cannot mask
+        # a later protected layer such as secrets.env.
+        bind = args.bind if args.bind is not None else config.values["PALWORLD_WEB_BIND_IP"]
+        server = create_server(WebDependencies.create(config), host=bind, port=args.port)
     except (OSError, RuntimeError, ValueError) as exc:
         parser.error(str(exc))
     try:

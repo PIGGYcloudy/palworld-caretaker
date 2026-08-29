@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -20,6 +21,8 @@ from palworld_caretaker.operations import OperationLock, OperationLockBusy
 from palworld_caretaker.audit import AuditLog
 from palworld_caretaker.settings_store import SettingsPersistenceError, _safe_directory
 from palworld_caretaker.paths import has_parent_reference, is_filesystem_root, native_path
+from palworld_caretaker.service import UnsupportedServiceController
+from palworld_caretaker.web import WebDependencies, WebUIError
 
 
 class PortablePathTests(unittest.TestCase):
@@ -66,6 +69,48 @@ class PortablePathTests(unittest.TestCase):
                     lock.__enter__()
             self.assertFalse(lock._locked)
             self.assertIsNone(lock._fd)
+
+    def test_web_ui_windows_mode_never_constructs_or_runs_systemd_commands(self):
+        """Exercise the Windows branch on every CI platform without subprocesses."""
+        with tempfile.TemporaryDirectory(prefix="palworld-web-windows-") as temporary:
+            root = Path(temporary)
+            values = dict(DEFAULTS)
+            values.update({
+                "PALWORLD_INSTALL_ROOT": str(root / "install"),
+                "PALWORLD_BACKUP_DIR": str(root / "backups"),
+                "PALWORLD_BACKUP_MOUNT": "", "PALWORLD_BACKUP_REQUIRE_MOUNT": "false",
+                "PALWORLD_MANAGER_STATE_DIR": str(root / "state"),
+                "ADMIN_PASSWORD": "test-password",
+            })
+            config = CaretakerConfig(values)
+            calls: list[list[str]] = []
+
+            def runner(argv, **_kwargs):
+                calls.append(argv)
+                raise AssertionError("Windows Web UI must not run a systemd command")
+
+            dependencies = WebDependencies(
+                config, object(), object(), object(), object(), runner=runner,
+            )
+            # Replace only web.py's module reference so pathlib/config keep
+            # the real host platform while this portable test exercises its
+            # Windows branch.
+            with patch("palworld_caretaker.web.os", SimpleNamespace(name="nt")), \
+                 patch("palworld_caretaker.web.container_mode", return_value=False):
+                created = WebDependencies.create(config)
+                self.assertIsInstance(created.lifecycle.service, UnsupportedServiceController)
+                self.assertFalse(dependencies.maintenance_running())
+                self.assertEqual(dependencies.maintenance_payload()["service"], "unsupported")
+                for operation in (
+                    lambda: dependencies.perform("start"),
+                    lambda: dependencies._sudo_start("palworld-maintenance.service", wait=False),
+                    dependencies._start_server,
+                    dependencies._backup,
+                    lambda: dependencies.restore({"snapshot": "palworld-20260830-120000"}),
+                ):
+                    with self.assertRaisesRegex(WebUIError, "Linux systemd deployment"):
+                        operation()
+            self.assertEqual(calls, [])
 
     @unittest.skipUnless(os.name == "nt", "Windows path semantics")
     def test_config_accepts_backslash_paths_and_uses_native_defaults(self):
