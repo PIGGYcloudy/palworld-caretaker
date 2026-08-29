@@ -236,7 +236,7 @@ function Get-CaretakerFileIdentity {
     # FILE_ID_INFO.  Unlike FileIndexHigh/FileIndexLow, this 128-bit value is
     # unique on ReFS and other modern Windows file systems.
     $fileIdInfo = [Caretaker.NativeLock]::FileIdInfo
-    $size = [uint32][Runtime.InteropServices.Marshal]::SizeOf([Caretaker.NativeLock+FILE_ID_INFO])
+    $size = [uint32][Runtime.InteropServices.Marshal]::SizeOf($information)
     if (-not [Caretaker.NativeLock]::GetFileInformationByHandleEx($Handle, $fileIdInfo, [ref]$information, $size)) {
         throw [ComponentModel.Win32Exception]::new([Runtime.InteropServices.Marshal]::GetLastWin32Error())
     }

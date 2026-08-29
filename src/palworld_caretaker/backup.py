@@ -124,7 +124,10 @@ class BackupManager:
         for root, _directories, files in os.walk(path, topdown=False, followlinks=False):
             current = Path(root)
             for name in files:
-                descriptor = os.open(current / name, os.O_RDONLY)
+                # Windows CRT's _commit (used by os.fsync) rejects descriptors
+                # opened read-only, unlike POSIX fsync.
+                flags = os.O_RDWR if os.name == "nt" else os.O_RDONLY
+                descriptor = os.open(current / name, flags)
                 try:
                     os.fsync(descriptor)
                 finally:
