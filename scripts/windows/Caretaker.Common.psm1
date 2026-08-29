@@ -304,7 +304,10 @@ function Open-CaretakerOperationLockParent {
 function New-CaretakerSecureOperationLockStream {
     param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$ExpectedPath)
     Initialize-CaretakerNativeLock
-    $genericRead = [uint32]0x80000000; $genericWrite = [uint32]0x40000000
+    # The L suffix makes this a positive Int64 literal before the UInt32
+    # conversion.  Without it, Windows PowerShell parses 0x80000000 as the
+    # negative Int32 value -2147483648 and the conversion throws.
+    $genericRead = [uint32]0x80000000L; $genericWrite = [uint32]0x40000000
     $openAlways = [uint32]4; $fileAttributeNormal = [uint32]0x80; $openReparsePoint = [uint32]0x00200000
     # Match Python's open_no_reparse: permit existing read/write handles, but
     # never FILE_SHARE_DELETE.  A share mode of zero rejects a compatible

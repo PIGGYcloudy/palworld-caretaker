@@ -375,7 +375,8 @@ $module = Get-Module Caretaker.Common
     try {{
         $finalPath = Get-CaretakerFinalPathByHandle $heldParent.Handle
         if ($finalPath.StartsWith('\\\\?\\')) {{ throw "final path retained extended prefix: $finalPath" }}
-        if (-not [string]::Equals($finalPath.TrimEnd('\\', '/'), $parent.TrimEnd('\\', '/'), [System.StringComparison]::OrdinalIgnoreCase)) {{
+        $expectedParentPath = [System.IO.Path]::GetFullPath($parent).TrimEnd('\\', '/')
+        if (-not [string]::Equals($finalPath.TrimEnd('\\', '/'), $expectedParentPath, [System.StringComparison]::OrdinalIgnoreCase)) {{
             throw "final path did not match parent: $finalPath"
         }}
     }} finally {{
@@ -411,7 +412,7 @@ try {{
         $hresults += [uint32]$renameError.HResult
         $renameError = $renameError.InnerException
     }}
-    if ($hresults -notcontains [uint32]0x80070020) {{
+    if ($hresults -notcontains [uint32]0x80070020L) {{
         throw 'parent rename failed for a reason other than the held-handle sharing violation'
     }}
 }} finally {{
