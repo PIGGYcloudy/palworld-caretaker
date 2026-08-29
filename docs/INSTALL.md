@@ -234,12 +234,14 @@ SaveGames 匯出另外受 maintenance guard 與操作鎖保護。REST port `8212
 
 ### Web UI 設定管理
 
-在本機 Web UI 的「世界設定」區塊可編輯伺服器名稱、玩家上限、時間/經驗/掉落
-倍率、Pal 與玩家傷害、guild/base 限制、spawn/drop 參數，以及 idle shutdown
-與備份排程等非 secret caretaker 選項。欄位會執行型別與範圍驗證，按「預覽變更」
-可先查看差異；按「儲存設定」時會建立 settings backup，再以 atomic write
-更新 `config/editable/`。伺服器執行中儲存仍會成功，但必須安全重啟才會套用遊戲
-設定；Web UI 不會顯示或修改 `secrets.env`。
+在本機 Web UI 的「世界設定」區塊可編輯共 40 個 typed world/event settings，包含
+伺服器名稱、玩家上限、時間/經驗/掉落倍率、Pal 與玩家傷害、guild/base 限制、
+spawn/drop 參數，以及 `Survival & Penalties`、`Stamina & Health`、
+`Building & Decay`、`Pal Dynamics` 四個新增重點分類；另有 idle shutdown
+與備份排程等非 secret caretaker 選項。完整欄位與範圍見[設定契約](CONFIGURATION.md)。
+欄位會執行型別與範圍驗證，按「預覽變更」可先查看差異；按「儲存設定」時會建立
+settings backup，再以 atomic write 更新 `config/editable/`。伺服器執行中儲存仍會
+成功，但必須安全重啟才會套用遊戲設定；Web UI 不會顯示或修改 `secrets.env`。
 
 ### Pre-restore safety backup
 

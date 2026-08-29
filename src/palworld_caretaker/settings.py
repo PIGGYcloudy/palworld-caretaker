@@ -29,7 +29,7 @@ class SettingSpec:
 
 @dataclass(frozen=True)
 class WorldSettings:
-    """The game-facing settings exposed by the first visual editor."""
+    """The typed game-facing settings exposed by the visual editor."""
 
     server_name: str
     server_description: str
@@ -48,7 +48,36 @@ class WorldSettings:
     base_camp_max_num_in_guild: int
     pal_spawn_num_rate: float
     drop_item_max_num: int
+    drop_item_alive_max_hours: float
     pal_egg_default_hatching_time: float
+    death_penalty: str
+    pal_stamina_decreace_rate: float
+    player_stamina_decreace_rate: float
+    pal_auto_hp_regene_rate: float
+    player_auto_hp_regene_rate: float
+    pal_auto_hp_regene_rate_in_sleep: float
+    player_auto_hp_regene_rate_in_sleep: float
+    pal_hunger_decreace_rate: float
+    player_hunger_decreace_rate: float
+    build_object_hp_rate: float
+    build_object_damage_rate: float
+    build_object_deterioration_damage_rate: float
+    base_camp_worker_max_num: int
+    work_speed_rate: float
+    item_weight_rate: float
+    equipment_durability_damage_rate: float
+    auto_reset_worker_pal_when_server_restart: bool
+
+    # Palworld's INI calls hunger "StomachDecreace".  Retain aliases for code
+    # that needs to speak in the game's terminology while presenting the
+    # clearer hunger wording to caretaker consumers.
+    @property
+    def pal_stomach_decreace_rate(self) -> float:
+        return self.pal_hunger_decreace_rate
+
+    @property
+    def player_stomach_decreace_rate(self) -> float:
+        return self.player_hunger_decreace_rate
 
 
 @dataclass(frozen=True)
@@ -73,13 +102,31 @@ _SPECS = (
     SettingSpec("ENEMY_DROP_ITEM_RATE", "Enemy drop rate", "Multipliers", "server", "number", "1.0", 0.1, 5),
     SettingSpec("PAL_DAMAGE_RATE_ATTACK", "Pal damage dealt", "Pal Dynamics", "server", "number", "1.0", 0.1, 5),
     SettingSpec("PAL_DAMAGE_RATE_DEFENSE", "Pal damage received", "Pal Dynamics", "server", "number", "1.0", 0.1, 5),
+    SettingSpec("PAL_STAMINA_DECREACE_RATE", "Pal stamina depletion", "Stamina & Health", "server", "number", "1.0", 0.1, 5),
+    SettingSpec("PAL_AUTO_HP_REGENE_RATE", "Pal natural health regeneration", "Stamina & Health", "server", "number", "1.0", 0.1, 5),
+    SettingSpec("PAL_AUTO_HP_REGENE_RATE_IN_SLEEP", "Pal sleeping health regeneration", "Stamina & Health", "server", "number", "1.0", 0.1, 5),
+    SettingSpec("PAL_STOMACH_DECREACE_RATE", "Pal hunger depletion", "Stamina & Health", "server", "number", "1.0", 0.1, 5),
     SettingSpec("PLAYER_DAMAGE_RATE_ATTACK", "Player damage dealt", "Player & Guild", "server", "number", "1.0", 0.1, 5),
     SettingSpec("PLAYER_DAMAGE_RATE_DEFENSE", "Player damage received", "Player & Guild", "server", "number", "1.0", 0.1, 5),
+    SettingSpec("PLAYER_STAMINA_DECREACE_RATE", "Player stamina depletion", "Stamina & Health", "server", "number", "1.0", 0.1, 5),
+    SettingSpec("PLAYER_AUTO_HP_REGENE_RATE", "Player natural health regeneration", "Stamina & Health", "server", "number", "1.0", 0.1, 5),
+    SettingSpec("PLAYER_AUTO_HP_REGENE_RATE_IN_SLEEP", "Player sleeping health regeneration", "Stamina & Health", "server", "number", "1.0", 0.1, 5),
+    SettingSpec("PLAYER_STOMACH_DECREACE_RATE", "Player hunger depletion", "Stamina & Health", "server", "number", "1.0", 0.1, 5),
     SettingSpec("GUILD_PLAYER_MAX_NUM", "Guild player limit", "Player & Guild", "server", "integer", "20", 1, 100),
     SettingSpec("BASE_CAMP_MAX_NUM_IN_GUILD", "Base camp limit", "Player & Guild", "server", "integer", "10", 1, 10),
+    SettingSpec("BASE_CAMP_WORKER_MAX_NUM", "Pals per base camp", "Pal Dynamics", "server", "integer", "15", 1, 50),
+    SettingSpec("AUTO_RESET_WORKER_PAL_WHEN_SERVER_RESTART", "Reset working Pals on server restart", "Pal Dynamics", "server", "boolean", "false"),
     SettingSpec("PAL_SPAWN_NUM_RATE", "Pal spawn rate", "Drops & Spawns", "server", "number", "1.0", 0.1, 5),
     SettingSpec("DROP_ITEM_MAX_NUM", "Maximum dropped items", "Drops & Spawns", "server", "integer", "3000", 1, 10000),
+    SettingSpec("DROP_ITEM_ALIVE_MAX_HOURS", "Dropped item lifetime (hours)", "Drops & Spawns", "server", "number", "1.0", 0.1, 8760),
     SettingSpec("PAL_EGG_DEFAULT_HATCHING_TIME", "Egg hatching time", "Drops & Spawns", "server", "number", "72.0", 0, 240),
+    SettingSpec("WORK_SPEED_RATE", "Pal work speed", "Pal Dynamics", "server", "number", "1.0", 0.1, 5),
+    SettingSpec("ITEM_WEIGHT_RATE", "Item weight", "Survival & Penalties", "server", "number", "1.0", 0.1, 5),
+    SettingSpec("EQUIPMENT_DURABILITY_DAMAGE_RATE", "Equipment durability loss", "Survival & Penalties", "server", "number", "1.0", 0.1, 5),
+    SettingSpec("DEATH_PENALTY", "Death penalty", "Survival & Penalties", "server", "choice", "Item", choices=("None", "Item", "ItemAndEquipment", "All")),
+    SettingSpec("BUILD_OBJECT_HP_RATE", "Structure health", "Building & Decay", "server", "number", "1.0", 0.1, 5),
+    SettingSpec("BUILD_OBJECT_DAMAGE_RATE", "Structure damage received", "Building & Decay", "server", "number", "1.0", 0.1, 5),
+    SettingSpec("BUILD_OBJECT_DETERIORATION_DAMAGE_RATE", "Structure deterioration", "Building & Decay", "server", "number", "1.0", 0, 5),
     SettingSpec("PALWORLD_IDLE_SHUTDOWN_ENABLED", "Idle shutdown enabled", "Caretaker", "server", "boolean", "true"),
     SettingSpec("PALWORLD_IDLE_TIMEOUT_MINUTES", "Idle shutdown timeout (minutes)", "Caretaker", "server", "integer", "10", 1, 1440),
     SettingSpec("BACKUP_RETENTION_COUNT", "Backup retention count", "Caretaker", "caretaker", "integer", "14", 1, 1000),
@@ -99,6 +146,10 @@ def _string(value: object, spec: SettingSpec) -> str:
         raise ConfigError(f"{spec.key} contains a forbidden control character")
     if len(value) > 256:
         raise ConfigError(f"{spec.key} must be at most 256 characters")
+    # A final backslash would escape the closing quote when this value is
+    # rendered into Palworld's quoted INI tuple values.
+    if value.endswith("\\"):
+        raise ConfigError(f"{spec.key} must not end with a backslash")
     # These values are embedded in PalWorld's comma-delimited OptionSettings
     # tuple by render-settings.sh.  Keep this schema at the same boundary so a
     # browser save cannot publish a value which the renderer must reject.
@@ -175,7 +226,10 @@ def validate_edit(values: Mapping[str, object], current: Mapping[str, str]) -> d
 
 
 def categories() -> tuple[tuple[str, tuple[SettingSpec, ...]], ...]:
-    names = ("General", "Multipliers", "Pal Dynamics", "Player & Guild", "Drops & Spawns", "Caretaker")
+    names = (
+        "General", "Multipliers", "Survival & Penalties", "Stamina & Health",
+        "Building & Decay", "Pal Dynamics", "Player & Guild", "Drops & Spawns", "Caretaker",
+    )
     return tuple((name, tuple(spec for spec in _SPECS if spec.category == name)) for name in names)
 
 
@@ -190,7 +244,17 @@ def world_settings_from(values: Mapping[str, str]) -> WorldSettings:
         float(normalized["PAL_DAMAGE_RATE_DEFENSE"]), float(normalized["PLAYER_DAMAGE_RATE_ATTACK"]),
         float(normalized["PLAYER_DAMAGE_RATE_DEFENSE"]), int(normalized["GUILD_PLAYER_MAX_NUM"]),
         int(normalized["BASE_CAMP_MAX_NUM_IN_GUILD"]), float(normalized["PAL_SPAWN_NUM_RATE"]),
-        int(normalized["DROP_ITEM_MAX_NUM"]), float(normalized["PAL_EGG_DEFAULT_HATCHING_TIME"]),
+        int(normalized["DROP_ITEM_MAX_NUM"]), float(normalized["DROP_ITEM_ALIVE_MAX_HOURS"]),
+        float(normalized["PAL_EGG_DEFAULT_HATCHING_TIME"]), normalized["DEATH_PENALTY"],
+        float(normalized["PAL_STAMINA_DECREACE_RATE"]), float(normalized["PLAYER_STAMINA_DECREACE_RATE"]),
+        float(normalized["PAL_AUTO_HP_REGENE_RATE"]), float(normalized["PLAYER_AUTO_HP_REGENE_RATE"]),
+        float(normalized["PAL_AUTO_HP_REGENE_RATE_IN_SLEEP"]), float(normalized["PLAYER_AUTO_HP_REGENE_RATE_IN_SLEEP"]),
+        float(normalized["PAL_STOMACH_DECREACE_RATE"]), float(normalized["PLAYER_STOMACH_DECREACE_RATE"]),
+        float(normalized["BUILD_OBJECT_HP_RATE"]), float(normalized["BUILD_OBJECT_DAMAGE_RATE"]),
+        float(normalized["BUILD_OBJECT_DETERIORATION_DAMAGE_RATE"]), int(normalized["BASE_CAMP_WORKER_MAX_NUM"]),
+        float(normalized["WORK_SPEED_RATE"]), float(normalized["ITEM_WEIGHT_RATE"]),
+        float(normalized["EQUIPMENT_DURABILITY_DAMAGE_RATE"]),
+        normalized["AUTO_RESET_WORKER_PAL_WHEN_SERVER_RESTART"] == "true",
     )
 
 

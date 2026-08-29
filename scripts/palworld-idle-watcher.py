@@ -61,7 +61,7 @@ def main() -> int:
     config = load_runtime_config(CONFIG)
     enabled = env_bool(config, "PALWORLD_IDLE_SHUTDOWN_ENABLED", True)
     dry_run = env_bool(config, "PALWORLD_IDLE_WATCHER_DRY_RUN", False)
-    timeout = env_int(config, "PALWORLD_IDLE_TIMEOUT_MINUTES", 10, 1, 10080) * 60
+    timeout = env_int(config, "PALWORLD_IDLE_TIMEOUT_MINUTES", 10, 1, 1440) * 60
     interval = env_int(config, "PALWORLD_PLAYER_CHECK_INTERVAL_SECONDS", 60, 5, 3600)
     grace = env_int(config, "PALWORLD_STARTUP_GRACE_SECONDS", 600, 0, 86400)
     shutdown_wait = env_int(config, "PALWORLD_SHUTDOWN_WAIT_SECONDS", 30, 1, 300)

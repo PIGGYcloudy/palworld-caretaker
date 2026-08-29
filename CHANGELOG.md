@@ -2,9 +2,28 @@
 
 This project follows [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## [0.6.0] - 2026-08-29
 
-- 尚無變更。
+### 40 typed world/event settings
+
+- Web 設定編輯器的 schema 擴充並整理為共 40 個受型別、數值範圍與選項驗證的
+  typed world/event settings；本次重點分類如下：
+  - `Survival & Penalties`（3）：`ITEM_WEIGHT_RATE`、`EQUIPMENT_DURABILITY_DAMAGE_RATE`、
+    `DEATH_PENALTY`。
+  - `Stamina & Health`（8）：`PAL_STAMINA_DECREACE_RATE`、
+    `PLAYER_STAMINA_DECREACE_RATE`、`PAL_AUTO_HP_REGENE_RATE`、
+    `PLAYER_AUTO_HP_REGENE_RATE`、`PAL_AUTO_HP_REGENE_RATE_IN_SLEEP`、
+    `PLAYER_AUTO_HP_REGENE_RATE_IN_SLEEP`、`PAL_STOMACH_DECREACE_RATE`、
+    `PLAYER_STOMACH_DECREACE_RATE`（涵蓋體力、自然／睡眠生命回復與飢餓消耗）。
+  - `Building & Decay`（3）：`BUILD_OBJECT_HP_RATE`、`BUILD_OBJECT_DAMAGE_RATE`、
+    `BUILD_OBJECT_DETERIORATION_DAMAGE_RATE`。
+  - `Pal Dynamics`（5）：`PAL_DAMAGE_RATE_ATTACK`、`PAL_DAMAGE_RATE_DEFENSE`、
+    `BASE_CAMP_WORKER_MAX_NUM`、`WORK_SPEED_RATE`、
+    `AUTO_RESET_WORKER_PAL_WHEN_SERVER_RESTART`。
+- 其餘 21 個欄位涵蓋 General、Multipliers、Player & Guild、Drops & Spawns 與
+  Caretaker；所有欄位都共用同一份 schema，避免 Web、設定檔與 INI 渲染邊界不一致。
+- `render-settings.sh` 會安全地以正確的數字、布林與選項文字寫入或補上對應的
+  `PalWorldSettings.ini` 欄位；既有設定檔仍由預設值補齊，不需要手動遷移。
 
 ## [0.5.0] - 2026-08-28
 
@@ -348,6 +367,7 @@ Ubuntu 24.04 systemd 部署工具鏈。
   備份/還原失敗邊界、升級、解除安裝及 release 封包潔淨度。
 
 [0.5.0]: https://github.com/PIGGYcloudy/palworld-caretaker/releases/tag/v0.5.0
+[0.6.0]: https://github.com/PIGGYcloudy/palworld-caretaker/releases/tag/v0.6.0
 [0.4.1]: https://github.com/PIGGYcloudy/palworld-caretaker/releases/tag/v0.4.1
 [0.4.0]: https://github.com/PIGGYcloudy/palworld-caretaker/releases/tag/v0.4.0
 [0.3.0]: https://github.com/PIGGYcloudy/palworld-caretaker/releases/tag/v0.3.0

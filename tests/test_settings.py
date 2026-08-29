@@ -19,7 +19,9 @@ from palworld_caretaker.config import CaretakerConfig, DEFAULTS, load_config
 from palworld_caretaker.errors import ConfigError
 from palworld_caretaker.operations import OperationLock
 from palworld_caretaker.service import ServerDiagnostics, ServerStatus, ServiceState
-from palworld_caretaker.settings import caretaker_options_from, world_settings_from
+from palworld_caretaker.settings import (
+    SETTING_SPECS, caretaker_options_from, normalize_value, world_settings_from,
+)
 from palworld_caretaker.settings_store import SettingsPersistenceError, SettingsStore
 from palworld_caretaker.web import WebDependencies, create_server
 
@@ -55,10 +57,21 @@ class SettingsSchemaTests(unittest.TestCase):
 
     def test_typed_world_and_caretaker_dataclasses_normalize_valid_values(self):
         values = next(self.values())
-        values.update({"EXP_RATE": "2.5", "MAX_PLAYERS": "16", "PALWORLD_IDLE_SHUTDOWN_ENABLED": "false"})
+        values.update({
+            "EXP_RATE": "2.5", "MAX_PLAYERS": "16", "PALWORLD_IDLE_SHUTDOWN_ENABLED": "false",
+            "DEATH_PENALTY": "All", "PAL_STOMACH_DECREACE_RATE": "0.5",
+            "PLAYER_STAMINA_DECREACE_RATE": "1.5", "BUILD_OBJECT_DETERIORATION_DAMAGE_RATE": "0",
+            "AUTO_RESET_WORKER_PAL_WHEN_SERVER_RESTART": "true", "DROP_ITEM_ALIVE_MAX_HOURS": "48",
+        })
         config = CaretakerConfig(values)
         world, caretaker = world_settings_from(config.values), caretaker_options_from(config.values)
         self.assertEqual((world.exp_rate, world.max_players), (2.5, 16))
+        self.assertEqual((world.death_penalty, world.pal_hunger_decreace_rate), ("All", 0.5))
+        self.assertEqual(world.pal_stomach_decreace_rate, 0.5)
+        self.assertEqual(world.player_stamina_decreace_rate, 1.5)
+        self.assertEqual(world.build_object_deterioration_damage_rate, 0)
+        self.assertEqual(world.drop_item_alive_max_hours, 48)
+        self.assertTrue(world.auto_reset_worker_pal_when_server_restart)
         self.assertFalse(caretaker.idle_shutdown_enabled)
 
     def test_typed_schema_rejects_ranges_and_wrong_types(self):
@@ -69,6 +82,10 @@ class SettingsSchemaTests(unittest.TestCase):
         values["EXP_RATE"] = "1.0"
         values["PALWORLD_IDLE_SHUTDOWN_ENABLED"] = "yes"
         with self.assertRaisesRegex(ConfigError, "true or false"):
+            CaretakerConfig(values)
+        values["PALWORLD_IDLE_SHUTDOWN_ENABLED"] = "true"
+        values["DEATH_PENALTY"] = "Everything"
+        with self.assertRaisesRegex(ConfigError, "DEATH_PENALTY.*one of"):
             CaretakerConfig(values)
 
     def test_memory_alert_settings_are_schema_validated(self):
@@ -88,6 +105,19 @@ class SettingsSchemaTests(unittest.TestCase):
                     values = next(self.values())
                     values[key] = value
                     CaretakerConfig(values)
+
+    def test_all_boolean_settings_have_boolean_schema_kinds(self):
+        boolean_keys = {key for key, spec in SETTING_SPECS.items() if spec.kind == "boolean"}
+        self.assertEqual(boolean_keys, {
+            "AUTO_RESET_WORKER_PAL_WHEN_SERVER_RESTART",
+            "PALWORLD_IDLE_SHUTDOWN_ENABLED",
+        })
+
+    def test_string_settings_reject_trailing_backslashes(self):
+        for spec in SETTING_SPECS.values():
+            if spec.kind == "string":
+                with self.subTest(key=spec.key), self.assertRaisesRegex(ConfigError, "must not end with a backslash"):
+                    normalize_value("trailing\\", spec)
 
 
 class SettingsStoreTests(unittest.TestCase):
@@ -219,6 +249,11 @@ class SettingsWebTests(unittest.TestCase):
         status, settings = self.request("/api/settings")
         self.assertEqual(status, 200); self.assertTrue(settings["restart_required"])
         self.assertIn("General", [category["name"] for category in settings["categories"]])
+        self.assertTrue({"Survival & Penalties", "Stamina & Health", "Building & Decay"}.issubset(
+            {category["name"] for category in settings["categories"]}))
+        fields = {field["key"]: field for category in settings["categories"] for field in category["fields"]}
+        self.assertEqual(fields["AUTO_RESET_WORKER_PAL_WHEN_SERVER_RESTART"]["kind"], "boolean")
+        self.assertEqual(fields["PALWORLD_IDLE_SHUTDOWN_ENABLED"]["kind"], "boolean")
 
         status, preview = self.request("/api/settings/preview", method="POST", payload={"values": {"MAX_PLAYERS": "12"}})
         self.assertEqual(status, 200); self.assertEqual(preview["changes"][0]["key"], "MAX_PLAYERS")

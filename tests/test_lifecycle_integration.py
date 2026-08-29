@@ -198,7 +198,7 @@ class UpgradeIntegrationTests(unittest.TestCase):
             palserver.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
             palserver.chmod(0o755)
             (settings_dir / "PalWorldSettings.ini").write_text(
-                "[/Script/Pal.PalGameWorldSettings]\n"
+                "[/Script/Pal.PalWorldSettings]\n"
                 "OptionSettings=(ServerPlayerMaxNum=4,PublicPort=8211,"
                 'ServerPassword="old",AdminPassword="old",ServerName="old",'
                 'ServerDescription="old")\n',

@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "scripts"))
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 import palworld_manager as manager
 from palworld_caretaker.config import SETTINGS_BACKUP_DIRECTORY
+from palworld_caretaker.settings import SETTING_SPECS
 from palworld_caretaker.settings_store import SettingsStore
 from palworld_manager import (
     ApiError, ConfigError, DEFAULT_CONFIG, PalworldAPI, config_value, diagnose_deployment,
@@ -542,10 +543,14 @@ class ManagerTests(unittest.TestCase):
                 "MAX_PLAYERS=10\nBASE_CAMP_MAX_NUM_IN_GUILD=10\nSERVER_PASSWORD='server'\nADMIN_PASSWORD='secret'\n"
                 "SERVER_NAME='Name'\nSERVER_DESCRIPTION='Description'\nPUBLIC_PORT=8211\n"
                 "PALWORLD_REST_API_PORT=8212\n"
+                "DEATH_PENALTY=All\nPAL_STAMINA_DECREACE_RATE=0.5\nPLAYER_STOMACH_DECREACE_RATE=0.5\n"
+                "BUILD_OBJECT_DAMAGE_RATE=2.0\nBUILD_OBJECT_DETERIORATION_DAMAGE_RATE=0\n"
+                "DROP_ITEM_ALIVE_MAX_HOURS=24\nAUTO_RESET_WORKER_PAL_WHEN_SERVER_RESTART=true\n"
             )
             settings = settings_dir / "PalWorldSettings.ini"
             settings.write_text(
-                "[/Script/Pal.PalGameWorldSettings]\nOptionSettings=(ServerPlayerMaxNum=4,"
+                "[/Script/Pal.PalGameWorldSettings]\nOptionSettings=(DayTimeSpeedRate=99)\n"
+                "[/Script/Pal.PalWorldSettings]\nOptionSettings=(ServerPlayerMaxNum=4,"
                 "ServerPassword=\"old\",AdminPassword=\"old\",ServerName=\"old\","
                 "ServerDescription=\"old\",PublicPort=8211,bIsUseBackupSaveData=False)\n"
             )
@@ -556,11 +561,73 @@ class ManagerTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             rendered = settings.read_text()
+            self.assertIn("[/Script/Pal.PalGameWorldSettings]\nOptionSettings=(DayTimeSpeedRate=99)", rendered)
             self.assertIn("RESTAPIEnabled=True", rendered)
             self.assertIn("RESTAPIPort=8212", rendered)
             self.assertIn("BaseCampMaxNumInGuild=10", rendered)
             self.assertIn("bIsUseBackupSaveData=True", rendered)
             self.assertIn('ServerName="Name"', rendered)
+            self.assertIn("DeathPenalty=All", rendered)
+            self.assertIn("PalStaminaDecreaceRate=0.5", rendered)
+            self.assertIn("PlayerStomachDecreaceRate=0.5", rendered)
+            self.assertIn("BuildObjectDamageRate=2", rendered)
+            self.assertIn("BuildObjectDeteriorationDamageRate=0", rendered)
+            self.assertIn("DropItemAliveMaxHours=24", rendered)
+            self.assertIn("AutoResetWorkerPalWhenServerRestart=True", rendered)
+            target = rendered.split("[/Script/Pal.PalWorldSettings]\n", 1)[1].splitlines()[0]
+            self.assertTrue(target.startswith("OptionSettings=("))
+            self.assertTrue(target.endswith(")"))
+
+    def test_settings_renderer_rejects_unbalanced_ini_before_replacing_it(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+            base = Path(directory)
+            config_dir = base / "config"
+            settings_dir = base / "server/Pal/Saved/Config/LinuxServer"
+            config_dir.mkdir(parents=True)
+            settings_dir.mkdir(parents=True)
+            (config_dir / "palworld.env").write_text(
+                "SERVER_NAME=Name\nSERVER_DESCRIPTION=Description\nSERVER_PASSWORD=server\nADMIN_PASSWORD=secret\n",
+                encoding="utf-8",
+            )
+            settings = settings_dir / "PalWorldSettings.ini"
+            invalid = "[/Script/Pal.PalWorldSettings]\nOptionSettings=(ServerPlayerMaxNum=4\n"
+            settings.write_text(invalid, encoding="utf-8")
+            script = Path(__file__).parents[1] / "scripts/render-settings.sh"
+            result = subprocess.run(
+                ["/bin/bash", str(script)], env={"PALWORLD_TEST_BASE_DIR": str(base), "PATH": "/usr/bin:/bin"},
+                text=True, capture_output=True, check=False,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("unbalanced parentheses", result.stderr)
+            self.assertEqual(settings.read_text(encoding="utf-8"), invalid)
+
+    def test_bootstrap_validation_matches_all_editable_numeric_bounds(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = dict(DEFAULT_CONFIG)
+            config.update({
+                "PALWORLD_INSTALL_ROOT": str(root / "install"),
+                "PALWORLD_BACKUP_DIR": str(root / "backup"),
+                "PALWORLD_BACKUP_MOUNT": "",
+                "PALWORLD_BACKUP_REQUIRE_MOUNT": "false",
+                "PALWORLD_MANAGER_STATE_DIR": str(root / "state"),
+            })
+            for spec in SETTING_SPECS.values():
+                if spec.kind not in {"integer", "number"}:
+                    continue
+                with self.subTest(key=spec.key, bound="minimum"):
+                    config[spec.key] = str(spec.minimum)
+                    validate_config(config)
+                    config[spec.key] = str(spec.minimum - 1 if spec.kind == "integer" else spec.minimum - 0.1)
+                    with self.assertRaisesRegex(ConfigError, spec.key):
+                        validate_config(config)
+                with self.subTest(key=spec.key, bound="maximum"):
+                    config[spec.key] = str(spec.maximum)
+                    validate_config(config)
+                    config[spec.key] = str(spec.maximum + 1 if spec.kind == "integer" else spec.maximum + 0.1)
+                    with self.assertRaisesRegex(ConfigError, spec.key):
+                        validate_config(config)
+                config[spec.key] = spec.default
 
 
 if __name__ == "__main__":

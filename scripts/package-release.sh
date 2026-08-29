@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-VERSION=0.5.0
+VERSION=0.6.0
 OUTPUT_DIR=dist
 OUTPUT_FILE=
 OUTPUT_DIR_SPECIFIED=0

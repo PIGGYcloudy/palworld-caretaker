@@ -5,7 +5,7 @@ Linux 維運工具，重點是安全關服、可恢復備份、閒置自動關�
 遠端操作與受驗證的 Web 管理面板；不建議直接將管理介面暴露到 Internet。
 
 > [!IMPORTANT]
-> v0.5.0 支援 Ubuntu 24.04 LTS amd64 的原生 systemd 部署，以及 Docker Compose
+> v0.6.0 支援 Ubuntu 24.04 LTS amd64 的原生 systemd 部署，以及 Docker Compose
 > 一鍵容器化開服。Docker 模式以 `0.0.0.0:8765` 發布 Web 面板，並以動態
 > `Origin`／`Host` 同源檢查相容於區網、Hamachi、Tailscale 與 ZeroTier 位址；原生
 > systemd 模式仍維持 loopback-only Web UI。部署設定契約、
@@ -19,6 +19,9 @@ Linux 維運工具，重點是安全關服、可恢復備份、閒置自動關�
 - systemd 管理、崩潰有限重啟與 localhost-only REST API 防護。
 - 安全存檔、正常關服、可設定目的地的版本化備份與互動式還原。
 - 型別驗證的遊戲設定管理器，使用 `config/editable/` 分層設定、差異預覽與原子寫入。
+- v0.6.0 將 Web UI schema 擴充至 40 個 typed world/event settings，涵蓋
+  `Survival & Penalties`、`Stamina & Health`、`Building & Decay` 與 `Pal Dynamics`；
+  完整欄位與範圍見 [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md)。
 - Web UI 與 CLI 的 pre-restore safety backup、manifest 驗證與原子還原流程。
 - 無玩家逾時後再次確認，再執行存檔與正常關服。
 - Discord `/pal` 指令、guild/channel/role permission matrix 與管理員確認；
@@ -54,7 +57,7 @@ Docker Compose 模式改由 `docker/docker-supervisor.py` 作為 PID 1 管理
 PalServer process group、Web UI、可選 Bot、排程備份與 idle watcher；容器內不呼叫
 systemd 或 sudo，前端透過私有 Unix socket 請求受序列化的生命週期操作。
 
-v0.5.0 的共用核心位於 `src/palworld_caretaker/`：`rest.py` 負責
+v0.6.0 的共用核心位於 `src/palworld_caretaker/`：`rest.py` 負責
 loopback-only、禁止 proxy/redirect 的強型別 REST；`backup.py` 負責 mount、
 容量、manifest SHA-256 與原子兩階段 commit；`diagnostics.py` 收集服務、程序、
 REST 與玩家狀態；`operations.py` 提供跨行程 `flock`；`settings.py` 與
@@ -259,7 +262,7 @@ sudo systemctl status palworld-web-ui.service --no-pager
 
 ## Docker / Compose 部署
 
-v0.5.0 提供 [`Dockerfile`](Dockerfile)、[`docker-compose.yml`](docker-compose.yml)、
+v0.6.0 提供 [`Dockerfile`](Dockerfile)、[`docker-compose.yml`](docker-compose.yml)、
 PID 1 [`docker/docker-supervisor.py`](docker/docker-supervisor.py) 與完整的
 [`docs/DOCKER.md`](docs/DOCKER.md)。快速建立一次性設定並啟動：
 
@@ -337,10 +340,10 @@ CLI 還原會在停止服務前再次驗證 snapshot，要求輸入精確確認�
 提交變更前請閱讀 [`CONTRIBUTING.md`](CONTRIBUTING.md)，安全邊界與漏洞回報
 方式見 [`SECURITY.md`](SECURITY.md)。GitHub Actions 會執行 Python 測試、Python
 編譯、Bash 語法檢查、ShellCheck 與 release 產物驗證。從乾淨且已提交的
-v0.5.0 source tree 建立 tarball 與 checksum：
+v0.6.0 source tree 建立 tarball 與 checksum：
 
 ```bash
-scripts/package-release.sh --output dist/palworld-caretaker-v0.5.0.tar.gz
+scripts/package-release.sh --output dist/palworld-caretaker-v0.6.0.tar.gz
 (cd dist && sha256sum --check SHA256SUMS)
 ```
 

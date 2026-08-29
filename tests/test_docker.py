@@ -90,6 +90,14 @@ class DockerDeploymentTests(unittest.TestCase):
         config = (defaults / "caretaker.env").read_text(encoding="utf-8")
         self.assertIn("PALWORLD_SERVER_ROOT=/srv/palworld", config)
         self.assertIn("PALWORLD_BACKUP_DIR=/srv/palworld-backups", config)
+        server = (defaults / "server.env").read_text(encoding="utf-8")
+        for setting in (
+            "DEATH_PENALTY=Item", "PAL_STAMINA_DECREACE_RATE=1.0",
+            "PLAYER_STOMACH_DECREACE_RATE=1.0", "BUILD_OBJECT_DAMAGE_RATE=1.0",
+            "BUILD_OBJECT_DETERIORATION_DAMAGE_RATE=1.0",
+            "AUTO_RESET_WORKER_PAL_WHEN_SERVER_RESTART=false", "DROP_ITEM_ALIVE_MAX_HOURS=1.0",
+        ):
+            self.assertIn(setting, server)
 
     def test_compose_keeps_web_ui_accessible_and_disables_privilege_gain(self):
         for name in ("docker-compose.yml", "docker-compose.example.yml"):

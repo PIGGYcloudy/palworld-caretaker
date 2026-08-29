@@ -9,7 +9,7 @@ from pathlib import Path
 
 
 class ReleasePackageTests(unittest.TestCase):
-    VERSION = "0.5.0"
+    VERSION = "0.6.0"
 
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="palworld-release-")

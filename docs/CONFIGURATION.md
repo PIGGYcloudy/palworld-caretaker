@@ -83,6 +83,23 @@ before saving. Each save creates a private copy of the current `server.env`
 and `caretaker.env` below `PALWORLD_MANAGER_STATE_DIR/settings-backups`, then
 atomically writes only changed fields while holding the global operation lock.
 
+In v0.6.0 the schema contains 40 typed world/event settings. The expanded
+groups are:
+
+- `Survival & Penalties` (3): item weight, equipment durability loss, and death
+  penalty (`None`, `Item`, `ItemAndEquipment`, or `All`).
+- `Stamina & Health` (8): Pal/player stamina depletion, natural and sleeping
+  health regeneration, and Pal/player hunger depletion.
+- `Building & Decay` (3): structure health, structure damage received, and
+  deterioration damage.
+- `Pal Dynamics` (5): Pal damage dealt/received, Pals per base camp, work
+  speed, and reset-working-Pals-on-restart.
+
+The remaining 21 schema fields are in General, Multipliers, Player & Guild,
+Drops & Spawns, and Caretaker. Every field uses the same typed boundary for
+Web JSON, editable environment files, and `PalWorldSettings.ini` rendering;
+the exact environment keys and ranges are defined by the editor schema.
+
 The editor never exposes or edits `secrets.env`. If the game is active it
 marks the change as requiring a restart. The service renders the saved values
 into `PalWorldSettings.ini` in its root-only start pre-step, so a normal safe
