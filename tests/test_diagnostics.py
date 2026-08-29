@@ -1,6 +1,7 @@
 """Pure-Python host diagnostics coverage with synthetic procfs fixtures."""
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -31,6 +32,7 @@ class SystemMetricsTests(unittest.TestCase):
         self.assertEqual(percent, 62.5)
         self.assertEqual(memory_stats_from_meminfo({"MemTotal": 0}), (None, None, None, None))
 
+    @unittest.skipUnless(os.name == "posix", "procfs metrics collection is POSIX-specific")
     def test_collection_reads_procfs_disk_and_palworld_rss_without_shell_tools(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -67,6 +69,7 @@ class SystemMetricsTests(unittest.TestCase):
             self.assertIsNone(metrics.disk_total_bytes)
             self.assertIsNone(metrics.process_rss_bytes)
 
+    @unittest.skipUnless(hasattr(os, "getloadavg"), "os.getloadavg is unavailable on this platform")
     def test_oversized_meminfo_and_loadavg_are_rejected(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -109,6 +112,7 @@ class SystemMetricsTests(unittest.TestCase):
         self.assertEqual(parsed, {"MemTotal": 204800, "MemAvailable": 51200})
         self.assertEqual(memory_stats_from_meminfo({"MemAvailable": 51200}), (None, None, None, None))
 
+    @unittest.skipUnless(os.name == "posix", "procfs metrics collection is POSIX-specific")
     def test_process_match_requires_an_exact_cmdline_binary_name(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -39,8 +39,12 @@ try {
     Move-Item -LiteralPath $staging -Destination $snapshot
     $retention = [int](Get-ConfigValue $config 'BACKUP_RETENTION_COUNT' '14')
     if ($retention -lt 1) { throw 'BACKUP_RETENTION_COUNT must be at least 1.' }
-    @(Get-ChildItem -LiteralPath $paths.Backup -Directory | Where-Object { Test-SnapshotName $_.Name } | Sort-Object Name) |
-        Select-Object -First ([Math]::Max(0, (@(Get-ChildItem -LiteralPath $paths.Backup -Directory | Where-Object { Test-SnapshotName $_.Name }).Count - $retention)) |
+    $snapshots = @(Get-ChildItem -LiteralPath $paths.Backup -Directory |
+        Where-Object { Test-SnapshotName $_.Name } |
+        Sort-Object Name)
+    $excessSnapshots = [Math]::Max(0, $snapshots.Count - $retention)
+    $snapshots |
+        Select-Object -First $excessSnapshots |
         Remove-Item -Recurse -Force
     Write-Output "Created backup version: $(Split-Path $snapshot -Leaf)"
 } finally {

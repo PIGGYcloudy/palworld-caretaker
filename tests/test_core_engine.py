@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -142,6 +143,7 @@ class BackupEngineTests(unittest.TestCase):
             self.manager().preflight_snapshot()
         self.assertFalse(self.backups.exists())
 
+    @unittest.skipUnless(os.name == "posix", "restore tree replacement uses POSIX directory rename semantics")
     def test_restore_makes_safety_copy_then_replaces_both_live_trees(self):
         snapshot = self.manager().create_snapshot().snapshot
         (self.save / "world/world.sav").write_text("changed", encoding="utf-8")
@@ -151,6 +153,7 @@ class BackupEngineTests(unittest.TestCase):
         self.assertEqual((self.save / "world/world.sav").read_text(), "live")
         self.assertEqual((restored.safety_copy / "savegames/world/world.sav").read_text(), "changed")
 
+    @unittest.skipUnless(os.name == "posix", "restore tree replacement uses POSIX directory rename semantics")
     def test_restore_rolls_back_a_partially_published_live_tree(self):
         snapshot = self.manager().create_snapshot().snapshot
         (self.save / "world/world.sav").write_text("changed", encoding="utf-8")
@@ -169,6 +172,7 @@ class BackupEngineTests(unittest.TestCase):
         self.assertEqual((self.save / "world/world.sav").read_text(), "changed")
         self.assertEqual((self.config / "LinuxServer/PalWorldSettings.ini").read_text(), "changed-settings")
 
+    @unittest.skipUnless(os.name == "posix", "restore tree replacement uses POSIX directory rename semantics")
     def test_restore_requires_the_configured_mount_before_creating_a_safety_copy(self):
         mount = self.base / "mount"
         mount.mkdir()
@@ -180,6 +184,7 @@ class BackupEngineTests(unittest.TestCase):
                          mount_checker=lambda _path: False).preflight_restore(snapshot.name)
         self.assertFalse(self.local.exists())
 
+    @unittest.skipUnless(os.name == "posix", "restore tree replacement uses POSIX directory rename semantics")
     def test_restore_preflight_checks_capacity_without_touching_live_data(self):
         snapshot = self.manager().create_snapshot().snapshot
         with self.assertRaisesRegex(SnapshotError, "restore free space"):
@@ -188,6 +193,7 @@ class BackupEngineTests(unittest.TestCase):
         self.assertEqual((self.save / "world/world.sav").read_text(), "live")
         self.assertEqual((self.config / "LinuxServer/PalWorldSettings.ini").read_text(), "settings")
 
+    @unittest.skipUnless(os.name == "posix", "restore tree replacement uses POSIX directory rename semantics")
     def test_restore_rejects_snapshot_manifest_file_list_or_size_tampering(self):
         snapshot = self.manager().create_snapshot().snapshot
         (snapshot / "savegames/world/world.sav").write_text("tampered", encoding="utf-8")
