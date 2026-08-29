@@ -13,7 +13,9 @@ from typing import Mapping
 
 from .config import CaretakerConfig, SETTINGS_BACKUP_DIRECTORY, load_config
 from .errors import ConfigError
+from .paths import native_path
 from .settings import SETTING_SPECS, validate_edit
+from .windows import is_reparse_point
 
 
 _EDITABLE_DIRECTORY = "editable"
@@ -27,6 +29,17 @@ class SettingsPersistenceError(RuntimeError):
 _SAFE_UNQUOTED = re.compile(r"^[A-Za-z0-9._/:@+,-]*$")
 
 
+def _sync_directory(path: Path) -> None:
+    """Persist a directory entry where the host filesystem supports it."""
+    if os.name == "nt":
+        return
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def _regular_file(path: Path, *, allow_missing: bool = False) -> os.stat_result | None:
     try:
         info = path.lstat()
@@ -34,7 +47,8 @@ def _regular_file(path: Path, *, allow_missing: bool = False) -> os.stat_result 
         if allow_missing:
             return None
         raise SettingsPersistenceError(f"configuration file is missing: {path.name}") from None
-    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+    if (stat.S_ISLNK(info.st_mode) or is_reparse_point(info)
+            or not stat.S_ISREG(info.st_mode)):
         raise SettingsPersistenceError(f"configuration file is unsafe: {path.name}")
     return info
 
@@ -44,7 +58,8 @@ def _safe_directory(path: Path, *, message: str) -> os.stat_result:
         info = path.lstat()
     except FileNotFoundError:
         raise SettingsPersistenceError(message) from None
-    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+    if (stat.S_ISLNK(info.st_mode) or is_reparse_point(info)
+            or not stat.S_ISDIR(info.st_mode)):
         raise SettingsPersistenceError(message)
     return info
 
@@ -81,24 +96,21 @@ def _atomic_write(path: Path, payload: bytes, mode: int, uid: int, gid: int) -> 
     """Durably replace a previously safety-checked regular config file."""
     _safe_directory(path.parent, message="configuration directory is unsafe")
     existing = _regular_file(path, allow_missing=True)
-    if existing is not None and (existing.st_uid != uid or existing.st_gid != gid):
+    if os.name != "nt" and existing is not None and (existing.st_uid != uid or existing.st_gid != gid):
         raise SettingsPersistenceError(f"configuration file ownership is unsafe: {path.name}")
     descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     temporary = Path(temporary_name)
     try:
-        os.fchmod(descriptor, mode)
-        os.fchown(descriptor, uid, gid)
+        if os.name != "nt":
+            os.fchmod(descriptor, mode)
+            os.fchown(descriptor, uid, gid)
         with os.fdopen(descriptor, "wb") as output:
             descriptor = -1
             output.write(payload)
             output.flush()
             os.fsync(output.fileno())
         os.replace(temporary, path)
-        directory = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        _sync_directory(path.parent)
     except OSError as exc:
         raise SettingsPersistenceError("configuration could not be written safely") from exc
     finally:
@@ -114,8 +126,8 @@ class SettingsStore:
     """Preview and commit editable fields from a known layered config root."""
 
     def __init__(self, directory: str | Path, state_root: str | Path):
-        self.directory = Path(directory)
-        self.state_root = Path(state_root)
+        self.directory = native_path(directory)
+        self.state_root = native_path(state_root)
         self.backup_root = self.state_root / SETTINGS_BACKUP_DIRECTORY
 
     def current(self) -> CaretakerConfig:
@@ -149,11 +161,7 @@ class SettingsStore:
         if root.exists() and (root.is_symlink() or not root.is_dir()):
             raise SettingsPersistenceError("settings backup directory is unsafe")
         root.mkdir(mode=0o700, exist_ok=True)
-        directory = os.open(self.state_root, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        _sync_directory(self.state_root)
         _safe_directory(root, message="settings backup directory is unsafe")
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
         destination = root / f"settings-{stamp}-{secrets.token_hex(4)}"
@@ -161,11 +169,7 @@ class SettingsStore:
         try:
             # The timestamped directory name is the backup commit record.
             # Persist its parent entry before publishing configuration files.
-            directory = os.open(root, os.O_RDONLY)
-            try:
-                os.fsync(directory)
-            finally:
-                os.close(directory)
+            _sync_directory(root)
             for path, content in originals.items():
                 if content is not None:
                     target = destination / path.name
@@ -174,11 +178,7 @@ class SettingsStore:
                         output.flush()
                         os.fsync(output.fileno())
                     target.chmod(0o600)
-            directory = os.open(destination, os.O_RDONLY)
-            try:
-                os.fsync(directory)
-            finally:
-                os.close(directory)
+            _sync_directory(destination)
         except OSError as exc:
             shutil.rmtree(destination, ignore_errors=True)
             raise SettingsPersistenceError("configuration backup could not be created") from exc
@@ -199,7 +199,7 @@ class SettingsStore:
         updates: dict[Path, dict[str, str]] = {}
         editable = self._editable_directory()
         editable_info = _safe_directory(editable, message="editable configuration directory is unavailable")
-        if editable_info.st_uid != os.geteuid() or editable_info.st_gid != os.getegid():
+        if os.name != "nt" and (editable_info.st_uid != os.geteuid() or editable_info.st_gid != os.getegid()):
             raise SettingsPersistenceError("editable configuration directory ownership is unsafe")
         for change in diff:
             spec = SETTING_SPECS[change["key"]]
@@ -216,7 +216,7 @@ class SettingsStore:
                 # Editable files must remain owned by the web service account.
                 # A root-owned target here would make the next atomic replace
                 # change ownership unexpectedly and indicates a bad migration.
-                if info.st_uid != os.geteuid() or info.st_gid != os.getegid():
+                if os.name != "nt" and (info.st_uid != os.geteuid() or info.st_gid != os.getegid()):
                     raise SettingsPersistenceError(f"configuration file ownership is unsafe: {path.name}")
                 originals[path] = path.read_bytes()
                 modes[path] = 0o640
@@ -224,7 +224,7 @@ class SettingsStore:
             else:
                 originals[path] = None
                 modes[path] = 0o640
-                owners[path] = (os.geteuid(), os.getegid())
+                owners[path] = (os.geteuid(), os.getegid()) if os.name != "nt" else (0, 0)
         backup = self._backup(originals)
         attempted: list[Path] = []
         try:
@@ -247,11 +247,7 @@ class SettingsStore:
                     if original is None:
                         if _regular_file(path, allow_missing=True) is not None:
                             path.unlink()
-                            directory = os.open(path.parent, os.O_RDONLY)
-                            try:
-                                os.fsync(directory)
-                            finally:
-                                os.close(directory)
+                            _sync_directory(path.parent)
                     else:
                         uid, gid = owners[path]
                         _atomic_write(path, original, modes[path], uid, gid)

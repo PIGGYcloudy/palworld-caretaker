@@ -1,5 +1,8 @@
 import os
-import pwd
+try:
+    import pwd
+except ImportError:
+    pwd = None
 import shutil
 import subprocess
 import tempfile
@@ -7,6 +10,7 @@ import unittest
 from pathlib import Path
 
 
+@unittest.skipUnless(os.name == "posix", "Bash/systemd lifecycle integration is POSIX-only")
 class UninstallIntegrationTests(unittest.TestCase):
     """Run all destructive tiers against an isolated deployment tree."""
 
@@ -136,6 +140,7 @@ class UninstallIntegrationTests(unittest.TestCase):
         self._assert_backups_preserved()
 
 
+@unittest.skipUnless(os.name == "posix", "Bash/systemd lifecycle integration is POSIX-only")
 class UpgradeIntegrationTests(unittest.TestCase):
     def test_upgrade_renders_custom_paths_and_preserves_layered_configuration(self):
         with tempfile.TemporaryDirectory(prefix="palworld-upgrade-") as directory:

@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: palworld-caretaker:0.6.0
+    image: palworld-caretaker:0.7.0
     container_name: palworld-caretaker
     restart: unless-stopped
     security_opt:

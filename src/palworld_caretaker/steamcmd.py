@@ -7,6 +7,7 @@ import subprocess
 from typing import Callable, Sequence
 
 from .errors import SteamCMDError
+from .paths import has_parent_reference, native_path
 
 PALWORLD_APP_ID = 2394010
 
@@ -22,8 +23,8 @@ class SteamCMD:
         self.executable, self.runner, self.app_id = str(executable), runner, app_id
 
     def update(self, install_dir: str | Path, *, validate: bool = True, username: str = "anonymous", password: str | None = None) -> SteamCMDResult:
-        root = Path(install_dir)
-        if not root.is_absolute() or ".." in root.parts:
+        root = native_path(install_dir)
+        if not root.is_absolute() or has_parent_reference(install_dir):
             raise SteamCMDError("SteamCMD install directory must be an absolute safe path")
         login: Sequence[str] = ("+login", username) if password is None else ("+login", username, password)
         command = (self.executable, *login, "+force_install_dir", str(root), "+app_update", str(self.app_id), *( ("validate",) if validate else ()), "+quit")

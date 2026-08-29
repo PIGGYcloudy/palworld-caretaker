@@ -120,6 +120,7 @@ class SettingsSchemaTests(unittest.TestCase):
                     normalize_value("trailing\\", spec)
 
 
+@unittest.skipUnless(os.name == "posix", "ownership-hardening assertions are POSIX-specific")
 class SettingsStoreTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
@@ -206,6 +207,7 @@ class SettingsStoreTests(unittest.TestCase):
                 self.store.commit({"MAX_PLAYERS": "12"})
 
 
+@unittest.skipUnless(os.name == "posix", "web operation-lock tests are POSIX-specific")
 class SettingsWebTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()

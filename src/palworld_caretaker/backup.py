@@ -16,6 +16,7 @@ import shutil
 from typing import Callable
 
 from .errors import SnapshotError
+from .paths import has_parent_reference, native_path
 
 
 _SNAPSHOT_NAME = re.compile(r"^palworld-\d{8}-\d{6}$")
@@ -53,12 +54,12 @@ class BackupManager:
         disk_free: Callable[[Path], int] | None = None,
         clock: Callable[[], datetime] | None = None,
     ):
-        self.save_root = Path(save_root)
-        self.config_root = Path(config_root)
-        self.backup_root = Path(backup_root)
-        self.local_backup_root = Path(local_backup_root)
+        self.save_root = native_path(save_root)
+        self.config_root = native_path(config_root)
+        self.backup_root = native_path(backup_root)
+        self.local_backup_root = native_path(local_backup_root)
         self.retention_count = retention_count
-        self.backup_mount = Path(backup_mount) if backup_mount else None
+        self.backup_mount = native_path(backup_mount) if backup_mount else None
         self.require_mount = require_mount
         self.mount_checker = mount_checker
         self.disk_free = disk_free or (lambda path: shutil.disk_usage(path).free)
@@ -67,7 +68,7 @@ class BackupManager:
             raise SnapshotError("retention_count must be at least 1")
         for name, path in (("save_root", self.save_root), ("config_root", self.config_root),
                            ("backup_root", self.backup_root), ("local_backup_root", self.local_backup_root)):
-            if not path.is_absolute() or ".." in path.parts:
+            if not path.is_absolute() or has_parent_reference(path):
                 raise SnapshotError(f"{name} must be an absolute safe path")
 
     @staticmethod
@@ -128,14 +129,20 @@ class BackupManager:
                     os.fsync(descriptor)
                 finally:
                     os.close(descriptor)
-            descriptor = os.open(current, os.O_RDONLY)
-            try:
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
+            # Windows cannot open directories with os.open().  File fsyncs
+            # above still make copied content durable; NTFS publishes rename
+            # atomically on a volume.
+            if os.name != "nt":
+                descriptor = os.open(current, os.O_RDONLY)
+                try:
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
 
     @staticmethod
     def _fsync_directory(path: Path) -> None:
+        if os.name == "nt":
+            return
         descriptor = os.open(path, os.O_RDONLY)
         try:
             os.fsync(descriptor)

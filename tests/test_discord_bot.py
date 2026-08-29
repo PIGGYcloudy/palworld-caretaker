@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -70,6 +71,7 @@ class _Lifecycle:
     def status(self): return ServerStatus(ServiceState.ACTIVE, True, True, ())
 
 
+@unittest.skipUnless(os.name == "posix", "Discord service adapter tests use POSIX deployment paths")
 class DiscordBotTests(unittest.IsolatedAsyncioTestCase):
     def make_group(self):
         values = {

@@ -1,12 +1,13 @@
 # Palworld Server Caretaker
 
 以 SteamCMD、systemd 與官方 REST API 管理 Palworld Dedicated Server 的
-Linux 維運工具，重點是安全關服、可恢復備份、閒置自動關服、Discord
+跨平台維運工具，重點是安全關服、可恢復備份、閒置自動關服、Discord
 遠端操作與受驗證的 Web 管理面板；不建議直接將管理介面暴露到 Internet。
 
 > [!IMPORTANT]
-> v0.6.0 支援 Ubuntu 24.04 LTS amd64 的原生 systemd 部署，以及 Docker Compose
-> 一鍵容器化開服。Docker 模式以 `0.0.0.0:8765` 發布 Web 面板，並以動態
+> v0.7.0 支援 Ubuntu 24.04 LTS amd64 的原生 systemd 部署、Docker Compose
+> 一鍵容器化開服，以及 Windows 原生 PowerShell 維運腳本。Docker 模式以
+> `0.0.0.0:8765` 發布 Web 面板，並以動態
 > `Origin`／`Host` 同源檢查相容於區網、Hamachi、Tailscale 與 ZeroTier 位址；原生
 > systemd 模式仍維持 loopback-only Web UI。部署設定契約、
 > 安裝器、備份/還原/更新腳本與 systemd unit 支援任意安全的絕對安裝與備份
@@ -19,9 +20,12 @@ Linux 維運工具，重點是安全關服、可恢復備份、閒置自動關�
 - systemd 管理、崩潰有限重啟與 localhost-only REST API 防護。
 - 安全存檔、正常關服、可設定目的地的版本化備份與互動式還原。
 - 型別驗證的遊戲設定管理器，使用 `config/editable/` 分層設定、差異預覽與原子寫入。
-- v0.6.0 將 Web UI schema 擴充至 40 個 typed world/event settings，涵蓋
+- v0.7.0 將 Web UI schema 擴充至 40 個 typed world/event settings，涵蓋
   `Survival & Penalties`、`Stamina & Health`、`Building & Decay` 與 `Pal Dynamics`；
   完整欄位與範圍見 [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md)。
+- Windows 原生維運腳本：[`scripts/windows/`](scripts/windows/) 提供備份、還原、
+  服務啟停與 `PalWorldSettings.ini` 渲染；快速流程見
+  [`docs/WINDOWS.md`](docs/WINDOWS.md)。
 - Web UI 與 CLI 的 pre-restore safety backup、manifest 驗證與原子還原流程。
 - 無玩家逾時後再次確認，再執行存檔與正常關服。
 - Discord `/pal` 指令、guild/channel/role permission matrix 與管理員確認；
@@ -57,7 +61,7 @@ Docker Compose 模式改由 `docker/docker-supervisor.py` 作為 PID 1 管理
 PalServer process group、Web UI、可選 Bot、排程備份與 idle watcher；容器內不呼叫
 systemd 或 sudo，前端透過私有 Unix socket 請求受序列化的生命週期操作。
 
-v0.6.0 的共用核心位於 `src/palworld_caretaker/`：`rest.py` 負責
+v0.7.0 的共用核心位於 `src/palworld_caretaker/`：`rest.py` 負責
 loopback-only、禁止 proxy/redirect 的強型別 REST；`backup.py` 負責 mount、
 容量、manifest SHA-256 與原子兩階段 commit；`diagnostics.py` 收集服務、程序、
 REST 與玩家狀態；`operations.py` 提供跨行程 `flock`；`settings.py` 與
@@ -65,6 +69,11 @@ REST 與玩家狀態；`operations.py` 提供跨行程 `flock`；`settings.py` �
 strict JSON 操作紀錄；`web.py` 提供零第三方依賴的本機面板、維護輪詢與還原入口。
 `service.py`、`config.py` 與 `steamcmd.py` 提供生命週期、設定與外部 adapter 邊界。
 Bash、systemd、Discord 與 Web 入口只組合這些契約，不在各入口重複安全決策。
+
+Windows 原生入口位於 `scripts/windows/`，使用相同的 UTF-8 `KEY=VALUE` 設定層與
+跨程序 operation lock；Windows lock 的預設位置為
+`C:\\ProgramData\\Palworld\\operation.lock`。PowerShell 入口會拒絕相對路徑、
+`..`、root、重疊的備份樹，以及 symlink、junction 或其他 reparse point。
 
 ## 安全與設定
 
@@ -156,6 +165,43 @@ maintenance 或服務狀態時一律拒絕。備份若伺服器運行，必須�
 `/var/lib/palworld-manager/audit.log`。每行都是禁止 NaN/Infinity 的 strict JSON，
 寫入與 Web 顯示前都會遮蔽 token、password、secret、key、auth 與 cookie 等
 credential；檔案預設為 manager 擁有的 `0640` regular file。
+
+## Windows 原生 PowerShell 維運（v0.7.0）
+
+Windows 主機可直接使用 `scripts/windows/` 下的 PowerShell 入口，不需要 systemd。
+請使用 PowerShell 7（`pwsh`），並先將同一套 UTF-8 `KEY=VALUE` 設定檔放在部署
+設定目錄；至少指定安裝根目錄、獨立於安裝根目錄的備份目錄，以及 Windows 上的
+`PALWORLD_BACKUP_REQUIRE_MOUNT=false`：
+
+```env
+PALWORLD_INSTALL_ROOT=C:\Palworld
+PALWORLD_SERVER_ROOT=C:\Palworld\server
+PALWORLD_BACKUP_DIR=D:\PalworldBackups
+PALWORLD_BACKUP_MOUNT=
+PALWORLD_BACKUP_REQUIRE_MOUNT=false
+PALWORLD_MANAGER_STATE_DIR=C:\ProgramData\Palworld\state
+```
+
+從專案根目錄執行快速操作：
+
+```powershell
+$ConfigDir = 'C:\Palworld\config'
+pwsh -NoProfile -File .\scripts\windows\palworld-service.ps1 -Action status
+pwsh -NoProfile -File .\scripts\windows\backup-palworld.ps1 -ConfigDir $ConfigDir
+pwsh -NoProfile -File .\scripts\windows\restore-palworld.ps1 -ConfigDir $ConfigDir -List
+pwsh -NoProfile -File .\scripts\windows\render-settings.ps1 -ConfigDir $ConfigDir
+```
+
+還原時省略 `-Force` 會要求輸入精確的 `RESTORE palworld-YYYYMMDD-HHMMSS` 確認；
+`palworld-service.ps1` 的服務名稱預設為 `PalServer`，可用 `-ServiceName` 覆寫。
+測試或尚未註冊 Windows service 時，備份／還原可使用 `-NoServiceControl`，服務腳本
+則可使用 `-WhatIf` 做不改動的演練。備份、還原與服務操作共用
+`C:\ProgramData\Palworld\operation.lock`，不要刪除、替換或改成 junction/symlink。
+
+Windows 邊界會拒絕相對路徑、`..`、filesystem root、備份與 live tree 重疊，以及
+symlink、junction 或其他 reparse point；還原會先建立毫秒時間戳加 GUID 的 Safety
+Copy，並在 live publish 失敗時自動 rollback。完整設定與安全注意事項見
+[`docs/WINDOWS.md`](docs/WINDOWS.md)。
 
 ## 無人自動關服
 
@@ -262,7 +308,7 @@ sudo systemctl status palworld-web-ui.service --no-pager
 
 ## Docker / Compose 部署
 
-v0.6.0 提供 [`Dockerfile`](Dockerfile)、[`docker-compose.yml`](docker-compose.yml)、
+v0.7.0 提供 [`Dockerfile`](Dockerfile)、[`docker-compose.yml`](docker-compose.yml)、
 PID 1 [`docker/docker-supervisor.py`](docker/docker-supervisor.py) 與完整的
 [`docs/DOCKER.md`](docs/DOCKER.md)。快速建立一次性設定並啟動：
 
@@ -339,11 +385,12 @@ CLI 還原會在停止服務前再次驗證 snapshot，要求輸入精確確認�
 
 提交變更前請閱讀 [`CONTRIBUTING.md`](CONTRIBUTING.md)，安全邊界與漏洞回報
 方式見 [`SECURITY.md`](SECURITY.md)。GitHub Actions 會執行 Python 測試、Python
-編譯、Bash 語法檢查、ShellCheck 與 release 產物驗證。從乾淨且已提交的
-v0.6.0 source tree 建立 tarball 與 checksum：
+編譯、PowerShell parser 檢查、Bash 語法檢查、ShellCheck 與 release 產物驗證，
+並在 Linux 與 `windows-latest` matrix 上執行跨平台驗證。從乾淨且已提交的
+v0.7.0 source tree 建立 tarball 與 checksum：
 
 ```bash
-scripts/package-release.sh --output dist/palworld-caretaker-v0.6.0.tar.gz
+scripts/package-release.sh --output dist/palworld-caretaker-v0.7.0.tar.gz
 (cd dist && sha256sum --check SHA256SUMS)
 ```
 

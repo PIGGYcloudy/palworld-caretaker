@@ -4,12 +4,16 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from .config import ConfigError, load_config
+from .config import DEFAULTS, ConfigError, load_config
+from .paths import native_path
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Palworld Caretaker portable core")
-    parser.add_argument("--config-dir", type=Path, default=Path("/srv/palworld/config"))
+    parser.add_argument(
+        "--config-dir", type=native_path,
+        default=native_path(DEFAULTS["PALWORLD_INSTALL_ROOT"]) / "config",
+    )
     parser.add_argument("--check-config", action="store_true", help="validate configuration without exposing secrets")
     args = parser.parse_args(argv)
     if not args.check_config:

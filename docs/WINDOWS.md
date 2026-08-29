@@ -1,0 +1,77 @@
+# Windows 原生部署與維運
+
+v0.7.0 提供不依賴 systemd 的 Windows 原生 PowerShell 維運入口。下載並解壓
+release archive 後，可從專案根目錄或已部署的 `scripts/windows/` 目錄執行；建議使用
+PowerShell 7（`pwsh`）。這套入口與 Python 核心共用設定格式、備份命名與操作鎖，
+但不會替 Windows 主機自動註冊 PalServer service。
+
+## 準備設定
+
+設定檔是 UTF-8 `KEY=VALUE` 純文字，不會被 shell 執行或展開。沿用 `config/` 下的
+三個 `.env.example` 檔案，將正式檔案放在例如 `C:\Palworld\config`，並調整 Windows
+絕對路徑：
+
+```env
+PALWORLD_INSTALL_ROOT=C:\Palworld
+PALWORLD_SERVER_ROOT=C:\Palworld\server
+PALWORLD_BACKUP_DIR=D:\PalworldBackups
+PALWORLD_BACKUP_MOUNT=
+PALWORLD_BACKUP_REQUIRE_MOUNT=false
+PALWORLD_MANAGER_STATE_DIR=C:\ProgramData\Palworld\state
+```
+
+`PALWORLD_BACKUP_DIR` 必須是安裝根目錄與 server root 之外的獨立目錄。將
+`secrets.env` 與 `caretaker.env`、`server.env` 放在同一個設定目錄，並只授予需要
+執行維運的 Windows 帳號存取權。若路徑包含空白，可用單引號或雙引號包住整個值。
+
+Palworld 的 live tree 預期位於：
+
+```text
+<PALWORLD_SERVER_ROOT>\Pal\Saved\SaveGames
+<PALWORLD_SERVER_ROOT>\Pal\Saved\Config\LinuxServer\PalWorldSettings.ini
+```
+
+## 快速操作
+
+```powershell
+$Repository = 'C:\palworld-caretaker'
+$ConfigDir = 'C:\Palworld\config'
+
+# 查詢既有 Windows service
+pwsh -NoProfile -File "$Repository\scripts\windows\palworld-service.ps1" `
+  -Action status -ServiceName PalServer
+
+# 建立並驗證 snapshot
+pwsh -NoProfile -File "$Repository\scripts\windows\backup-palworld.ps1" `
+  -ConfigDir $ConfigDir
+
+# 列出 snapshot，或依精確名稱互動式還原
+pwsh -NoProfile -File "$Repository\scripts\windows\restore-palworld.ps1" `
+  -ConfigDir $ConfigDir -List
+pwsh -NoProfile -File "$Repository\scripts\windows\restore-palworld.ps1" `
+  -ConfigDir $ConfigDir -Version palworld-YYYYMMDD-HHMMSS
+
+# 將設定渲染至 PalWorldSettings.ini
+pwsh -NoProfile -File "$Repository\scripts\windows\render-settings.ps1" `
+  -ConfigDir $ConfigDir
+```
+
+還原省略 `-Force` 時會要求輸入 `RESTORE palworld-YYYYMMDD-HHMMSS`。在沒有服務
+控制需求的測試環境可對備份／還原傳入 `-NoServiceControl`；
+`palworld-service.ps1 -WhatIf` 可演練 start、stop、restart 而不觸碰 service。
+生產維運應保留預設的 service control，並先確認 PalServer 服務名稱正確。
+
+## 還原與安全邊界
+
+還原先驗證 snapshot manifest 與所有 payload 的 SHA-256，再將資料複製到 staging
+並重新比對檔案大小與 SHA-256；兩階段都通過後才會替換 live SaveGames/Config。
+替換前會建立唯一的 `pre-restore-YYYYMMDD-HHMMSS-fff-GUID` Safety Copy。若 live
+發布失敗，工具會自動從 Safety Copy rollback；即使 rollback 也失敗，Safety Copy
+仍會保留供人工復原。
+
+所有 Windows 路徑都必須是絕對路徑，不得包含 `..`、filesystem root、危險重疊或
+symlink、junction、其他 reparse point。預設 operation lock 位於
+`C:\ProgramData\Palworld\operation.lock`；PowerShell 與 Python 入口共用它，
+不要刪除、替換或改成 junction/symlink。鎖定期間會持有父目錄的 Win32
+No-Delete-Share handle，並以 128-bit `FILE_ID_INFO` 驗證目錄物件身分，避免同名
+目錄替換或換鎖繞過互斥保護。

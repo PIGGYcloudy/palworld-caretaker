@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 
+@unittest.skipUnless(os.name == "posix", "Bash adapter integration is POSIX-only")
 class DiscordConfigureTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="palworld-discord-configure-")

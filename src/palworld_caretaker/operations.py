@@ -11,16 +11,31 @@ from contextlib import AbstractContextManager
 import errno
 import os
 from pathlib import Path
-import pwd
 import stat
+
+try:
+    import pwd
+except ImportError:  # Windows has no POSIX account database.
+    pwd = None  # type: ignore[assignment]
 
 try:  # Linux is a deployment requirement; retaining an explicit failure is safer.
     import fcntl
 except ImportError:  # pragma: no cover - exercised only on unsupported platforms
     fcntl = None  # type: ignore[assignment]
 
+try:  # Windows equivalent of a non-blocking, one-byte advisory lock.
+    import msvcrt
+except ImportError:  # pragma: no cover - non-Windows platforms
+    msvcrt = None  # type: ignore[assignment]
 
-DEFAULT_OPERATION_LOCK = Path("/run/palworld-caretaker/operation.lock")
+from .paths import native_path
+from .windows import assert_regular_non_reparse, open_no_reparse
+
+
+DEFAULT_OPERATION_LOCK = native_path(
+    os.environ.get("ProgramData", r"C:\ProgramData") + r"\Palworld\operation.lock"
+    if os.name == "nt" else "/run/palworld-caretaker/operation.lock"
+)
 
 
 class OperationLockBusy(RuntimeError):
@@ -33,7 +48,7 @@ class OperationLockUnsafe(RuntimeError):
 
 def operation_lock_path() -> Path:
     """Return the deployment lock path, with a test/admin override."""
-    return Path(os.environ.get("PALWORLD_OPERATION_LOCK_FILE", DEFAULT_OPERATION_LOCK))
+    return native_path(os.environ.get("PALWORLD_OPERATION_LOCK_FILE", DEFAULT_OPERATION_LOCK))
 
 
 class OperationLock(AbstractContextManager["OperationLock"]):
@@ -53,17 +68,23 @@ class OperationLock(AbstractContextManager["OperationLock"]):
         expected_uid: int | None = None,
         expected_gid: int | None = None,
     ):
-        self.path = Path(path) if path is not None else operation_lock_path()
+        self.path = native_path(path) if path is not None else operation_lock_path()
         self.manager_user = manager_user or os.environ.get(
             "PALWORLD_MANAGER_USER", "palworld-manager"
         )
         self.expected_uid = expected_uid
         self.expected_gid = expected_gid
         self._fd: int | None = None
+        # ``close`` is also used on every failed acquisition path.  Keep the
+        # descriptor lifetime separate from lock ownership so cleanup cannot
+        # turn the original busy/unsafe error into an unlock error.
+        self._locked = False
 
     def _expected_owner(self) -> tuple[int, int]:
         if self.expected_uid is not None and self.expected_gid is not None:
             return self.expected_uid, self.expected_gid
+        if pwd is None:
+            raise OperationLockUnsafe("POSIX operation-lock ownership is unavailable on this platform")
         try:
             manager_gid = pwd.getpwnam(self.manager_user).pw_gid
         except KeyError as exc:
@@ -85,6 +106,30 @@ class OperationLock(AbstractContextManager["OperationLock"]):
             raise OperationLockUnsafe("operation lock permissions must be exactly 0640")
 
     def __enter__(self) -> "OperationLock":
+        if os.name == "nt":
+            if msvcrt is None:
+                raise RuntimeError("operation locking is unavailable on this platform")
+            try:
+                # Do not preflight with Path.is_file(): an attacker could swap
+                # the pathname for a junction after that check.  The opened
+                # handle itself is opened with OPEN_REPARSE_POINT and checked.
+                self._fd = open_no_reparse(self.path, os.O_RDWR)
+                try:
+                    assert_regular_non_reparse(
+                        os.fstat(self._fd), label="operation lock"
+                    )
+                except OSError as exc:
+                    raise OperationLockUnsafe(str(exc)) from exc
+                os.lseek(self._fd, 0, os.SEEK_SET)
+                msvcrt.locking(self._fd, msvcrt.LK_NBLCK, 1)
+                self._locked = True
+            except OperationLockUnsafe:
+                self.close()
+                raise
+            except OSError as exc:
+                self.close()
+                raise OperationLockBusy("another Palworld operation is active") from exc
+            return self
         if fcntl is None:
             raise RuntimeError("operation locking is unavailable on this platform")
         try:
@@ -94,6 +139,7 @@ class OperationLock(AbstractContextManager["OperationLock"]):
             self._fd = os.open(self.path, os.O_RDONLY | nofollow)
             self._validate_open_inode(self._fd)
             fcntl.flock(self._fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self._locked = True
         except OperationLockUnsafe:
             self.close()
             raise
@@ -109,11 +155,15 @@ class OperationLock(AbstractContextManager["OperationLock"]):
     def close(self) -> None:
         if self._fd is not None:
             try:
-                if fcntl is not None:
+                if self._locked and os.name == "nt" and msvcrt is not None:
+                    os.lseek(self._fd, 0, os.SEEK_SET)
+                    msvcrt.locking(self._fd, msvcrt.LK_UNLCK, 1)
+                elif self._locked and fcntl is not None:
                     fcntl.flock(self._fd, fcntl.LOCK_UN)
             finally:
                 os.close(self._fd)
                 self._fd = None
+                self._locked = False
 
     def __exit__(self, *_args: object) -> None:
         self.close()

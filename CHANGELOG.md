@@ -2,6 +2,28 @@
 
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.7.0] - 2026-08-29
+
+### Windows 原生支援與維運工具
+
+- 新增 Windows 原生 PowerShell 維運腳本套件：`backup-palworld.ps1`、
+  `restore-palworld.ps1`、`palworld-service.ps1` 與 `render-settings.ps1`；
+  與既有 Python 核心共用設定、操作鎖、備份與還原安全契約。
+- 以 Win32 128-bit `FILE_ID_INFO` 驗證目錄物件身分，並在操作鎖父目錄持有
+  No-Delete-Share handle，形成深度防換鎖／目錄替換安全機制。
+
+### 還原完整性與自動復原
+
+- 還原流程執行兩階段 SHA-256 完整性比對：先驗證 snapshot manifest，再驗證
+  複製到 staging 的檔案與原 manifest 一致後才發布到 live tree。
+- 還原前建立毫秒時間戳加 GUID 的唯一 Safety Copy；live tree 發布失敗時自動
+  rollback，並保留 safety copy 供人工復原。
+
+### GitHub Actions CI Matrix
+
+- GitHub Actions CI Matrix 升級為 Linux 與 `windows-latest` 雙平台自動化驗證，
+  涵蓋 Python 編譯、PowerShell parser 檢查，以及完整 unit/integration tests。
+
 ## [0.6.0] - 2026-08-29
 
 ### 40 typed world/event settings
@@ -367,6 +389,7 @@ Ubuntu 24.04 systemd 部署工具鏈。
   備份/還原失敗邊界、升級、解除安裝及 release 封包潔淨度。
 
 [0.5.0]: https://github.com/PIGGYcloudy/palworld-caretaker/releases/tag/v0.5.0
+[0.7.0]: https://github.com/PIGGYcloudy/palworld-caretaker/releases/tag/v0.7.0
 [0.6.0]: https://github.com/PIGGYcloudy/palworld-caretaker/releases/tag/v0.6.0
 [0.4.1]: https://github.com/PIGGYcloudy/palworld-caretaker/releases/tag/v0.4.1
 [0.4.0]: https://github.com/PIGGYcloudy/palworld-caretaker/releases/tag/v0.4.0

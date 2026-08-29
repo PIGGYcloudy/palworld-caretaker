@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 from palworld_caretaker.audit import AuditLog, sanitize
 
 
+@unittest.skipUnless(os.name == "posix", "audit ownership assertions are POSIX-specific")
 class AuditLogTests(unittest.TestCase):
     def test_records_structured_manager_owned_secret_free_entries(self):
         with tempfile.TemporaryDirectory() as directory:

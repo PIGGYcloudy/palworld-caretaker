@@ -1,5 +1,6 @@
 import base64
 import json
+import os
 import sys
 import tempfile
 import threading
@@ -55,6 +56,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
 
+@unittest.skipUnless(os.name == "posix", "legacy manager adapter tests are POSIX-specific")
 class ManagerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

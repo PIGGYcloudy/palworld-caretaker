@@ -9,6 +9,9 @@ import re
 import stat
 from typing import Any, Mapping
 
+from .paths import native_path
+from .windows import assert_regular_non_reparse, is_reparse_point, open_no_reparse
+
 
 # Treat any key containing one of these credential-bearing fragments as
 # sensitive.  This intentionally implements wildcard matching such as
@@ -55,18 +58,31 @@ class AuditLog:
 
     def __init__(self, state_root: str | Path, *, secrets: tuple[str, ...] = (),
                  expected_uid: int | None = None, expected_gid: int | None = None):
-        self.state_root = Path(state_root)
+        self.state_root = native_path(state_root)
         self.path = self.state_root / "audit.log"
         self.secrets = tuple(item for item in secrets if item)
-        self.expected_uid = os.getuid() if expected_uid is None else expected_uid
-        self.expected_gid = os.getgid() if expected_gid is None else expected_gid
+        self.expected_uid = (os.getuid() if os.name != "nt" else None) if expected_uid is None else expected_uid
+        self.expected_gid = (os.getgid() if os.name != "nt" else None) if expected_gid is None else expected_gid
 
     def _open_append(self) -> int:
         if not self.state_root.exists():
             self.state_root.mkdir(mode=0o750, parents=True, exist_ok=True)
         state_info = self.state_root.lstat()
-        if stat.S_ISLNK(state_info.st_mode) or not stat.S_ISDIR(state_info.st_mode):
+        if (stat.S_ISLNK(state_info.st_mode) or is_reparse_point(state_info)
+                or not stat.S_ISDIR(state_info.st_mode)):
             raise OSError("audit state directory is unsafe")
+        if os.name == "nt":
+            # OPEN_REPARSE_POINT checks the object addressed by the opened
+            # handle, rather than a pathname which could be swapped meanwhile.
+            descriptor = open_no_reparse(
+                self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o640
+            )
+            try:
+                assert_regular_non_reparse(os.fstat(descriptor), label="audit log")
+            except OSError:
+                os.close(descriptor)
+                raise OSError("audit log owner or file type is unsafe")
+            return descriptor
         if not hasattr(os, "O_NOFOLLOW"):
             raise OSError("audit logging requires O_NOFOLLOW support")
         directory = os.open(
@@ -122,11 +138,13 @@ class AuditLog:
             flags = os.O_RDONLY
             if hasattr(os, "O_NOFOLLOW"):
                 flags |= os.O_NOFOLLOW
-            descriptor = os.open(self.path, flags)
+            descriptor = open_no_reparse(self.path, flags)
             try:
                 info = os.fstat(descriptor)
-                if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != self.expected_uid or
-                        info.st_gid != self.expected_gid or stat.S_IMODE(info.st_mode) != 0o640):
+                owner_unsafe = os.name != "nt" and (info.st_uid != self.expected_uid or info.st_gid != self.expected_gid)
+                mode_unsafe = os.name != "nt" and stat.S_IMODE(info.st_mode) != 0o640
+                if (is_reparse_point(info) or not stat.S_ISREG(info.st_mode)
+                        or info.st_nlink != 1 or owner_unsafe or mode_unsafe):
                     raise OSError("audit log is unsafe")
                 # A bounded reverse window is sufficient: every valid record has
                 # a hard line-size limit, and it avoids loading an unbounded log.

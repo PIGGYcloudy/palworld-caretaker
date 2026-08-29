@@ -1,6 +1,6 @@
 # Docker / Compose
 
-Palworld Caretaker v0.6.0 runs the dedicated server, caretaker Web UI, optional
+Palworld Caretaker v0.7.0 runs the dedicated server, caretaker Web UI, optional
 Discord bot, SteamCMD update, and graceful shutdown in one container. Docker
 is not a systemd deployment: the container supervisor owns its child
 processes and sends the Palworld REST `save` and `shutdown` commands on

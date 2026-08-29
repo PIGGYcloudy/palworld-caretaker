@@ -9,7 +9,10 @@ from dataclasses import asdict, dataclass
 import json
 import math
 import os
-import pwd
+try:
+    import pwd
+except ImportError:  # Windows does not provide the POSIX account database.
+    pwd = None
 import re
 import shutil
 import stat

@@ -18,6 +18,7 @@ from palworld_caretaker.web import WebDependencies
 from palworld_caretaker.service import ServiceState
 
 
+@unittest.skipUnless(os.name == "posix", "Docker shell adapter tests are POSIX-only")
 class DockerDeploymentTests(unittest.TestCase):
     def setUp(self):
         self.root = PROJECT_ROOT

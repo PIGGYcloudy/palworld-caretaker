@@ -3,7 +3,7 @@
 services:
   palworld-caretaker:
     build: .
-    image: palworld-caretaker:0.6.0
+    image: palworld-caretaker:0.7.0
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true

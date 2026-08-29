@@ -22,6 +22,7 @@ class _RESTHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
 
+@unittest.skipUnless(os.name == "posix", "Bash/systemd adapter integration is POSIX-only")
 class BackupRestoreIntegrationTests(unittest.TestCase):
     """Exercise the shell workflows against isolated files and fake services."""
 

@@ -1,6 +1,6 @@
 # Deployment configuration contract
 
-The v0.4.1 caretaker reads UTF-8 `KEY=VALUE` files as data. It never sources them or
+The v0.7.0 caretaker reads UTF-8 `KEY=VALUE` files as data. It never sources them or
 performs shell expansion. New deployments use these files in increasing
 precedence order:
 
@@ -33,7 +33,7 @@ deleted by the Web UI account.
 `ADMIN_PASSWORD`，因此任何部署預設仍需要認證。建議在多使用者主機設定獨立的
 `PALWORLD_WEB_UI_PASSWORD`。
 
-## v0.4.1 Discord status, alerts, and SaveGames export
+## v0.7.0 Discord status, alerts, and SaveGames export
 
 Discord 權限由四個 numeric ID 設定共同決定：
 `DISCORD_PALWORLD_ALLOWED_GUILD_IDS`、
@@ -83,7 +83,7 @@ before saving. Each save creates a private copy of the current `server.env`
 and `caretaker.env` below `PALWORLD_MANAGER_STATE_DIR/settings-backups`, then
 atomically writes only changed fields while holding the global operation lock.
 
-In v0.6.0 the schema contains 40 typed world/event settings. The expanded
+In v0.7.0 the schema contains 40 typed world/event settings. The expanded
 groups are:
 
 - `Survival & Penalties` (3): item weight, equipment durability loss, and death

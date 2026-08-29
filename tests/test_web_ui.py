@@ -163,6 +163,7 @@ def make_fixture(*, maintenance: str = "inactive") -> Fixture:
     return Fixture(dependencies, api, lifecycle, backups, calls)
 
 
+@unittest.skipUnless(os.name == "posix", "web lock integration uses POSIX ownership checks")
 class WebUITests(unittest.TestCase):
     def setUp(self):
         self.fixture = make_fixture()
@@ -527,6 +528,7 @@ class WebUITests(unittest.TestCase):
         loader.assert_called_once_with("/custom/config")
 
 
+@unittest.skipUnless(os.name == "posix", "web lock integration uses POSIX ownership checks")
 class WebUILockIntegrationTests(unittest.TestCase):
     """Use real subprocess descriptors: mocks cannot model flock re-entry."""
 

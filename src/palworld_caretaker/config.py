@@ -8,17 +8,39 @@ import re
 from typing import Callable, Mapping
 
 from .errors import ConfigError
+from .paths import has_parent_reference, is_filesystem_root, native_path, physical_path
 from .settings import EDITABLE_DEFAULTS, SETTING_SPECS, validate_settings_values
 
+
+def _platform_defaults() -> dict[str, str]:
+    """Use native absolute defaults so an unmodified config validates on Windows."""
+    if os.name == "nt":
+        program_data = native_path(os.environ.get("ProgramData", r"C:\ProgramData"))
+        root = program_data / "Palworld"
+        return {
+            "PALWORLD_INSTALL_ROOT": str(root),
+            # Backups are deliberately a sibling rather than a child of the
+            # installation.  The validation contract rejects overlapping
+            # trees so an untouched Windows configuration must obey it too.
+            "PALWORLD_BACKUP_DIR": str(program_data / "PalworldBackups"),
+            "PALWORLD_BACKUP_MOUNT": "",
+            "PALWORLD_BACKUP_REQUIRE_MOUNT": "false",
+            "PALWORLD_MANAGER_STATE_DIR": str(root / "state"),
+        }
+    return {
+        "PALWORLD_INSTALL_ROOT": "/srv/palworld",
+        "PALWORLD_BACKUP_DIR": "/mnt/qnap-tyt/palworld-backups",
+        "PALWORLD_BACKUP_MOUNT": "/mnt/qnap-tyt",
+        "PALWORLD_BACKUP_REQUIRE_MOUNT": "true",
+        "PALWORLD_MANAGER_STATE_DIR": "/var/lib/palworld-manager",
+    }
+
+
 DEFAULTS: dict[str, str] = {
-    "PALWORLD_INSTALL_ROOT": "/srv/palworld",
+    **_platform_defaults(),
     # Empty retains the host deployment layout of INSTALL_ROOT/server.  Docker
     # mounts the game data directly at /srv/palworld and sets this explicitly.
     "PALWORLD_SERVER_ROOT": "",
-    "PALWORLD_BACKUP_DIR": "/mnt/qnap-tyt/palworld-backups",
-    "PALWORLD_BACKUP_MOUNT": "/mnt/qnap-tyt",
-    "PALWORLD_BACKUP_REQUIRE_MOUNT": "true",
-    "PALWORLD_MANAGER_STATE_DIR": "/var/lib/palworld-manager",
     "PALWORLD_SERVICE_USER": "palworld", "PALWORLD_MANAGER_USER": "palworld-manager",
     "MAX_PLAYERS": "10", "BASE_CAMP_MAX_NUM_IN_GUILD": "10",
     "SERVER_NAME": "Palworld Dedicated Server", "SERVER_DESCRIPTION": "Private Palworld Dedicated Server",
@@ -90,7 +112,7 @@ def _parse_value(raw: str, path: Path, line: int) -> str:
 
 def load_env(path: str | Path) -> dict[str, str]:
     """Read dotenv syntax as data; never execute, expand, or substitute it."""
-    source, result = Path(path), {}
+    source, result = native_path(path), {}
     try:
         lines = source.read_text(encoding="utf-8").splitlines()
     except UnicodeDecodeError as exc:
@@ -138,7 +160,7 @@ def load_config(directory: str | Path, *, schema: ConfigSchema = DEFAULT_SCHEMA,
     protected config root remains searchable but non-writable to the manager,
     so that account can never rename or remove ``secrets.env``.
     """
-    root, values, count = Path(directory), dict(schema.defaults), 0
+    root, values, count = native_path(directory), dict(schema.defaults), 0
     for name in (LEGACY_CONFIG_FILE, *EDITABLE_CONFIG_FILES):
         source = root / name
         if source.is_file():
@@ -169,10 +191,10 @@ def load_config(directory: str | Path, *, schema: ConfigSchema = DEFAULT_SCHEMA,
 
 def _absolute(values: Mapping[str, str], key: str) -> Path:
     raw = values.get(key, "")
-    path = Path(raw)
-    if not raw or not path.is_absolute() or ".." in path.parts:
+    path = native_path(raw)
+    if not raw or not path.is_absolute() or has_parent_reference(raw):
         raise ConfigError(f"{key} must be an absolute path without '..'")
-    return Path(os.path.normpath(raw))
+    return path
 
 
 def _below(path: Path, parent: Path) -> bool:
@@ -206,10 +228,21 @@ def _validate_core(values: Mapping[str, str]) -> None:
     server = _absolute(values, "PALWORLD_SERVER_ROOT") if values.get("PALWORLD_SERVER_ROOT") else install / "server"
     mount_raw = values.get("PALWORLD_BACKUP_MOUNT", "")
     mount = _absolute(values, "PALWORLD_BACKUP_MOUNT") if mount_raw else None
-    if any(path == Path("/") for path in (install, server, backup, state, mount) if path is not None):
+    if any(is_filesystem_root(path) for path in (install, server, backup, state, mount) if path is not None):
         raise ConfigError("deployment paths must not be the filesystem root")
+    try:
+        physical_install, physical_server, physical_backup = (
+            physical_path(path) for path in (install, server, backup)
+        )
+    except OSError as exc:
+        raise ConfigError(f"deployment path cannot be physically resolved: {exc}") from exc
+    # Compare both the configured spelling and the target of every existing
+    # ancestor.  In particular, ``D:\outside\junction\backup`` must not
+    # evade this guard when ``junction`` targets the installation tree.
     if (_below(backup, install) or _below(install, backup)
-            or _below(backup, server) or _below(server, backup)):
+            or _below(backup, server) or _below(server, backup)
+            or _below(physical_backup, physical_install) or _below(physical_install, physical_backup)
+            or _below(physical_backup, physical_server) or _below(physical_server, physical_backup)):
         raise ConfigError("PALWORLD_BACKUP_DIR must not overlap the Palworld installation or server root")
     if _bool(values, "PALWORLD_BACKUP_REQUIRE_MOUNT") and (mount is None or backup == mount or not _below(backup, mount)):
         raise ConfigError("PALWORLD_BACKUP_DIR must be below PALWORLD_BACKUP_MOUNT when mount checking is enabled")
