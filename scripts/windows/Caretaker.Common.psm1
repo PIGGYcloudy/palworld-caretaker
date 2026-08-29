@@ -13,7 +13,7 @@ function Get-CaretakerConfig {
             $trimmed = $line.Trim()
             if (!$trimmed -or $trimmed.StartsWith('#')) { continue }
             if ($trimmed -notmatch '^(?<key>[A-Z][A-Z0-9_]*)\s*=\s*(?<value>.*)$') {
-                throw "$path`:$lineNumber: expected KEY=VALUE"
+                throw "${path}:${lineNumber}: expected KEY=VALUE"
             }
             $value = $Matches.value.Trim()
             if ($value.Length -ge 2 -and (($value.StartsWith('"') -and $value.EndsWith('"')) -or ($value.StartsWith("'") -and $value.EndsWith("'")))) {

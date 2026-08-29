@@ -129,10 +129,9 @@ class BackupManager:
                     os.fsync(descriptor)
                 finally:
                     os.close(descriptor)
-            # Windows cannot open directories with os.open().  File fsyncs
-            # above still make copied content durable; NTFS publishes rename
-            # atomically on a volume.
-            if os.name != "nt":
+            # Directory descriptors can only be synced on POSIX. File fsyncs
+            # above still make copied content durable on Windows.
+            if os.name == "posix":
                 descriptor = os.open(current, os.O_RDONLY)
                 try:
                     os.fsync(descriptor)
