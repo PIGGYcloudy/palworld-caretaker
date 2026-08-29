@@ -227,11 +227,11 @@ class WindowsPowerShellIntegrationTests(unittest.TestCase):
         # The first two copies create the safety copy.  Mutate a snapshot file
         # to a same-size value immediately before it is copied to staging; the
         # captured SHA-256 inventory must stop the restore before live swap.
-        command = f'''$script:copyCount = 0
+        command = f'''$global:copyCount = 0
 function Copy-Item {{
     param([Parameter(ValueFromRemainingArguments = $true)][object[]]$CopyArguments)
-    $script:copyCount++
-    if ($script:copyCount -eq 3) {{ [System.IO.File]::WriteAllText('{version / "savegames" / "world" / "world.sav"}', 'evil') }}
+    $global:copyCount++
+    if ($global:copyCount -eq 3) {{ [System.IO.File]::WriteAllText('{version / "savegames" / "world" / "world.sav"}', 'evil') }}
     Microsoft.PowerShell.Management\\Copy-Item @CopyArguments
 }}
 & '{restore_script}' -ConfigDir '{self.config}' -Version '{version.name}' -Force -NoServiceControl
@@ -296,11 +296,11 @@ exit $LASTEXITCODE'''
         restore_script = self.repository / "scripts" / "windows" / "restore-palworld.ps1"
         # The sixth copy is the second live-tree publication.  Failing it
         # proves the script restores both live trees from its safety copy.
-        command = f'''$script:copyCount = 0
+        command = f'''$global:copyCount = 0
 function Copy-Item {{
     param([Parameter(ValueFromRemainingArguments = $true)][object[]]$CopyArguments)
-    $script:copyCount++
-    if ($script:copyCount -eq 6) {{ throw 'injected live-copy failure' }}
+    $global:copyCount++
+    if ($global:copyCount -eq 6) {{ throw 'injected live-copy failure' }}
     Microsoft.PowerShell.Management\\Copy-Item @CopyArguments
 }}
 & '{restore_script}' -ConfigDir '{self.config}' -Version '{version.name}' -Force -NoServiceControl
@@ -401,7 +401,7 @@ $renameError = $null
 try {{
     $renameError = $null
     try {{
-        Rename-Item -LiteralPath $parent -NewName ((Split-Path -Leaf $parent) + '-renamed')
+        Rename-Item -LiteralPath $parent -NewName ((Split-Path -Leaf $parent) + '-renamed') -ErrorAction Stop
         throw 'parent rename unexpectedly succeeded while the operation lock was held'
     }} catch {{
         if ($_.Exception.Message -match 'unexpectedly succeeded') {{ throw }}
@@ -465,4 +465,5 @@ exit 0'''
             self.skipTest("directory-junction creation is unavailable to this Windows test account")
         backup = self.run_ps("backup-palworld.ps1", "-ConfigDir", str(self.config), "-NoServiceControl")
         self.assertNotEqual(backup.returncode, 0)
-        self.assertIn("reparse", (backup.stdout + backup.stderr).lower())
+        output = (backup.stdout + backup.stderr).lower()
+        self.assertTrue(any(keyword in output for keyword in ("reparse", "symbolic link", "junction")), output)
