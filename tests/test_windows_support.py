@@ -229,10 +229,9 @@ class WindowsPowerShellIntegrationTests(unittest.TestCase):
         # captured SHA-256 inventory must stop the restore before live swap.
         command = f'''$global:copyCount = 0
 function Copy-Item {{
-    param([Parameter(ValueFromRemainingArguments = $true)][object[]]$CopyArguments)
     $global:copyCount++
     if ($global:copyCount -eq 3) {{ [System.IO.File]::WriteAllText('{version / "savegames" / "world" / "world.sav"}', 'evil') }}
-    Microsoft.PowerShell.Management\\Copy-Item @CopyArguments
+    Microsoft.PowerShell.Management\\Copy-Item @args
 }}
 & '{restore_script}' -ConfigDir '{self.config}' -Version '{version.name}' -Force -NoServiceControl
 exit $LASTEXITCODE'''
@@ -298,10 +297,9 @@ exit $LASTEXITCODE'''
         # proves the script restores both live trees from its safety copy.
         command = f'''$global:copyCount = 0
 function Copy-Item {{
-    param([Parameter(ValueFromRemainingArguments = $true)][object[]]$CopyArguments)
     $global:copyCount++
     if ($global:copyCount -eq 6) {{ throw 'injected live-copy failure' }}
-    Microsoft.PowerShell.Management\\Copy-Item @CopyArguments
+    Microsoft.PowerShell.Management\\Copy-Item @args
 }}
 & '{restore_script}' -ConfigDir '{self.config}' -Version '{version.name}' -Force -NoServiceControl
 exit $LASTEXITCODE'''
