@@ -225,7 +225,20 @@ function Get-CaretakerFinalPathByHandle {
     if ($length -eq 0 -or $length -ge $capacity) {
         throw [ComponentModel.Win32Exception]::new([Runtime.InteropServices.Marshal]::GetLastWin32Error())
     }
-    return $buffer.ToString()
+    # GetFinalPathNameByHandle returns a handle-derived path rather than the
+    # caller's spelling.  With VOLUME_NAME_DOS (the default above), local
+    # paths normally start with ``\\?\`` and UNC paths with ``\\?\UNC\``.
+    # Keep the useful handle-derived resolution, but use one canonical DOS/UNC
+    # spelling everywhere this module compares final paths.  In particular,
+    # do not compare a ``\\?\C:\...`` result with a normal ``C:\...`` path.
+    $finalPath = $buffer.ToString()
+    if ($finalPath.StartsWith('\\?\UNC\', [System.StringComparison]::OrdinalIgnoreCase)) {
+        return '\\' + $finalPath.Substring(8)
+    }
+    if ($finalPath.StartsWith('\\?\', [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $finalPath.Substring(4)
+    }
+    return $finalPath
 }
 
 function Get-CaretakerFileIdentity {
@@ -264,9 +277,10 @@ function Open-CaretakerOperationLockParent {
     Initialize-CaretakerNativeLock
     $fileReadAttributes = [uint32]0x80; $openExisting = [uint32]3
     $shareReadWrite = [uint32]0x3; $backupSemantics = [uint32]0x02000000; $openReparsePoint = [uint32]0x00200000
-    # Deliberately omit FILE_SHARE_DELETE. Windows will now reject a rename or
-    # deletion of this directory until the lock file has been opened and
-    # validated beneath this exact parent handle.
+    # Deliberately omit FILE_SHARE_DELETE.  This handle is used to pin and
+    # later re-check the parent object's identity while the child lock file is
+    # opened.  Do not rely on an open *directory* handle alone to reject a
+    # rename: the validated child lock handle provides that lifetime guard.
     $handle = [Caretaker.NativeLock]::CreateFile($Path, $fileReadAttributes, $shareReadWrite,
         [IntPtr]::Zero, $openExisting, ($backupSemantics -bor $openReparsePoint), [IntPtr]::Zero)
     if ($handle.IsInvalid) { throw [ComponentModel.Win32Exception]::new([Runtime.InteropServices.Marshal]::GetLastWin32Error()) }
@@ -292,10 +306,13 @@ function New-CaretakerSecureOperationLockStream {
     Initialize-CaretakerNativeLock
     $genericRead = [uint32]0x80000000; $genericWrite = [uint32]0x40000000
     $openAlways = [uint32]4; $fileAttributeNormal = [uint32]0x80; $openReparsePoint = [uint32]0x00200000
-    # No sharing prevents a pathname replacement/delete after the secure
-    # handle is acquired.  The byte-range lock remains interoperable with
-    # Python for callers that already hold the shared operation lock.
-    $handle = [Caretaker.NativeLock]::CreateFile($Path, ($genericRead -bor $genericWrite), [uint32]0,
+    # Match Python's open_no_reparse: permit existing read/write handles, but
+    # never FILE_SHARE_DELETE.  A share mode of zero rejects a compatible
+    # Python handle before either side can attempt the interoperable one-byte
+    # range lock.  Omitting FILE_SHARE_DELETE still prevents replacement or
+    # deletion of this validated lock file for this handle's lifetime.
+    $shareReadWrite = [uint32]0x3
+    $handle = [Caretaker.NativeLock]::CreateFile($Path, ($genericRead -bor $genericWrite), $shareReadWrite,
         [IntPtr]::Zero, $openAlways, ($fileAttributeNormal -bor $openReparsePoint), [IntPtr]::Zero)
     if ($handle.IsInvalid) { throw [ComponentModel.Win32Exception]::new([Runtime.InteropServices.Marshal]::GetLastWin32Error()) }
     try {
@@ -327,9 +344,10 @@ function Enter-CaretakerOperationLock {
     $parentLock = $null
     $verifiedParentLock = $null
     try {
-        # Hold the real parent without FILE_SHARE_DELETE throughout the child
-        # CreateFile and final-path validation. This closes the same-spelling
-        # directory rename-swap race that a pathname comparison alone cannot.
+        # Hold the real parent through the child CreateFile and final-path
+        # validation.  The subsequent identity re-check closes a same-name
+        # directory replacement race; the child lock handle keeps the final
+        # validated parent from being renamed for the operation lifetime.
         $parentLock = Open-CaretakerOperationLockParent $parent
         $expectedParentPath = (Get-CaretakerFinalPathByHandle $parentLock.Handle).TrimEnd('\', '/')
         $expectedPath = $expectedParentPath + '\' + (Split-Path -Leaf $path)
@@ -348,15 +366,15 @@ function Enter-CaretakerOperationLock {
         # Python's msvcrt.locking on the same one-byte lock file.
         $stream.Lock(0, 1)
         $stream | Add-Member -NotePropertyName CaretakerLockHeld -NotePropertyValue $true
-        # Keep the no-delete parent handle for the operation lifetime, not
-        # merely acquisition, so the published lock cannot later be detached
-        # from its pathname by a directory rename.
+        # Keep the parent identity handle for the operation lifetime.  The
+        # lock file handle itself omits FILE_SHARE_DELETE, so its validated
+        # parent cannot later be renamed away from the published lock.
         $stream | Add-Member -NotePropertyName CaretakerLockParentHandle -NotePropertyValue $parentLock.Handle
         $parentLock = $null
         return $stream
     } catch {
         if ($stream) { $stream.Dispose() }
-        throw 'Another Palworld operation is active, or the operation lock is unsafe.'
+        throw "Another Palworld operation is active, or the operation lock is unsafe: $($_.Exception.Message)"
     } finally {
         if ($verifiedParentLock) { $verifiedParentLock.Handle.Dispose() }
         if ($parentLock) { $parentLock.Handle.Dispose() }

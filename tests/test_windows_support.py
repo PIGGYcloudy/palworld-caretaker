@@ -333,27 +333,78 @@ exit $LASTEXITCODE'''
         self.assertNotEqual(blocked.returncode, 0)
         self.assertIn("operation", (blocked.stdout + blocked.stderr).lower())
 
-    def test_powershell_parent_handle_blocks_rename_during_lock_acquisition(self):
-        """The no-delete parent handle must reject a concurrent rename."""
-        lock_parent = self.base / "lock-parent"
-        lock_path = lock_parent / "operation.lock"
+    def test_powershell_lock_allows_a_compatible_unlocked_handle(self):
+        """The shared byte-range lock, rather than CreateFile sharing, arbitrates.
+
+        Python opens its Windows lock descriptor with FILE_SHARE_READ |
+        FILE_SHARE_WRITE.  The PowerShell side must be able to acquire its
+        lock while such an *unlocked* compatible descriptor exists, then let
+        the shared one-byte range lock reject only an actually locked peer.
+        """
+        lock_path = self.base / "compatible-operation.lock"
+        module_path = self.repository / "scripts" / "windows" / "Caretaker.Common.psm1"
+        command = f'''Import-Module -Force '{module_path}'
+$compatible = [System.IO.File]::Open('{lock_path}', [System.IO.FileMode]::OpenOrCreate,
+    [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::ReadWrite)
+try {{
+    $lock = Enter-CaretakerOperationLock
+    try {{
+        if (-not $lock.CaretakerLockHeld) {{ throw 'operation range lock was not held' }}
+    }} finally {{
+        Exit-CaretakerOperationLock $lock
+    }}
+}} finally {{
+    $compatible.Dispose()
+}}
+exit 0'''
+        result = self.run_ps_command(
+            command, environment={"PALWORLD_OPERATION_LOCK_FILE": str(lock_path)}
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_powershell_final_handle_path_uses_normal_dos_or_unc_spelling(self):
+        """Final-path checks must not mix normal paths with the ``\\\\?\\`` form."""
+        lock_parent = self.base / "final-path-parent"
+        lock_parent.mkdir()
         module_path = self.repository / "scripts" / "windows" / "Caretaker.Common.psm1"
         command = f'''Import-Module -Force '{module_path}'
 $module = Get-Module Caretaker.Common
 & $module {{
-    param($lockPath)
-    [System.IO.Directory]::CreateDirectory((Split-Path -Parent $lockPath)) | Out-Null
-    $parent = Split-Path -Parent $lockPath
+    param($parent)
     $heldParent = Open-CaretakerOperationLockParent $parent
+    try {{
+        $finalPath = Get-CaretakerFinalPathByHandle $heldParent.Handle
+        if ($finalPath.StartsWith('\\\\?\\')) {{ throw "final path retained extended prefix: $finalPath" }}
+        if (-not [string]::Equals($finalPath.TrimEnd('\\', '/'), $parent.TrimEnd('\\', '/'), [System.StringComparison]::OrdinalIgnoreCase)) {{
+            throw "final path did not match parent: $finalPath"
+        }}
+    }} finally {{
+        $heldParent.Handle.Dispose()
+    }}
+}} '{lock_parent}'
+exit 0'''
+        result = self.run_ps_command(command)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_powershell_lock_handle_blocks_parent_rename(self):
+        """The validated lock file, not a directory handle, pins its parent."""
+        lock_parent = self.base / "lock-parent"
+        lock_path = lock_parent / "operation.lock"
+        module_path = self.repository / "scripts" / "windows" / "Caretaker.Common.psm1"
+        command = f'''Import-Module -Force '{module_path}'
+$env:PALWORLD_OPERATION_LOCK_FILE = '{lock_path}'
+[System.IO.Directory]::CreateDirectory((Split-Path -Parent $env:PALWORLD_OPERATION_LOCK_FILE)) | Out-Null
+$parent = Split-Path -Parent $env:PALWORLD_OPERATION_LOCK_FILE
+$lock = Enter-CaretakerOperationLock
+$renameError = $null
+try {{
     $renameError = $null
     try {{
         Rename-Item -LiteralPath $parent -NewName ((Split-Path -Leaf $parent) + '-renamed')
-        throw 'parent rename unexpectedly succeeded while its handle was held'
+        throw 'parent rename unexpectedly succeeded while the operation lock was held'
     }} catch {{
         if ($_.Exception.Message -match 'unexpectedly succeeded') {{ throw }}
         $renameError = $_.Exception
-    }} finally {{
-        $heldParent.Handle.Dispose()
     }}
     $hresults = @()
     while ($renameError) {{
@@ -363,7 +414,9 @@ $module = Get-Module Caretaker.Common
     if ($hresults -notcontains [uint32]0x80070020) {{
         throw 'parent rename failed for a reason other than the held-handle sharing violation'
     }}
-}} '{lock_path}'
+}} finally {{
+    Exit-CaretakerOperationLock $lock
+}}
 exit 0'''
         result = self.run_ps_command(command)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
