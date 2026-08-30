@@ -100,6 +100,7 @@ class BackupEngineTests(unittest.TestCase):
             local_backup_root=self.local, retention_count=kwargs.pop("retention_count", 2),
             clock=lambda: self.now, disk_free=kwargs.pop("disk_free", lambda _p: 10 * 1024 ** 3), **kwargs)
 
+    @unittest.skipUnless(hasattr(os, "O_NOFOLLOW"), "POSIX directory descriptors require O_NOFOLLOW")
     def test_snapshot_is_published_atomically_and_retention_only_removes_snapshots(self):
         result = self.manager().create_snapshot()
         self.assertTrue(result.snapshot.is_dir())
@@ -201,6 +202,7 @@ class BackupEngineTests(unittest.TestCase):
             self.manager().restore(snapshot.name)
         self.assertEqual((self.save / "world/world.sav").read_text(), "live")
 
+    @unittest.skipUnless(hasattr(os, "O_NOFOLLOW"), "POSIX directory descriptors require O_NOFOLLOW")
     def test_fsync_failure_prevents_snapshot_publication(self):
         import palworld_caretaker.backup as backup_module
 
@@ -210,6 +212,7 @@ class BackupEngineTests(unittest.TestCase):
         self.assertEqual(self.manager().list_snapshots(), ())
         self.assertFalse(any(self.backups.glob(".incomplete-*")))
 
+    @unittest.skipUnless(hasattr(os, "O_NOFOLLOW"), "POSIX directory descriptors require O_NOFOLLOW")
     def test_rollback_cleanup_failure_after_commit_does_not_revert_live_trees(self):
         snapshot = self.manager().create_snapshot().snapshot
         (self.save / "world/world.sav").write_text("changed", encoding="utf-8")
