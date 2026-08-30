@@ -31,7 +31,7 @@ jobs:
           
           Write-Host "=== Starting 啟動伺服器與管理面板.bat ==="
           # Run the bat directly
-          $process = Start-Process -FilePath "cmd.exe" -ArgumentList "/c", ".\啟動伺服器與管理面板.bat" -PassThru -NoNewWindow
+          $process = Start-Process -FilePath "cmd.exe" -ArgumentList "/c", ".\start-caretaker.bat" -PassThru -NoNewWindow
           
           Write-Host "=== Waiting for Web UI to be ready on http://127.0.0.1:8765 ==="
           $ready = $false
