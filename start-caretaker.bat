@@ -60,9 +60,8 @@ pause
 exit /b 1
 
 :panel_ready
-:: The copied template has a local-only initial panel password. Supplying it
-:: here avoids an unexplained browser credential prompt before the wizard.
-start "" "http://palworld-manager:CHANGE_ME_ADMIN_PASSWORD@127.0.0.1:%PORT%/"
+# The management panel is running. Open it in the default browser.
+start "" "http://127.0.0.1:%PORT%/"
 
 :: The browser-facing panel remains the invoking account. Elevate only the
 :: fixed service-control script, after the setup UI is already available.

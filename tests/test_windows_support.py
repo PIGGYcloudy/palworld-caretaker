@@ -28,15 +28,16 @@ from palworld_caretaker.web import WebDependencies, WebUIError
 class PortablePathTests(unittest.TestCase):
     def test_double_click_launcher_checks_python_starts_service_and_opens_panel(self):
         launchers = list(Path(__file__).parents[1].glob("*.bat"))
-        self.assertEqual(len(launchers), 1)
-        launcher = launchers[0].read_text(encoding="utf-8")
-        self.assertIn("for %%F in (caretaker.env server.env secrets.env)", launcher)
-        self.assertIn('copy /Y "%CONFIG_DIR%\\%%F.example" "%CONFIG_DIR%\\%%F"', launcher)
-        self.assertIn("import palworld_caretaker", launcher)
-        self.assertIn("-m pip install -e", launcher)
-        self.assertIn("palworld-service.ps1", launcher)
-        self.assertIn("/healthz", launcher)
-        self.assertIn("http://127.0.0.1:%PORT%/", launcher)
+        self.assertGreaterEqual(len(launchers), 1)
+        for path in launchers:
+            launcher = path.read_text(encoding="utf-8")
+            self.assertIn("for %%F in (caretaker.env server.env secrets.env)", launcher)
+            self.assertIn('copy /Y "%CONFIG_DIR%\\%%F.example" "%CONFIG_DIR%\\%%F"', launcher)
+            self.assertIn("import palworld_caretaker", launcher)
+            self.assertIn("-m pip install -e", launcher)
+            self.assertIn("palworld-service.ps1", launcher)
+            self.assertIn("/healthz", launcher)
+            self.assertIn("http://127.0.0.1:%PORT%/", launcher)
 
     def test_native_path_normalizes_current_platform_separators(self):
         value = native_path("alpha/beta" if os.name == "nt" else "alpha/beta")
