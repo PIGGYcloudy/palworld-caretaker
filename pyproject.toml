@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "palworld-caretaker"
-version = "0.8.0"
+version = "0.9.0"
 description = "Cross-platform core for safely operating a Palworld dedicated server"
 readme = "README.md"
 requires-python = ">=3.10"

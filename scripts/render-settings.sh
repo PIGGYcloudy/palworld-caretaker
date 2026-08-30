@@ -84,7 +84,7 @@ validate_ini_value() {
   local name="$1"
   local value="$2"
   [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] || die "$name contains a newline"
-  [[ "$value" != *','* && "$value" != *'('* && "$value" != *')'* && "$value" != *'"'* ]] || die "$name contains an INI-reserved character"
+  [[ "$value" != *','* && "$value" != *'('* && "$value" != *')'* && "$value" != *'"'* && "$value" != *"'"* ]] || die "$name contains an INI-reserved character"
   [[ "$value" != *\\ ]] || die "$name must not end with a backslash"
   [[ -n "$value" ]] || die "$name must not be empty"
 }

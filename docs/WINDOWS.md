@@ -1,6 +1,6 @@
 # Windows 原生部署與維運
 
-v0.8.0 提供不依賴 systemd 的 Windows 原生 PowerShell 維運入口。下載並解壓
+v0.9.0 提供不依賴 systemd 的 Windows 原生 PowerShell 維運入口。下載並解壓
 release archive 後，可從專案根目錄或已部署的 `scripts/windows/` 目錄執行；建議使用
 PowerShell 7（`pwsh`）。這套入口與 Python 核心共用設定格式、備份命名與操作鎖，
 但不會替 Windows 主機自動註冊 PalServer service。
@@ -14,7 +14,7 @@ PowerShell 7（`pwsh`）。這套入口與 Python 核心共用設定格式、備
 ```env
 PALWORLD_INSTALL_ROOT=C:\Palworld
 PALWORLD_SERVER_ROOT=C:\Palworld\server
-PALWORLD_BACKUP_DIR=D:\PalworldBackups
+PALWORLD_BACKUP_DIR=C:\Palworld\server\Pal\Saved\SaveGames_Backups
 PALWORLD_BACKUP_MOUNT=
 PALWORLD_BACKUP_REQUIRE_MOUNT=false
 PALWORLD_MANAGER_STATE_DIR=C:\ProgramData\Palworld\state
@@ -23,7 +23,7 @@ PALWORLD_WEB_BIND_IP=127.0.0.1
 # PALWORLD_WEB_ALLOWED_ORIGINS=http://192.168.1.20:8765
 ```
 
-`PALWORLD_BACKUP_DIR` 必須是安裝根目錄與 server root 之外的獨立目錄。將
+預設 PALWORLD_BACKUP_DIR 是遊戲存檔同級的 Pal\Saved\SaveGames_Backups；這是唯一允許放在 server root 內的備份位置。將
 `secrets.env` 與 `caretaker.env`、`server.env` 放在同一個設定目錄，並只授予需要
 執行維運的 Windows 帳號存取權。若路徑包含空白，可用單引號或雙引號包住整個值。
 
@@ -63,6 +63,8 @@ Palworld 的 live tree 預期位於：
 ```
 
 ## 快速操作
+
+解壓 release archive 並完成設定後，可以直接雙擊根目錄的「啟動伺服器與管理面板.bat」。它會要求 UAC 管理員權限、檢查 Python 與設定檔、啟動 PalServer Windows service、等待 Web UI 健康檢查，然後自動開啟本機面板。首次開啟時請依 Web 的首次開服精靈手動設定伺服器密碼；不會自動生成或顯示密碼。
 
 ```powershell
 $Repository = 'C:\palworld-caretaker'

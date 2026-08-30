@@ -8,11 +8,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import contextlib
 import json
 import os
 from pathlib import Path
 import re
 import shutil
+import stat
 from typing import Callable
 
 from .errors import SnapshotError
@@ -75,6 +77,210 @@ class BackupManager:
     def _real_directory(path: Path, label: str) -> None:
         if path.is_symlink() or not path.is_dir():
             raise SnapshotError(f"{label} must be a real directory: {path}")
+
+    @staticmethod
+    def _directory_flags() -> int:
+        """Return the fail-closed flags required for path-safe tree access."""
+        if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
+            raise SnapshotError("safe backup traversal requires O_NOFOLLOW directory descriptors")
+        return os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+
+    @staticmethod
+    def _identity(info: os.stat_result) -> tuple[int, int]:
+        return info.st_dev, info.st_ino
+
+    @classmethod
+    def _open_child_directory(cls, parent_fd: int, name: str, label: str, *, create: bool = False) -> int:
+        """Open one real child directory and pin the exact inode.
+
+        ``lstat`` before and ``fstat`` after the non-following open closes the
+        classic check/open race: a same-name symlink, bind mount, or directory
+        replacement cannot make later operations leave the descriptor-pinned
+        tree.  Windows maintenance has a separate handle-based implementation;
+        this Python engine fails closed where POSIX descriptor guarantees are
+        unavailable.
+        """
+        try:
+            before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            if not create:
+                raise SnapshotError(f"{label} is missing") from None
+            try:
+                os.mkdir(name, mode=0o700, dir_fd=parent_fd)
+            except FileExistsError:
+                pass
+            try:
+                before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            except OSError as exc:
+                raise SnapshotError(f"{label} could not be created safely") from exc
+        except OSError as exc:
+            raise SnapshotError(f"{label} is unsafe") from exc
+        if not stat.S_ISDIR(before.st_mode):
+            raise SnapshotError(f"{label} must be a real directory")
+        try:
+            descriptor = os.open(name, cls._directory_flags(), dir_fd=parent_fd)
+        except OSError as exc:
+            raise SnapshotError(f"{label} is unsafe") from exc
+        try:
+            opened = os.fstat(descriptor)
+            if not stat.S_ISDIR(opened.st_mode) or cls._identity(before) != cls._identity(opened):
+                raise SnapshotError(f"{label} changed while being opened")
+            return descriptor
+        except BaseException:
+            os.close(descriptor)
+            raise
+
+    @classmethod
+    @contextlib.contextmanager
+    def _pinned_directory(cls, path: Path, label: str, *, create: bool = False):
+        """Yield an FD for an absolute path without ever following a component."""
+        if not path.is_absolute():
+            raise SnapshotError(f"{label} must be an absolute directory")
+        # Start with the filesystem root, then traverse each path component
+        # with an O_NOFOLLOW open.  Path.resolve() is deliberately not used:
+        # it would follow an attacker-provided link before we could pin it.
+        try:
+            descriptor = os.open(path.anchor, cls._directory_flags())
+        except OSError as exc:
+            raise SnapshotError(f"{label} root is unavailable") from exc
+        try:
+            parts = path.parts
+            start = 1 if parts and parts[0] == path.anchor else 0
+            for part in parts[start:]:
+                child = cls._open_child_directory(descriptor, part, label, create=create)
+                os.close(descriptor)
+                descriptor = child
+            yield descriptor
+        finally:
+            os.close(descriptor)
+
+    @classmethod
+    def _copy_tree_pinned(cls, source: Path, destination_fd: int, name: str, label: str) -> None:
+        """Copy a tree through descriptor-relative, non-following operations."""
+        with cls._pinned_directory(source, label) as source_fd:
+            target_fd = cls._open_child_directory(destination_fd, name, "staged " + label, create=True)
+            try:
+                cls._copy_tree_fds(source_fd, target_fd, label)
+                os.fsync(target_fd)
+            finally:
+                os.close(target_fd)
+
+    @classmethod
+    def _copy_tree_fds(cls, source_fd: int, destination_fd: int, label: str) -> None:
+        try:
+            with os.scandir(source_fd) as scanner:
+                entries = list(scanner)
+        except OSError as exc:
+            raise SnapshotError(f"{label} is unsafe") from exc
+        for entry in entries:
+            try:
+                before = os.stat(entry.name, dir_fd=source_fd, follow_symlinks=False)
+            except OSError as exc:
+                raise SnapshotError(f"{label} changed while being copied") from exc
+            if stat.S_ISDIR(before.st_mode):
+                child_source = cls._open_child_directory(source_fd, entry.name, label)
+                try:
+                    child_destination = cls._open_child_directory(destination_fd, entry.name, "staged " + label, create=True)
+                    try:
+                        cls._copy_tree_fds(child_source, child_destination, label)
+                        os.fsync(child_destination)
+                    finally:
+                        os.close(child_destination)
+                finally:
+                    os.close(child_source)
+                continue
+            if not stat.S_ISREG(before.st_mode):
+                raise SnapshotError(f"{label} contains an unsafe file")
+            try:
+                source_file = os.open(entry.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=source_fd)
+            except OSError as exc:
+                raise SnapshotError(f"{label} changed while being copied") from exc
+            try:
+                opened = os.fstat(source_file)
+                if not stat.S_ISREG(opened.st_mode) or cls._identity(before) != cls._identity(opened):
+                    raise SnapshotError(f"{label} changed while being copied")
+                try:
+                    destination_file = os.open(
+                        entry.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                        0o600, dir_fd=destination_fd,
+                    )
+                except OSError as exc:
+                    raise SnapshotError("staged backup file could not be created safely") from exc
+                try:
+                    while True:
+                        chunk = os.read(source_file, 1024 * 1024)
+                        if not chunk:
+                            break
+                        view = memoryview(chunk)
+                        while view:
+                            written = os.write(destination_file, view)
+                            view = view[written:]
+                    os.fsync(destination_file)
+                finally:
+                    os.close(destination_file)
+            finally:
+                os.close(source_file)
+
+    @classmethod
+    def _tree_files_fd(cls, directory_fd: int, label: str, prefix: str = "") -> dict[str, int]:
+        """Inventory a descriptor-pinned tree without reopening its pathname."""
+        files: dict[str, int] = {}
+        try:
+            with os.scandir(directory_fd) as scanner:
+                entries = list(scanner)
+        except OSError as exc:
+            raise SnapshotError(f"{label} is unsafe") from exc
+        for entry in entries:
+            try:
+                before = os.stat(entry.name, dir_fd=directory_fd, follow_symlinks=False)
+            except OSError as exc:
+                raise SnapshotError(f"{label} changed while being inspected") from exc
+            relative = f"{prefix}{entry.name}"
+            if stat.S_ISDIR(before.st_mode):
+                child = cls._open_child_directory(directory_fd, entry.name, label)
+                try:
+                    files.update(cls._tree_files_fd(child, label, relative + "/"))
+                finally:
+                    os.close(child)
+            elif stat.S_ISREG(before.st_mode):
+                try:
+                    child = os.open(entry.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+                except OSError as exc:
+                    raise SnapshotError(f"{label} changed while being inspected") from exc
+                try:
+                    opened = os.fstat(child)
+                    if cls._identity(before) != cls._identity(opened) or not stat.S_ISREG(opened.st_mode):
+                        raise SnapshotError(f"{label} changed while being inspected")
+                    files[relative] = opened.st_size
+                finally:
+                    os.close(child)
+            else:
+                raise SnapshotError(f"{label} contains an unsafe entry")
+        return files
+
+    @classmethod
+    def _remove_tree_at(cls, parent_fd: int, name: str, label: str) -> None:
+        """Remove a child tree without resolving a mutable pathname."""
+        descriptor = cls._open_child_directory(parent_fd, name, label)
+        try:
+            with os.scandir(descriptor) as scanner:
+                entries = list(scanner)
+            for entry in entries:
+                info = os.stat(entry.name, dir_fd=descriptor, follow_symlinks=False)
+                if stat.S_ISDIR(info.st_mode):
+                    cls._remove_tree_at(descriptor, entry.name, label)
+                elif stat.S_ISREG(info.st_mode):
+                    # Confirm the name still names the file we inspected
+                    # before unlinking; never unlink a substituted directory.
+                    after = os.stat(entry.name, dir_fd=descriptor, follow_symlinks=False)
+                    if cls._identity(info) != cls._identity(after):
+                        raise SnapshotError(f"{label} changed while being removed")
+                    os.unlink(entry.name, dir_fd=descriptor)
+                else:
+                    raise SnapshotError(f"{label} contains an unsafe entry")
+        finally:
+            os.close(descriptor)
+        os.rmdir(name, dir_fd=parent_fd)
 
     @staticmethod
     def _directory_size(path: Path) -> int:
@@ -277,47 +483,82 @@ class BackupManager:
 
     def create_snapshot(self) -> BackupResult:
         source_bytes = self.preflight_snapshot()
-        self.backup_root.mkdir(parents=True, exist_ok=True)
-        self._real_directory(self.backup_root, "backup_root")
         name = self._snapshot_name(self.clock())
         final = self.backup_root / name
         staging = self.backup_root / f".incomplete-{name.removeprefix('palworld-')}-{os.getpid()}"
-        if final.exists() or staging.exists():
-            raise SnapshotError(f"backup version already exists: {name}")
+        staging_name = staging.name
         try:
-            staging.mkdir(mode=0o700)
-            self._copy_tree(self.save_root, staging / "savegames")
-            self._copy_tree(self.config_root, staging / "config")
-            metadata = staging / "metadata"
-            metadata.mkdir()
-            manifest = metadata / "manifest.json"
-            files = {
-                **{f"savegames/{name}": size for name, size in self._tree_files(staging / "savegames", "staged savegames directory").items()},
-                **{f"config/{name}": size for name, size in self._tree_files(staging / "config", "staged config directory").items()},
-            }
-            with manifest.open("w", encoding="utf-8") as handle:
-                handle.write(json.dumps({
-                "created_at": self.clock().isoformat(), "source_bytes": sum(files.values()),
-                "format": 2, "files": files,
-                }, separators=(",", ":")))
-                handle.flush()
-                os.fsync(handle.fileno())
-            self._fsync_directory(metadata)
-            self._fsync_directory(staging)
-            self._validate_staging(staging)
-            os.replace(staging, final)
-            self._fsync_directory(self.backup_root)
+            with self._pinned_directory(self.backup_root, "backup_root", create=True) as backup_fd:
+                for candidate in (name, staging_name):
+                    try:
+                        os.stat(candidate, dir_fd=backup_fd, follow_symlinks=False)
+                    except FileNotFoundError:
+                        continue
+                    raise SnapshotError(f"backup version already exists: {name}")
+                try:
+                    os.mkdir(staging_name, mode=0o700, dir_fd=backup_fd)
+                except OSError as exc:
+                    raise SnapshotError("backup staging directory could not be created safely") from exc
+                try:
+                    staging_fd = self._open_child_directory(backup_fd, staging_name, "backup staging directory")
+                    try:
+                        staging_identity = self._identity(os.fstat(staging_fd))
+                        self._copy_tree_pinned(self.save_root, staging_fd, "savegames", "savegames")
+                        self._copy_tree_pinned(self.config_root, staging_fd, "config", "config")
+                        metadata_fd = self._open_child_directory(staging_fd, "metadata", "backup metadata directory", create=True)
+                        try:
+                            save_fd = self._open_child_directory(staging_fd, "savegames", "staged savegames directory")
+                            config_fd = self._open_child_directory(staging_fd, "config", "staged config directory")
+                            try:
+                                files = {
+                                    **{f"savegames/{entry}": size for entry, size in self._tree_files_fd(save_fd, "staged savegames directory").items()},
+                                    **{f"config/{entry}": size for entry, size in self._tree_files_fd(config_fd, "staged config directory").items()},
+                                }
+                            finally:
+                                os.close(config_fd)
+                                os.close(save_fd)
+                            manifest_fd = os.open(
+                                "manifest.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                                0o600, dir_fd=metadata_fd,
+                            )
+                            try:
+                                os.write(manifest_fd, json.dumps({
+                                    "created_at": self.clock().isoformat(), "source_bytes": sum(files.values()),
+                                    "format": 2, "files": files,
+                                }, separators=(",", ":")).encode("utf-8"))
+                                os.fsync(manifest_fd)
+                            finally:
+                                os.close(manifest_fd)
+                            os.fsync(metadata_fd)
+                        finally:
+                            os.close(metadata_fd)
+                        os.fsync(staging_fd)
+                    finally:
+                        os.close(staging_fd)
+                    # Both names are resolved below the same pinned backup
+                    # directory FD, so a SaveGames_Backups replacement cannot
+                    # redirect this atomic publication.
+                    published = os.stat(staging_name, dir_fd=backup_fd, follow_symlinks=False)
+                    if self._identity(published) != staging_identity or not stat.S_ISDIR(published.st_mode):
+                        raise SnapshotError("backup staging directory changed before publication")
+                    os.replace(staging_name, name, src_dir_fd=backup_fd, dst_dir_fd=backup_fd)
+                    os.fsync(backup_fd)
+                except BaseException:
+                    try:
+                        self._remove_tree_at(backup_fd, staging_name, "backup staging directory")
+                    except (FileNotFoundError, OSError, SnapshotError):
+                        pass
+                    raise
         except OSError as exc:
             raise SnapshotError(f"backup snapshot failed: {exc}") from exc
-        finally:
-            if staging.exists():
-                shutil.rmtree(staging, ignore_errors=True)
         snapshots = list(reversed(self.list_snapshots()))
-        while len(snapshots) > self.retention_count:
-            old = snapshots.pop(0)
-            if old.parent != self.backup_root or not _SNAPSHOT_NAME.fullmatch(old.name):
-                raise SnapshotError("old snapshot path failed safety validation")
-            shutil.rmtree(old)
+        if len(snapshots) > self.retention_count:
+            with self._pinned_directory(self.backup_root, "backup_root") as backup_fd:
+                while len(snapshots) > self.retention_count:
+                    old = snapshots.pop(0)
+                    if old.parent != self.backup_root or not _SNAPSHOT_NAME.fullmatch(old.name):
+                        raise SnapshotError("old snapshot path failed safety validation")
+                    self._remove_tree_at(backup_fd, old.name, "old backup snapshot")
         return BackupResult(final, source_bytes, self.list_snapshots())
 
     def _validate_staging(self, staging: Path) -> None:

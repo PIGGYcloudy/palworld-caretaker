@@ -6,6 +6,12 @@ v0.4.1 Caretaker 使用 Discord slash command，並以 guild、channel、一般�
 
 ## 建立 Application 與 Bot
 
+## Web 面板的 4 步快速嚮導
+
+Web 面板的「Discord 4 步嚮導」適合第一次設定：建立 Bot、貼上 Bot Token、填入 Application ID 後按「一鍵邀群」、最後貼上要使用的文字頻道 ID。Token 輸入後不會再顯示。
+
+嚮導不會猜測 guild 或角色，也不會建立好友連線資訊。為維持 fail-closed 權限模型，仍必須依下文填入 guild ID、一般角色與管理員角色 ID，再啟動 Bot。
+
 1. 登入 [Discord Developer Portal](https://discord.com/developers/applications)，
    選擇 **New Application**，建立專用 Application。
 2. 在 **General Information** 複製 **Application ID**，稍後設定工具會使用。

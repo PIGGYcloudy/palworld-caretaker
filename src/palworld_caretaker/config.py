@@ -26,19 +26,20 @@ def _platform_defaults() -> dict[str, str]:
         root = program_data / "Palworld"
         return {
             "PALWORLD_INSTALL_ROOT": str(root),
-            # Backups are deliberately a sibling rather than a child of the
-            # installation.  The validation contract rejects overlapping
-            # trees so an untouched Windows configuration must obey it too.
-            "PALWORLD_BACKUP_DIR": str(program_data / "PalworldBackups"),
+            # Keep snapshots beside (not inside) the live SaveGames tree.
+            # This is intentionally a very narrow in-server exception: the
+            # validator accepts only this exact sibling, never arbitrary
+            # directories below the installation.
+            "PALWORLD_BACKUP_DIR": str(root / "server/Pal/Saved/SaveGames_Backups"),
             "PALWORLD_BACKUP_MOUNT": "",
             "PALWORLD_BACKUP_REQUIRE_MOUNT": "false",
             "PALWORLD_MANAGER_STATE_DIR": str(root / "state"),
         }
     return {
         "PALWORLD_INSTALL_ROOT": "/srv/palworld",
-        "PALWORLD_BACKUP_DIR": "/mnt/qnap-tyt/palworld-backups",
-        "PALWORLD_BACKUP_MOUNT": "/mnt/qnap-tyt",
-        "PALWORLD_BACKUP_REQUIRE_MOUNT": "true",
+        "PALWORLD_BACKUP_DIR": "/srv/palworld/server/Pal/Saved/SaveGames_Backups",
+        "PALWORLD_BACKUP_MOUNT": "",
+        "PALWORLD_BACKUP_REQUIRE_MOUNT": "false",
         "PALWORLD_MANAGER_STATE_DIR": "/var/lib/palworld-manager",
     }
 
@@ -61,6 +62,7 @@ DEFAULTS: dict[str, str] = {
     "DISCORD_PALWORLD_ALLOWED_GUILD_IDS": "", "DISCORD_PALWORLD_ALLOWED_ROLE_IDS": "",
     "DISCORD_PALWORLD_ADMIN_ROLE_IDS": "", "DISCORD_PALWORLD_ALLOWED_CHANNEL_IDS": "",
     "BACKUP_RETENTION_COUNT": "14", "BACKUP_TIME": "04:30",
+    "PALWORLD_BACKUP_SCHEDULE_ENABLED": "true",
     "SERVER_PASSWORD": "", "ADMIN_PASSWORD": "", "DISCORD_BOT_TOKEN": "",
     "PALWORLD_WEB_UI_USERNAME": "palworld-manager", "PALWORLD_WEB_UI_PASSWORD": "",
     "PALWORLD_WEB_BIND_IP": DEFAULT_WEB_BIND_IP,
@@ -78,7 +80,13 @@ CONFIG_FILES = ("caretaker.env", "server.env", "secrets.env")
 LEGACY_CONFIG_FILE = "palworld.env"
 EDITABLE_CONFIG_DIRECTORY = "editable"
 EDITABLE_CONFIG_FILES = ("caretaker.env", "server.env")
+EDITABLE_SECRET_FILE = "secrets.env"
 EDITABLE_SETTING_KEYS = frozenset(SETTING_SPECS)
+WIZARD_EDITABLE_KEYS = frozenset({
+    "PALWORLD_WEB_BIND_IP", "PALWORLD_WEB_ALLOWED_ORIGINS",
+    "PALWORLD_WEB_ALLOWED_HOSTS", "PALWORLD_BACKUP_SCHEDULE_ENABLED",
+    "DISCORD_PALWORLD_ALLOWED_CHANNEL_IDS",
+})
 # This child is deliberately separate from the general manager state files so
 # the web UI can be granted the narrowest possible writable systemd path.
 SETTINGS_BACKUP_DIRECTORY = "settings-backups"
@@ -190,7 +198,7 @@ def load_config(directory: str | Path, *, schema: ConfigSchema = DEFAULT_SCHEMA,
         source = editable / name
         if source.is_file():
             editable_values = load_env(source)
-            forbidden = sorted(set(editable_values) - EDITABLE_SETTING_KEYS)
+            forbidden = sorted(set(editable_values) - (EDITABLE_SETTING_KEYS | WIZARD_EDITABLE_KEYS))
             if forbidden:
                 raise ConfigError(
                     f"{source}: editable configuration may contain only setting keys: "
@@ -204,6 +212,19 @@ def load_config(directory: str | Path, *, schema: ConfigSchema = DEFAULT_SCHEMA,
         layer = load_env(source)
         values.update(layer)
         web_bind_ip_declared = web_bind_ip_declared or "PALWORLD_WEB_BIND_IP" in layer
+        count += 1
+    # The first-run and Discord wizards may write their two narrowly scoped
+    # secrets into the manager-owned editable directory.  They are applied
+    # after the protected template so a fresh CHANGE_ME placeholder cannot
+    # mask the user's deliberate first-run value.
+    editable_secret = editable / EDITABLE_SECRET_FILE
+    if editable_secret.is_file():
+        editable_values = load_env(editable_secret)
+        forbidden = sorted(set(editable_values) - {"SERVER_PASSWORD", "DISCORD_BOT_TOKEN"})
+        if forbidden:
+            raise ConfigError(f"{editable_secret}: editable secrets may contain only SERVER_PASSWORD or DISCORD_BOT_TOKEN: "
+                              f"{', '.join(forbidden)}")
+        values.update(editable_values)
         count += 1
     if require_file and not count:
         raise ConfigError(f"{root}: no deployment configuration file found")
@@ -263,10 +284,14 @@ def _validate_core(values: Mapping[str, str]) -> None:
     # Compare both the configured spelling and the target of every existing
     # ancestor.  In particular, ``D:\outside\junction\backup`` must not
     # evade this guard when ``junction`` targets the installation tree.
-    if (_below(backup, install) or _below(install, backup)
+    allowed_sibling = server / "Pal/Saved/SaveGames_Backups"
+    physical_allowed_sibling = physical_server / "Pal/Saved/SaveGames_Backups"
+    backup_is_allowed_sibling = backup == allowed_sibling and physical_backup == physical_allowed_sibling
+    if ((_below(backup, install) or _below(install, backup)
             or _below(backup, server) or _below(server, backup)
             or _below(physical_backup, physical_install) or _below(physical_install, physical_backup)
-            or _below(physical_backup, physical_server) or _below(physical_server, physical_backup)):
+            or _below(physical_backup, physical_server) or _below(physical_server, physical_backup))
+            and not backup_is_allowed_sibling):
         raise ConfigError("PALWORLD_BACKUP_DIR must not overlap the Palworld installation or server root")
     if _bool(values, "PALWORLD_BACKUP_REQUIRE_MOUNT") and (mount is None or backup == mount or not _below(backup, mount)):
         raise ConfigError("PALWORLD_BACKUP_DIR must be below PALWORLD_BACKUP_MOUNT when mount checking is enabled")
@@ -287,6 +312,7 @@ def _validate_core(values: Mapping[str, str]) -> None:
         raise ConfigError(str(exc)) from exc
     if not re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", values.get("BACKUP_TIME", "")):
         raise ConfigError("BACKUP_TIME must use 24-hour HH:MM format")
+    _bool(values, "PALWORLD_BACKUP_SCHEDULE_ENABLED")
     for key in ("PALWORLD_SERVICE_USER", "PALWORLD_MANAGER_USER"):
         if not _ACCOUNT_RE.fullmatch(values.get(key, "")):
             raise ConfigError(f"{key} is not a valid system account name")

@@ -332,7 +332,27 @@ _SPECS = tuple(replace(spec, description=_DESCRIPTIONS[spec.key]) for spec in _S
 SETTING_SPECS: dict[str, SettingSpec] = {spec.key: spec for spec in _SPECS}
 EDITABLE_DEFAULTS: dict[str, str] = {spec.key: spec.default for spec in _SPECS}
 _TIME = re.compile(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]\Z")
-_INI_RESERVED = frozenset(',()"')
+_INI_RESERVED = frozenset(",()\"'")
+
+
+def validate_ini_password(value: object, *, key: str = "SERVER_PASSWORD") -> str:
+    """Validate a password that will be embedded in Palworld's INI tuple.
+
+    First-run setup is the only browser path that writes a game password, so
+    it must use the exact same grammar boundary as the renderers.  Keeping the
+    check here avoids a permissive wizard publishing a value which a later
+    renderer rejects (or which alters the comma-delimited OptionSettings
+    tuple).
+    """
+    if not isinstance(value, str) or not value or len(value) > 256:
+        raise ConfigError(f"{key} must be 1–256 characters")
+    if any(character in value for character in ("\x00", "\r", "\n")):
+        raise ConfigError(f"{key} contains a forbidden control character")
+    if value.endswith("\\"):
+        raise ConfigError(f"{key} must not end with a backslash")
+    if any(character in value for character in _INI_RESERVED):
+        raise ConfigError(f"{key} contains an INI-reserved character")
+    return value
 
 
 def _string(value: object, spec: SettingSpec) -> str:

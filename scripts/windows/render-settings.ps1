@@ -5,7 +5,7 @@ $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'Caretaker.Common.psm1') -Force
 
 function ConvertTo-IniValue([string]$Name, [string]$Value, [bool]$Quoted = $false) {
-    if ($Value.IndexOfAny([char[]]"`r`n,()") -ge 0 -or $Value.EndsWith('\')) { throw "$Name contains an INI-reserved character." }
+    if ($Value.IndexOfAny([char[]]"`r`n,()'`"") -ge 0 -or $Value.EndsWith('\')) { throw "$Name contains an INI-reserved character." }
     if ($Quoted) {
         if ($Value.Contains('"')) { throw "$Name contains an INI-reserved character." }
         return '"' + $Value + '"'

@@ -5,7 +5,7 @@
 遠端操作與受驗證的 Web 管理面板；不建議直接將管理介面暴露到 Internet。
 
 > [!IMPORTANT]
-> v0.8.0 支援 Ubuntu 24.04 LTS amd64 的原生 systemd 部署、Docker Compose
+> v0.9.0 支援 Ubuntu 24.04 LTS amd64 的原生 systemd 部署、Docker Compose
 > 一鍵容器化開服，以及 Windows 原生 PowerShell 維運腳本。Docker 模式維持 container
 > `0.0.0.0:8765` listener、預設只發布到 host loopback；若要 LAN/VPN 存取，需登錄
 > 精確的 Host/Origin 白名單。原生 systemd 模式預設維持 loopback Web UI，並可透過
@@ -174,17 +174,17 @@ maintenance 或服務狀態時一律拒絕。備份若伺服器運行，必須�
 寫入與 Web 顯示前都會遮蔽 token、password、secret、key、auth 與 cookie 等
 credential；檔案預設為 manager 擁有的 `0640` regular file。
 
-## Windows 原生 PowerShell 維運（v0.7.0）
+## Windows 原生 PowerShell 維運（v0.9.0）
 
 Windows 主機可直接使用 `scripts/windows/` 下的 PowerShell 入口，不需要 systemd。
 請使用 PowerShell 7（`pwsh`），並先將同一套 UTF-8 `KEY=VALUE` 設定檔放在部署
-設定目錄；至少指定安裝根目錄、獨立於安裝根目錄的備份目錄，以及 Windows 上的
+設定目錄；至少指定安裝根目錄、遊戲存檔同級的備份目錄，以及 Windows 上的
 `PALWORLD_BACKUP_REQUIRE_MOUNT=false`：
 
 ```env
 PALWORLD_INSTALL_ROOT=C:\Palworld
 PALWORLD_SERVER_ROOT=C:\Palworld\server
-PALWORLD_BACKUP_DIR=D:\PalworldBackups
+PALWORLD_BACKUP_DIR=C:\Palworld\server\Pal\Saved\SaveGames_Backups
 PALWORLD_BACKUP_MOUNT=
 PALWORLD_BACKUP_REQUIRE_MOUNT=false
 PALWORLD_MANAGER_STATE_DIR=C:\ProgramData\Palworld\state
@@ -316,7 +316,7 @@ sudo systemctl status palworld-web-ui.service --no-pager
 
 ## Docker / Compose 部署
 
-v0.8.0 提供 [`Dockerfile`](Dockerfile)、[`docker-compose.yml`](docker-compose.yml)、
+v0.9.0 提供 [`Dockerfile`](Dockerfile)、[`docker-compose.yml`](docker-compose.yml)、
 PID 1 [`docker/docker-supervisor.py`](docker/docker-supervisor.py) 與完整的
 [`docs/DOCKER.md`](docs/DOCKER.md)。快速建立一次性設定並啟動：
 
@@ -378,6 +378,10 @@ REST API 存檔並要求正常關服，才取得一致 snapshot，再以 SteamCM
 更新伺服器。若正常關服失敗，維護會中止，不會以強制終止取代。若維護開始
 前伺服器正在運行，完成後才會重新啟動；開始前已關閉則維持關閉。還原使用：
 
+新安裝預設將備份放在遊戲存檔同級的
+`<PALWORLD_INSTALL_ROOT>/server/Pal/Saved/SaveGames_Backups`。Docker Compose
+則維持獨立的 `./data/backups` volume，以隔離容器中的遊戲資料與備份。
+
 ```bash
 sudo "<PALWORLD_INSTALL_ROOT>/scripts/restore-palworld.sh"
 sudo "<PALWORLD_INSTALL_ROOT>/scripts/restore-palworld.sh" restore palworld-YYYYMMDD-HHMMSS
@@ -397,10 +401,10 @@ CLI 還原會在停止服務前再次驗證 snapshot，要求輸入精確確認�
 方式見 [`SECURITY.md`](SECURITY.md)。GitHub Actions 會執行 Python 測試、Python
 編譯、PowerShell parser 檢查、Bash 語法檢查、ShellCheck 與 release 產物驗證，
 並在 Linux 與 `windows-latest` matrix 上執行跨平台驗證。從乾淨且已提交的
-v0.7.0 source tree 建立 tarball 與 checksum：
+v0.9.0 source tree 建立 tarball 與 checksum：
 
 ```bash
-scripts/package-release.sh --output dist/palworld-caretaker-v0.7.0.tar.gz
+scripts/package-release.sh --output dist/palworld-caretaker-v0.9.0.tar.gz
 (cd dist && sha256sum --check SHA256SUMS)
 ```
 

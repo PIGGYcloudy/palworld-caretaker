@@ -26,6 +26,15 @@ from palworld_caretaker.web import WebDependencies, WebUIError
 
 
 class PortablePathTests(unittest.TestCase):
+    def test_double_click_launcher_checks_python_starts_service_and_opens_panel(self):
+        launchers = list(Path(__file__).parents[1].glob("*.bat"))
+        self.assertEqual(len(launchers), 1)
+        launcher = launchers[0].read_text(encoding="utf-8")
+        self.assertIn("import palworld_caretaker", launcher)
+        self.assertIn("palworld-service.ps1", launcher)
+        self.assertIn("/healthz", launcher)
+        self.assertIn("http://127.0.0.1:%PORT%/", launcher)
+
     def test_native_path_normalizes_current_platform_separators(self):
         value = native_path("alpha/beta" if os.name == "nt" else "alpha/beta")
         self.assertEqual(value, Path("alpha") / "beta")
@@ -132,12 +141,10 @@ class PortablePathTests(unittest.TestCase):
             shutil.rmtree(base)
 
     @unittest.skipUnless(os.name == "nt", "Windows path semantics")
-    def test_windows_defaults_are_independent_and_validate_unchanged(self):
+    def test_windows_defaults_use_the_safe_savegames_sibling_and_validate_unchanged(self):
         install = Path(DEFAULTS["PALWORLD_INSTALL_ROOT"])
         backup = Path(DEFAULTS["PALWORLD_BACKUP_DIR"])
-        self.assertNotEqual(install, backup)
-        self.assertNotIn(install, backup.parents)
-        self.assertNotIn(backup, install.parents)
+        self.assertEqual(backup, install / "server" / "Pal" / "Saved" / "SaveGames_Backups")
         CaretakerConfig(dict(DEFAULTS))
 
     @unittest.skipUnless(os.name == "nt", "Windows reparse-point semantics")

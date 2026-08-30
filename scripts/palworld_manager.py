@@ -88,9 +88,9 @@ class DiagnosticCheck:
 DEFAULT_CONFIG: dict[str, str] = {
     "PALWORLD_INSTALL_ROOT": "/srv/palworld",
     "PALWORLD_SERVER_ROOT": "",
-    "PALWORLD_BACKUP_DIR": "/mnt/qnap-tyt/palworld-backups",
-    "PALWORLD_BACKUP_MOUNT": "/mnt/qnap-tyt",
-    "PALWORLD_BACKUP_REQUIRE_MOUNT": "true",
+    "PALWORLD_BACKUP_DIR": "/srv/palworld/server/Pal/Saved/SaveGames_Backups",
+    "PALWORLD_BACKUP_MOUNT": "",
+    "PALWORLD_BACKUP_REQUIRE_MOUNT": "false",
     "PALWORLD_MANAGER_STATE_DIR": "/var/lib/palworld-manager",
     "PALWORLD_SERVICE_USER": "palworld",
     "PALWORLD_MANAGER_USER": "palworld-manager",
@@ -142,6 +142,7 @@ DEFAULT_CONFIG: dict[str, str] = {
     "PALWORLD_SAVEGAMES_EXPORT_MAX_BYTES": str(8 * 1024 ** 3),
     "BACKUP_RETENTION_COUNT": "14",
     "BACKUP_TIME": "04:30",
+    "PALWORLD_BACKUP_SCHEDULE_ENABLED": "true",
     "SERVER_PASSWORD": "",
     "ADMIN_PASSWORD": "",
     "DISCORD_BOT_TOKEN": "",
@@ -173,6 +174,8 @@ EDITABLE_SETTING_KEYS = frozenset({
     "BUILD_OBJECT_DAMAGE_RATE", "BUILD_OBJECT_DETERIORATION_DAMAGE_RATE",
     "AUTO_RESET_WORKER_PAL_WHEN_SERVER_RESTART", "PALWORLD_IDLE_SHUTDOWN_ENABLED",
     "PALWORLD_IDLE_TIMEOUT_MINUTES", "BACKUP_RETENTION_COUNT", "BACKUP_TIME",
+    "PALWORLD_WEB_BIND_IP", "PALWORLD_WEB_ALLOWED_ORIGINS", "PALWORLD_WEB_ALLOWED_HOSTS",
+    "PALWORLD_BACKUP_SCHEDULE_ENABLED", "DISCORD_PALWORLD_ALLOWED_CHANNEL_IDS",
 })
 SETTINGS_BACKUP_DIRECTORY = "settings-backups"
 _KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
@@ -281,6 +284,15 @@ def load_config(
     if path.is_file():
         config.update(load_env(path))
         loaded += 1
+    editable_secret = directory / EDITABLE_CONFIG_DIRECTORY / "secrets.env"
+    if editable_secret.is_file():
+        values = load_env(editable_secret)
+        forbidden = sorted(set(values) - {"SERVER_PASSWORD", "DISCORD_BOT_TOKEN"})
+        if forbidden:
+            raise ConfigError(f"{editable_secret}: editable secrets may contain only SERVER_PASSWORD or DISCORD_BOT_TOKEN: "
+                              f"{', '.join(forbidden)}")
+        config.update(values)
+        loaded += 1
     if require_file and not loaded:
         raise ConfigError(f"{directory}: no deployment configuration file found")
     return config
@@ -332,7 +344,9 @@ def validate_config(config: dict[str, str]) -> dict[str, Path | None]:
     if (install_root == Path("/") or backup_dir == Path("/") or
             state_dir == Path("/") or backup_mount == Path("/")):
         raise ConfigError("deployment paths must not be the filesystem root")
-    if _is_relative_to(backup_dir, install_root) or _is_relative_to(install_root, backup_dir):
+    server_root = _absolute_path(config, "PALWORLD_SERVER_ROOT") if config.get("PALWORLD_SERVER_ROOT") else install_root / "server"
+    allowed_sibling = server_root / "Pal" / "Saved" / "SaveGames_Backups"
+    if (_is_relative_to(backup_dir, install_root) or _is_relative_to(install_root, backup_dir)) and backup_dir != allowed_sibling:
         raise ConfigError("PALWORLD_BACKUP_DIR and PALWORLD_INSTALL_ROOT must not overlap")
     if require_mount:
         if backup_mount is None:
@@ -388,6 +402,7 @@ def validate_config(config: dict[str, str]) -> dict[str, Path | None]:
     env_int(config, "BACKUP_RETENTION_COUNT", 14, 1, 1000)
     env_bool(config, "PALWORLD_IDLE_SHUTDOWN_ENABLED", True)
     env_bool(config, "PALWORLD_IDLE_WATCHER_DRY_RUN", True)
+    env_bool(config, "PALWORLD_BACKUP_SCHEDULE_ENABLED", True)
     env_bool(config, "AUTO_RESET_WORKER_PAL_WHEN_SERVER_RESTART", False)
     if config.get("DEATH_PENALTY") not in {"None", "Item", "ItemAndEquipment", "All"}:
         raise ConfigError("DEATH_PENALTY must be one of: None, Item, ItemAndEquipment, All")
@@ -408,8 +423,7 @@ def validate_config(config: dict[str, str]) -> dict[str, Path | None]:
         if value and any(not _DISCORD_ID_RE.fullmatch(item.strip()) for item in value.split(",")):
             raise ConfigError(f"{key} must be a comma-separated list of numeric IDs")
 
-    server_root = _absolute_path(config, "PALWORLD_SERVER_ROOT") if config.get("PALWORLD_SERVER_ROOT") else install_root / "server"
-    if (_is_relative_to(backup_dir, server_root) or _is_relative_to(server_root, backup_dir)):
+    if (_is_relative_to(backup_dir, server_root) or _is_relative_to(server_root, backup_dir)) and backup_dir != allowed_sibling:
         raise ConfigError("PALWORLD_BACKUP_DIR and PALWORLD_SERVER_ROOT must not overlap")
     return {
         "install_root": install_root,
@@ -575,13 +589,13 @@ def preflight_values(
         value = config.get(key, "")
         if not value or value.startswith("CHANGE_ME"):
             errors.append(f"{key} must be configured")
-        elif any(character in value for character in ',()"\r\n'):
+        elif value.endswith("\\") or any(character in value for character in ',()"\'\r\n'):
             errors.append(f"{key} contains a Palworld INI-reserved character")
     for key in ("SERVER_NAME", "SERVER_DESCRIPTION"):
         value = config.get(key, "")
         if not value:
             errors.append(f"{key} must not be empty")
-        elif any(character in value for character in ',()"\r\n'):
+        elif value.endswith("\\") or any(character in value for character in ',()"\'\r\n'):
             errors.append(f"{key} contains a Palworld INI-reserved character")
     web_password = config.get("PALWORLD_WEB_UI_PASSWORD", "")
     if web_password and any(character in web_password for character in "\r\n"):
@@ -641,7 +655,7 @@ def preflight_config(
                     manager.pw_uid, manager.pw_gid, 0o750,
                 ):
                     errors.append("editable configuration directory must be manager-owned with mode 0750")
-                for name in EDITABLE_CONFIG_FILES:
+                for name in (*EDITABLE_CONFIG_FILES, "secrets.env"):
                     path = editable / name
                     if path.exists() or path.is_symlink():
                         if path.is_symlink() or not path.is_file():

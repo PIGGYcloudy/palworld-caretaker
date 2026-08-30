@@ -205,8 +205,9 @@ scripts           <install root>/scripts
 local safety copy <install root>/backups-local
 ```
 
-`PALWORLD_BACKUP_DIR` is independent and must not overlap the installation
-root. For a NAS or removable disk, set its exact mountpoint in
+`PALWORLD_BACKUP_DIR` defaults to the SaveGames sibling
+`<server>/Pal/Saved/SaveGames_Backups`. This exact sibling is permitted;
+every other overlapping installation/server path is rejected. For a NAS or removable disk, set its exact mountpoint in
 `PALWORLD_BACKUP_MOUNT` and leave `PALWORLD_BACKUP_REQUIRE_MOUNT=true`. Preflight
 then refuses to operate unless that path is an actual mounted filesystem. This
 prevents a missing NAS from turning into an unnoticed local backup.

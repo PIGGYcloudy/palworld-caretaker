@@ -31,6 +31,7 @@ __pycache__/
 .ruff_cache/
 
 # Editors and operating systems
+.hermes/
 .idea/
 .vscode/
 .DS_Store

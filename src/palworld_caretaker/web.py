@@ -168,6 +168,22 @@ def snapshot_time(name: str) -> str | None:
         return None
 
 
+def friendly_snapshot_time(name: str, *, now: datetime | None = None) -> str | None:
+    """Render snapshot time for humans without exposing a technical timestamp."""
+    created = snapshot_time(name)
+    if created is None:
+        return None
+    instant = datetime.fromisoformat(created.replace("Z", "+00:00")).astimezone()
+    local_now = now.astimezone() if now is not None else datetime.now().astimezone()
+    days = (local_now.date() - instant.date()).days
+    clock = instant.strftime("%H:%M")
+    if days == 0:
+        return f"今天 {clock}"
+    if days == 1:
+        return f"昨天 {clock}"
+    return instant.strftime("%Y/%m/%d %H:%M")
+
+
 def redact_secrets(text: str, config: CaretakerConfig) -> str:
     """Defence in depth for diagnostic text, which should already be secret-free."""
     for key in ("DISCORD_BOT_TOKEN", "ADMIN_PASSWORD", "SERVER_PASSWORD"):
@@ -552,13 +568,20 @@ class WebDependencies:
 
     def backups_payload(self) -> dict[str, Any]:
         snapshots = []
+        total_bytes = 0
         for item in self.backups.list_snapshots():
             size = self.backups.snapshot_size(item)
+            total_bytes += size
             snapshots.append({
                 "name": item.name, "created_at": snapshot_time(item.name),
+                "display_time": friendly_snapshot_time(item.name),
                 "size_bytes": size, "size": format_bytes(size),
             })
-        return {"snapshots": snapshots}
+        return {
+            "snapshots": snapshots, "total_count": len(snapshots),
+            "total_size_bytes": total_bytes, "total_size": format_bytes(total_bytes),
+            "backup_folder": str(self.config.backup_root),
+        }
 
     def players_payload(self) -> dict[str, Any]:
         """Return player records needed for local moderation controls."""
@@ -726,7 +749,80 @@ class WebDependencies:
                  "default": spec.default, "description": spec.description}
                 for spec in specifications if not spec.secret
             ]})
-        return {"categories": fields, "restart_required": self._restart_required()}
+        common = (
+            "SERVER_NAME", "SERVER_PASSWORD", "MAX_PLAYERS", "EXP_RATE", "PAL_CAPTURE_RATE",
+            "COLLECTION_DROP_RATE", "DEATH_PENALTY", "BASE_CAMP_WORKER_MAX_NUM",
+            "PALWORLD_IDLE_SHUTDOWN_ENABLED", "PALWORLD_IDLE_TIMEOUT_MINUTES",
+        )
+        # Password is intentionally not returned through the normal editor;
+        # the onboarding screen owns its manual first-run entry.
+        return {"categories": fields, "common_keys": [key for key in common if key != "SERVER_PASSWORD"],
+                "restart_required": self._restart_required()}
+
+    def onboarding_payload(self) -> dict[str, Any]:
+        password = self.config.values.get("SERVER_PASSWORD", "")
+        required = not password or password.startswith("CHANGE_ME")
+        return {
+            "required": required,
+            "backup_time": self.config.values.get("BACKUP_TIME", "04:30"),
+            "backup_enabled": self.config.values.get("PALWORLD_BACKUP_SCHEDULE_ENABLED", "true") == "true",
+            "bind_mode": "lan" if self.config.values.get("PALWORLD_WEB_BIND_IP") == "0.0.0.0" else "local",
+        }
+
+    def complete_onboarding(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        try:
+            with self.operation_lock():
+                store = self._settings_store()
+                before = store.current()
+                password = before.values.get("SERVER_PASSWORD", "")
+                if password and not password.startswith("CHANGE_ME"):
+                    raise SettingsValidationError("首次開服精靈已完成，拒絕重複提交")
+                current = store.complete_onboarding(
+                    server_password=payload.get("server_password"), backup_time=payload.get("backup_time"),
+                    bind_mode=payload.get("bind_mode"), lan_origin=payload.get("lan_origin", ""),
+                )
+                self.config = current
+        except OperationLockBusy as exc:
+            raise OperationInProgress(str(exc)) from exc
+        except ConfigError as exc:
+            raise SettingsValidationError(str(exc)) from exc
+        return {"message": "首次設定已儲存。重新啟動管理面板後會套用網路設定。"}
+
+    def configure_discord(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        token, channel = payload.get("token"), payload.get("channel_id")
+        if not isinstance(token, str) or not token.strip() or len(token) > 256 or any(c in token for c in "\x00\r\n"):
+            raise SettingsValidationError("Discord Token 格式不正確")
+        if not isinstance(channel, str) or not re.fullmatch(r"[0-9]+", channel):
+            raise SettingsValidationError("頻道 ID 必須是數字")
+        try:
+            with self.operation_lock():
+                store = self._settings_store()
+                self.config = store.configure_discord(token=token.strip(), channel_id=channel)
+        except OperationLockBusy as exc:
+            raise OperationInProgress(str(exc)) from exc
+        except (ConfigError, OSError, RuntimeError) as exc:
+            raise SettingsValidationError(str(exc)) from exc
+        return {"message": "Discord Token 與頻道 ID 已儲存。請依完整文件填入 guild 與角色 ID 後啟動 Bot。"}
+
+    def configure_network(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        mode = payload.get("bind_mode")
+        password = self.config.values.get("SERVER_PASSWORD", "")
+        if not password or password.startswith("CHANGE_ME"):
+            raise SettingsValidationError("請先完成首次開服精靈")
+        try:
+            with self.operation_lock():
+                current = self._settings_store().complete_onboarding(
+                    server_password=password,
+                    backup_time=self.config.values.get("BACKUP_TIME", "04:30")
+                    if self.config.values.get("PALWORLD_BACKUP_SCHEDULE_ENABLED", "true") == "true" else "off",
+                    bind_mode=mode, lan_origin=payload.get("lan_origin", ""),
+                )
+                self.config = current
+        except OperationLockBusy as exc:
+            raise OperationInProgress(str(exc)) from exc
+        except ConfigError as exc:
+            raise SettingsValidationError(str(exc)) from exc
+        return {"message": "進階網路設定已儲存。請重新啟動管理面板後再以新網址開啟。"}
 
     @staticmethod
     def _settings_values(payload: Mapping[str, Any]) -> Mapping[str, object]:
@@ -766,22 +862,25 @@ def _page(token: str) -> bytes:
 <title>Palworld Caretaker</title><style nonce={token}>
 body{{font:16px system-ui,sans-serif;margin:2rem;max-width:58rem;color:#17212b;background:#f8fafc}}h1{{margin-bottom:.2rem}}section{{background:#fff;border:1px solid #d9e1ea;border-radius:.5rem;padding:1rem;margin:1rem 0}}button{{padding:.55rem .8rem;margin:.2rem}}#message{{min-height:1.5rem}}ul{{padding-left:1.3rem}}fieldset{{border:0;border-top:1px solid #d9e1ea;margin:1rem 0;padding:1rem 0}}legend{{font-weight:650}}.setting-row{{display:grid;grid-template-columns:minmax(12rem,1fr) auto minmax(12rem,2fr) auto;gap:.5rem;align-items:center;margin:.55rem 0}}input,select{{font:inherit;padding:.35rem}}#settings-diff{{white-space:pre-wrap}}.notice{{color:#8a4b00}}.help{{position:relative;border:1px solid #64748b;border-radius:50%;width:1.35rem;height:1.35rem;padding:0;margin:0;background:#fff;color:#334155;font-weight:700;line-height:1;cursor:help}}.help-tooltip{{display:none;position:absolute;z-index:1;left:calc(100% + .45rem);top:-.5rem;width:min(21rem,70vw);padding:.55rem;border-radius:.35rem;background:#17212b;color:#fff;font-weight:400;font-size:.875rem;line-height:1.35;text-align:left;box-shadow:0 .2rem .7rem #0004}}.help:hover .help-tooltip,.help:focus .help-tooltip{{display:block}}.reset-setting{{white-space:nowrap}}@media(max-width:42rem){{.setting-row{{grid-template-columns:1fr auto}}.setting-row input,.setting-row select{{grid-column:1/-1}}.help-tooltip{{left:0;top:calc(100% + .35rem)}}}}
 </style></head><body><h1>Palworld Caretaker</h1><p>受認證的管理介面；請只透過受信任的本機、LAN 或 VPN 網路使用。</p>
+<section id=\"onboarding\" hidden><h2>首次開服精靈</h2><p>密碼由你手動輸入；系統不會隨機生成。</p><form id=\"onboarding-form\"><label>伺服器密碼 <input name=\"server_password\" type=\"password\" required></label><p><label>自動備份時間 <select name=\"backup_time\"><option value=\"04:30\">每天 04:30</option><option value=\"00:00\">每天 00:00</option><option value=\"12:00\">每天 12:00</option><option value=\"off\">關閉自動備份</option></select></label></p><p><label>面板範圍 <select name=\"bind_mode\" id=\"wizard-bind\"><option value=\"local\">本機 (127.0.0.1)</option><option value=\"lan\">家中區網 (0.0.0.0)</option></select></label></p><p id=\"wizard-lan\" hidden><label>家中區網面板網址 <input name=\"lan_origin\" placeholder=\"http://192.168.1.20:8765\"></label><br><span class=\"notice\">僅限可信任 LAN/VPN，勿公開到網際網路。</span></p><button type=\"submit\">完成首次設定</button></form></section>
 <section><h2>伺服器狀態</h2><div id=\"status\">讀取中…</div></section>
 <section><h2>線上玩家</h2><ul id=\"players\"></ul></section>
 <section><h2>遊戲內公告</h2><form id=\"announce-form\"><label><span>公告內容</span><input id=\"announce-message\" name=\"message\" maxlength=\"1024\" required></label><button type=\"submit\">發送公告</button></form></section>
-<section><h2>備份快照</h2><ul id=\"backups\"></ul><button data-action=\"backup\">立即安全備份</button><p>還原會先停止伺服器並保留本機 safety backup。</p><select id=\"restore-snapshot\"></select><button id=\"restore\">從快照還原</button></section>
+<section><h2>備份快照</h2><p id=\"backup-summary\">讀取中…</p><ul id=\"backups\"></ul><button data-action=\"backup\">立即安全備份</button><button id=\"copy-backup-folder\">查看備份資料夾</button><p id=\"backup-folder\"></p><p>還原會先停止伺服器並保留本機 safety backup。</p><select id=\"restore-snapshot\"></select><button id=\"restore\">從快照還原</button></section>
 <section><h2>SaveGames 匯出</h2><p>會先要求伺服器存檔，再下載目前使用中的 SaveGames 壓縮檔。</p><button id=\"savegames-download\">下載 SaveGames</button></section>
 <section><h2>安全操作</h2><button data-action=\"start\">啟動</button><button data-action=\"stop\">安全關閉</button><button data-action=\"restart\">安全重啟</button><p id=\"message\" role=\"status\"></p></section>
 <section><h2>SteamCMD 維護</h2><div id=\"maintenance\">讀取中…</div><button id=\"maintenance-trigger\">執行備份與更新</button></section>
 <section><h2>最近操作紀錄</h2><ul id=\"audit\"></ul></section>
-<section><h2>世界設定</h2><p id=\"restart-notice\" class=\"notice\" hidden>伺服器正在運行；儲存後必須重新啟動才會生效。</p><form id=\"settings-form\"><div id=\"settings-fields\">讀取中…</div><button type=\"button\" id=\"preview-settings\">預覽變更</button><button type=\"submit\">儲存設定</button></form><output id=\"settings-diff\" aria-live=\"polite\"></output></section>
+<section><h2>世界設定</h2><p id=\"restart-notice\" class=\"notice\" hidden>伺服器正在運行；儲存後必須重新啟動才會生效。</p><form id=\"settings-form\"><details open><summary>常用參數</summary><div id=\"common-settings\">讀取中…</div></details><details><summary>全部參數</summary><div id=\"settings-fields\">讀取中…</div></details><button type=\"button\" id=\"preview-settings\">預覽變更</button><button type=\"submit\">儲存設定</button></form><output id=\"settings-diff\" aria-live=\"polite\"></output></section>
+<section><h2>Discord 4 步嚮導</h2><ol><li>建立 Bot</li><li>填 Token</li><li>一鍵邀群</li><li>填頻道 ID</li></ol><form id=\"discord-form\"><label>Bot Token <input name=\"token\" type=\"password\" required></label><p><label>Application ID <input name=\"application_id\" inputmode=\"numeric\" pattern=\"[0-9]+\" required></label><button type=\"button\" id=\"discord-invite\">一鍵邀群</button></p><label>頻道 ID <input name=\"channel_id\" inputmode=\"numeric\" pattern=\"[0-9]+\" required></label><button type=\"submit\">儲存</button></form><p>完整 guild／角色設定請看 GitHub 文件。</p></section>
+<section><details><summary>進階設定</summary><p>預設為本機模式。家中區網 (0.0.0.0) 僅限可信任 LAN/VPN，勿公開到網際網路。</p><form id=\"advanced-network-form\"><label>面板範圍 <select name=\"bind_mode\" id=\"advanced-bind\"><option value=\"local\">本機 (127.0.0.1)</option><option value=\"lan\">家中區網 (0.0.0.0)</option></select></label><p id=\"advanced-lan\" hidden><label>家中區網面板網址 <input name=\"lan_origin\" placeholder=\"http://192.168.1.20:8765\"></label></p><button type=\"submit\">儲存網路設定</button></form></details></section>
 <script nonce={token}>const csrf={escaped_token};
 const request=async(path,options={{}})=>{{const r=await fetch(path,options);const d=await r.json();if(!r.ok)throw Error(d.error||'操作失敗');return d;}};
 const text=(v)=>v===null?'未知':String(v);
 async function refresh(){{try{{const [s,p,b,m,a]=await Promise.all([request('/api/status'),request('/api/players'),request('/api/backups'),request('/api/maintenance/status'),request('/api/audit/logs?limit=10')]);
 document.querySelector('#status').textContent=`服務：${{s.service}}；REST：${{s.api_reachable?'可連線':'無法連線'}}；玩家：${{s.players===null?'未知':s.players.join('、')||'無'}}；CPU：${{text(s.metrics.cpu)}}；記憶體：${{text(s.metrics.memory)}}`;
 const players=document.querySelector('#players');players.replaceChildren(...p.players.map(player=>{{const li=document.createElement('li'),label=document.createElement('span');label.textContent=player.name+(player.user_id?` (${{player.user_id}})`: '（沒有可用 ID）');li.append(label);if(player.user_id)for(const action of ['kick','ban']){{const button=document.createElement('button');button.textContent=action==='kick'?'踢出':'封鎖';button.addEventListener('click',async()=>{{if(!confirm(`確定要${{button.textContent}} ${{player.name}}？`))return;const reason=prompt('原因（可留空）：')??'';try{{const data=await request('/api/players/'+action,{{method:'POST',headers:{{'Content-Type':'application/json','X-Palworld-CSRF':csrf}},body:JSON.stringify({{userid:player.user_id,message:reason}})}});document.querySelector('#message').textContent=data.message;await refresh();}}catch(e){{document.querySelector('#message').textContent=e.message;}}}});li.append(button);}}return li;}}));if(!p.players.length)players.textContent='目前沒有在線玩家。';
-const list=document.querySelector('#backups');list.replaceChildren(...b.snapshots.map(x=>{{const li=document.createElement('li');li.textContent=`${{x.name}} — ${{x.created_at||'時間未知'}} — ${{x.size}}`;return li;}}));
+document.querySelector('#backup-summary').textContent=`總共 ${{b.total_count}} 份備份，佔用 ${{b.total_size}}`;document.querySelector('#backup-folder').textContent='備份資料夾：'+b.backup_folder;const list=document.querySelector('#backups');list.replaceChildren(...b.snapshots.map(x=>{{const li=document.createElement('li');li.textContent=`${{x.display_time||'時間未知'}} — ${{x.size}}`;return li;}}));
 if(!b.snapshots.length)list.textContent='目前沒有可用快照。';const select=document.querySelector('#restore-snapshot');const selected=select.value;select.replaceChildren(...b.snapshots.map(x=>{{const option=document.createElement('option');option.value=x.name;option.textContent=x.name;return option;}}));select.value=selected;
 document.querySelector('#maintenance').textContent=`服務：${{m.service}}；階段：${{m.phase||'尚無紀錄'}}；最新：${{m.latest_log_summary||'尚無紀錄'}}`;
 const audit=document.querySelector('#audit');audit.replaceChildren(...a.entries.map(x=>{{const li=document.createElement('li');li.textContent=`${{x.timestamp}} — ${{x.source}} — ${{x.action}} — ${{x.status}}`;return li;}}));if(!a.entries.length)a.textContent='尚無操作紀錄。';}}catch(e){{document.querySelector('#message').textContent=e.message;}}}}
@@ -795,7 +894,13 @@ const showDiff=data=>{{const changes=data.changes||[];document.querySelector('#s
 async function loadSettings(){{try{{const data=await request('/api/settings');const root=document.querySelector('#settings-fields');root.replaceChildren();for(const category of data.categories){{const fieldset=document.createElement('fieldset'),legend=document.createElement('legend');legend.textContent=category.name;fieldset.append(legend);for(const field of category.fields){{const row=document.createElement('div'),label=document.createElement('label'),help=document.createElement('button'),tooltip=document.createElement('span'),input=document.createElement(field.kind==='choice'||field.kind==='boolean'?'select':'input'),reset=document.createElement('button'),inputId='setting-'+field.key;row.className='setting-row';label.htmlFor=inputId;label.textContent=field.label;help.type='button';help.className='help';help.setAttribute('aria-label',field.label+' 的說明');help.setAttribute('aria-describedby','help-'+field.key);help.textContent='?';tooltip.id='help-'+field.key;tooltip.className='help-tooltip';tooltip.setAttribute('role','tooltip');tooltip.textContent=field.description;help.append(tooltip);input.id=inputId;input.name=field.key;input.required=true;input.setAttribute('aria-describedby',tooltip.id);if(field.kind==='boolean'){{for(const optionValue of ['true','false']){{const option=document.createElement('option');option.value=optionValue;option.textContent=optionValue==='true'?'Enabled':'Disabled';input.append(option);}}}}else if(field.kind==='integer'||field.kind==='number'){{input.type='number';input.step=field.kind==='integer'?'1':'0.1';if(field.minimum!==null)input.min=field.minimum;if(field.maximum!==null)input.max=field.maximum;}}else input.type='text';if(field.kind==='choice')for(const optionValue of field.choices){{const option=document.createElement('option');option.value=optionValue;option.textContent=optionValue;input.append(option);}}input.value=field.value;reset.type='button';reset.className='reset-setting';reset.textContent='重置';reset.title='重置為預設值：'+field.default;reset.setAttribute('aria-label',field.label+' 重置為預設值 '+field.default);reset.addEventListener('click',()=>{{input.value=field.default;input.dispatchEvent(new Event('input',{{bubbles:true}}));input.focus();}});row.append(label,help,input,reset);fieldset.append(row);}}root.append(fieldset);}}showDiff({{changes:[],restart_required:data.restart_required}});}}catch(e){{document.querySelector('#settings-fields').textContent=e.message;}}}}
 const settingsRequest=path=>request(path,{{method:'POST',headers:{{'Content-Type':'application/json','X-Palworld-CSRF':csrf}},body:JSON.stringify({{values:settingsValues()}})}});
 document.querySelector('#preview-settings').addEventListener('click',async()=>{{if(!settingsForm.reportValidity())return;try{{showDiff(await settingsRequest('/api/settings/preview'));}}catch(e){{document.querySelector('#settings-diff').textContent=e.message;}}}});
-settingsForm.addEventListener('submit',async event=>{{event.preventDefault();if(!settingsForm.reportValidity())return;try{{const preview=await settingsRequest('/api/settings/preview');showDiff(preview);if(preview.changes.length&&!confirm('套用以上變更？'))return;const saved=await settingsRequest('/api/settings');showDiff(saved);document.querySelector('#message').textContent=saved.message+(saved.backup?' Backup: '+saved.backup:'');}}catch(e){{document.querySelector('#settings-diff').textContent=e.message;}}}});loadSettings();
+settingsForm.addEventListener('submit',async event=>{{event.preventDefault();if(!settingsForm.reportValidity())return;try{{const preview=await settingsRequest('/api/settings/preview');showDiff(preview);if(preview.changes.length&&!confirm('套用以上變更？'))return;const saved=await settingsRequest('/api/settings');showDiff(saved);document.querySelector('#message').textContent=saved.message+(saved.backup?' Backup: '+saved.backup:'');}}catch(e){{document.querySelector('#settings-diff').textContent=e.message;}}}});async function loadCommon(){{const data=await request('/api/settings'),all=data.categories.flatMap(category=>category.fields),keys=data.common_keys,root=document.querySelector('#common-settings');root.replaceChildren();for(const key of keys){{const field=all.find(item=>item.key===key),full=document.querySelector('#setting-'+key);if(!field||!full)continue;const row=document.createElement('p'),label=document.createElement('label'),input=full.cloneNode(true);input.removeAttribute('name');input.id='common-'+key;label.htmlFor=input.id;label.textContent=field.label+' ';input.addEventListener('input',()=>{{full.value=input.value;full.dispatchEvent(new Event('input',{{bubbles:true}}));}});label.append(input);row.append(label);root.append(row);}}const password=document.createElement('p');password.textContent='伺服器密碼：請於首次開服精靈手動設定。';root.append(password);}}loadSettings().then(loadCommon).catch(()=>{{}});
+document.querySelector('#copy-backup-folder').addEventListener('click',async()=>{{const path=document.querySelector('#backup-folder').textContent.replace('備份資料夾：','');try{{await navigator.clipboard.writeText(path);document.querySelector('#message').textContent='備份資料夾位置已複製。';}}catch(_e){{document.querySelector('#message').textContent=path;}}}});
+const wizard=document.querySelector('#onboarding'),wizardForm=document.querySelector('#onboarding-form'),wizardBind=document.querySelector('#wizard-bind');wizardBind.addEventListener('change',()=>{{document.querySelector('#wizard-lan').hidden=wizardBind.value!=='lan';}});
+async function loadOnboarding(){{try{{const data=await request('/api/onboarding');wizard.hidden=!data.required;wizardForm.backup_time.value=data.backup_enabled?data.backup_time:'off';wizardBind.value=data.bind_mode;wizardBind.dispatchEvent(new Event('change'));}}catch(e){{document.querySelector('#message').textContent=e.message;}}}}loadOnboarding();
+wizardForm.addEventListener('submit',async event=>{{event.preventDefault();if(!wizardForm.reportValidity())return;try{{const data=await request('/api/onboarding',{{method:'POST',headers:{{'Content-Type':'application/json','X-Palworld-CSRF':csrf}},body:JSON.stringify(Object.fromEntries(new FormData(wizardForm).entries()))}});document.querySelector('#message').textContent=data.message;wizard.hidden=true;}}catch(e){{document.querySelector('#message').textContent=e.message;}}}});
+const discordForm=document.querySelector('#discord-form');document.querySelector('#discord-invite').addEventListener('click',()=>{{const id=discordForm.application_id.value;if(!/^[0-9]+$/.test(id)){{document.querySelector('#message').textContent='請先填入數字 Application ID。';return;}}window.open('https://discord.com/oauth2/authorize?client_id='+encodeURIComponent(id)+'&scope=bot%20applications.commands&permissions=3072','_blank','noopener');}});discordForm.addEventListener('submit',async event=>{{event.preventDefault();if(!discordForm.reportValidity())return;try{{const data=await request('/api/discord/setup',{{method:'POST',headers:{{'Content-Type':'application/json','X-Palworld-CSRF':csrf}},body:JSON.stringify(Object.fromEntries(new FormData(discordForm).entries()))}});document.querySelector('#message').textContent=data.message;discordForm.token.value='';}}catch(e){{document.querySelector('#message').textContent=e.message;}}}});
+const networkForm=document.querySelector('#advanced-network-form'),advancedBind=document.querySelector('#advanced-bind');advancedBind.addEventListener('change',()=>{{document.querySelector('#advanced-lan').hidden=advancedBind.value!=='lan';}});networkForm.addEventListener('submit',async event=>{{event.preventDefault();try{{const data=await request('/api/advanced/network',{{method:'POST',headers:{{'Content-Type':'application/json','X-Palworld-CSRF':csrf}},body:JSON.stringify(Object.fromEntries(new FormData(networkForm).entries()))}});document.querySelector('#message').textContent=data.message;}}catch(e){{document.querySelector('#message').textContent=e.message;}}}});
 </script></body></html>""".encode("utf-8")
 
 
@@ -907,6 +1012,8 @@ class _Handler(BaseHTTPRequestHandler):
                 self._json(HTTPStatus.OK, self.server.dependencies.players_payload())
             elif request.path == "/api/settings" and not request.query:
                 self._json(HTTPStatus.OK, self.server.dependencies.settings_payload())
+            elif request.path == "/api/onboarding" and not request.query:
+                self._json(HTTPStatus.OK, self.server.dependencies.onboarding_payload())
             elif request.path == "/api/maintenance/status" and not request.query:
                 self._json(HTTPStatus.OK, self.server.dependencies.maintenance_payload())
             elif request.path == "/api/audit/logs":
@@ -997,6 +1104,45 @@ class _Handler(BaseHTTPRequestHandler):
             except (OSError, RuntimeError):
                 self.server.dependencies.record_audit("settings_change", "failed")
                 self._error(HTTPStatus.SERVICE_UNAVAILABLE, "Settings were not changed safely.")
+            return
+        if request.path == "/api/onboarding":
+            try:
+                result = self.server.dependencies.complete_onboarding(payload)
+                self.server.dependencies.record_audit("onboarding", "success")
+                self._json(HTTPStatus.OK, result)
+            except SettingsValidationError as exc:
+                self.server.dependencies.record_audit("onboarding", "rejected")
+                self._error(HTTPStatus.BAD_REQUEST, str(exc))
+            except OperationInProgress:
+                self._error(HTTPStatus.CONFLICT, "Another operation is already in progress.")
+            except (OSError, RuntimeError):
+                self._error(HTTPStatus.SERVICE_UNAVAILABLE, "First-run settings were not changed safely.")
+            return
+        if request.path == "/api/discord/setup":
+            try:
+                result = self.server.dependencies.configure_discord(payload)
+                self.server.dependencies.record_audit("discord_setup", "success")
+                self._json(HTTPStatus.OK, result)
+            except SettingsValidationError as exc:
+                self.server.dependencies.record_audit("discord_setup", "rejected")
+                self._error(HTTPStatus.BAD_REQUEST, str(exc))
+            except OperationInProgress:
+                self._error(HTTPStatus.CONFLICT, "Another operation is already in progress.")
+            except (OSError, RuntimeError):
+                self._error(HTTPStatus.SERVICE_UNAVAILABLE, "Discord settings were not changed safely.")
+            return
+        if request.path == "/api/advanced/network":
+            try:
+                result = self.server.dependencies.configure_network(payload)
+                self.server.dependencies.record_audit("web_network_change", "success")
+                self._json(HTTPStatus.OK, result)
+            except SettingsValidationError as exc:
+                self.server.dependencies.record_audit("web_network_change", "rejected")
+                self._error(HTTPStatus.BAD_REQUEST, str(exc))
+            except OperationInProgress:
+                self._error(HTTPStatus.CONFLICT, "Another operation is already in progress.")
+            except (OSError, RuntimeError):
+                self._error(HTTPStatus.SERVICE_UNAVAILABLE, "Network settings were not changed safely.")
             return
         if request.path == "/api/backups/restore":
             try:

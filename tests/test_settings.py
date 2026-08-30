@@ -156,7 +156,7 @@ class SettingsSchemaTests(unittest.TestCase):
                 )
 
     def test_runtime_version_matches_the_release(self):
-        self.assertEqual(__version__, "0.8.0")
+        self.assertEqual(__version__, "0.9.0")
 
     def test_server_env_can_override_caretaker_web_bind_ip(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -262,6 +262,27 @@ class SettingsStoreTests(unittest.TestCase):
         self.assertEqual(secret.read_bytes(), before_secret)
         self.assertEqual(root_server.read_bytes(), before_root_server)
 
+    def test_first_run_wizard_writes_only_allowed_editable_secret_and_schedule(self):
+        editable = self.config_dir / "editable"
+        editable.mkdir()
+        current = self.store.complete_onboarding(
+            server_password="chosen-by-player", backup_time="off", bind_mode="local",
+        )
+        self.assertEqual(current.values["SERVER_PASSWORD"], "chosen-by-player")
+        self.assertEqual(current.values["PALWORLD_BACKUP_SCHEDULE_ENABLED"], "false")
+        self.assertIn("SERVER_PASSWORD=chosen-by-player", (editable / "secrets.env").read_text(encoding="utf-8"))
+        caretaker = (editable / "caretaker.env").read_text(encoding="utf-8")
+        self.assertIn("PALWORLD_WEB_BIND_IP=127.0.0.1", caretaker)
+        self.assertIn("PALWORLD_BACKUP_SCHEDULE_ENABLED=false", caretaker)
+
+    def test_first_run_wizard_requires_a_trusted_lan_origin(self):
+        (self.config_dir / "editable").mkdir()
+        with self.assertRaisesRegex(ConfigError, "LAN"):
+            self.store.complete_onboarding(
+                server_password="chosen-by-player", backup_time="04:30",
+                bind_mode="lan", lan_origin="not a URL",
+            )
+
     def test_reload_failure_rolls_back_and_unlinks_a_file_created_for_the_attempt(self):
         (self.config_dir / "server.env").unlink()
         initial = self.store.current()
@@ -358,3 +379,14 @@ class SettingsWebTests(unittest.TestCase):
         status, saved = self.request("/api/settings", method="POST", payload={"values": {"MAX_PLAYERS": "12"}})
         self.assertEqual(status, 200); self.assertIsNotNone(saved["backup"])
         self.assertIn("MAX_PLAYERS=12", (self.config_dir / "server.env").read_text(encoding="utf-8"))
+
+    def test_onboarding_api_requires_manual_password_and_writes_editable_layer(self):
+        (self.config_dir / "editable").mkdir()
+        status, state = self.request("/api/onboarding")
+        self.assertEqual(status, 200); self.assertTrue(state["required"])
+        status, body = self.request("/api/onboarding", method="POST", payload={
+            "server_password": "player-chosen-password", "backup_time": "off", "bind_mode": "local",
+        })
+        self.assertEqual(status, 200); self.assertIn("首次設定", body["message"])
+        self.assertIn("SERVER_PASSWORD=player-chosen-password",
+                      (self.config_dir / "editable" / "secrets.env").read_text(encoding="utf-8"))

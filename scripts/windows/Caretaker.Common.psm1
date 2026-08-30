@@ -4,7 +4,12 @@ $ErrorActionPreference = 'Stop'
 function Get-CaretakerConfig {
     param([Parameter(Mandatory)][string]$ConfigDir)
     $values = @{}
-    foreach ($name in @('caretaker.env', 'server.env', 'secrets.env')) {
+    # Keep the same precedence as the Python loader: protected base settings,
+    # the manager-owned editable child layer, protected secrets, then the two
+    # narrowly allowed editable secrets.  Do not execute dotenv content.
+    foreach ($name in @('palworld.env', 'caretaker.env', 'server.env',
+                         'editable\caretaker.env', 'editable\server.env',
+                         'secrets.env', 'editable\secrets.env')) {
         $path = Join-Path $ConfigDir $name
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { continue }
         $lineNumber = 0
@@ -96,18 +101,21 @@ function Get-PalworldPaths {
     $serverValue = Get-ConfigValue $Config 'PALWORLD_SERVER_ROOT'
     $server = if ($serverValue) { Get-NativePath $serverValue } else { Get-NativePath (Join-Path $install 'server') }
     $backup = Get-NativePath (Get-ConfigValue $Config 'PALWORLD_BACKUP_DIR')
+    $allowedSibling = Get-NativePath (Join-Path $server 'Pal\Saved\SaveGames_Backups')
     if ((Test-CaretakerFilesystemRoot $install) -or (Test-CaretakerFilesystemRoot $server) -or (Test-CaretakerFilesystemRoot $backup)) {
         throw 'Deployment paths must not be a filesystem root.'
     }
-    if ((Test-CaretakerPathBelow $backup $install) -or (Test-CaretakerPathBelow $install $backup) -or
-        (Test-CaretakerPathBelow $backup $server) -or (Test-CaretakerPathBelow $server $backup)) {
+    if (((Test-CaretakerPathBelow $backup $install) -or (Test-CaretakerPathBelow $install $backup) -or
+        (Test-CaretakerPathBelow $backup $server) -or (Test-CaretakerPathBelow $server $backup)) -and
+        (-not [string]::Equals($backup, $allowedSibling, [System.StringComparison]::OrdinalIgnoreCase))) {
         throw 'PALWORLD_BACKUP_DIR must not overlap the Palworld installation or server root.'
     }
     $physicalInstall = Get-CaretakerPhysicalPath $install
     $physicalServer = Get-CaretakerPhysicalPath $server
     $physicalBackup = Get-CaretakerPhysicalPath $backup
-    if ((Test-CaretakerPathBelow $physicalBackup $physicalInstall) -or (Test-CaretakerPathBelow $physicalInstall $physicalBackup) -or
-        (Test-CaretakerPathBelow $physicalBackup $physicalServer) -or (Test-CaretakerPathBelow $physicalServer $physicalBackup)) {
+    if (((Test-CaretakerPathBelow $physicalBackup $physicalInstall) -or (Test-CaretakerPathBelow $physicalInstall $physicalBackup) -or
+        (Test-CaretakerPathBelow $physicalBackup $physicalServer) -or (Test-CaretakerPathBelow $physicalServer $physicalBackup)) -and
+        (-not [string]::Equals($physicalBackup, (Get-CaretakerPhysicalPath $allowedSibling), [System.StringComparison]::OrdinalIgnoreCase))) {
         throw 'PALWORLD_BACKUP_DIR must not overlap the Palworld installation or server root.'
     }
     return @{

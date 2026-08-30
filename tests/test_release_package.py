@@ -10,7 +10,7 @@ from pathlib import Path
 
 @unittest.skipUnless(os.name == "posix", "release packaging uses POSIX tools")
 class ReleasePackageTests(unittest.TestCase):
-    VERSION = "0.8.0"
+    VERSION = "0.9.0"
 
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="palworld-release-")

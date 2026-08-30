@@ -1,11 +1,11 @@
-# 從既有 `/srv/palworld` 升級至 v0.8.0
+# 從既有 `/srv/palworld` 升級至 v0.9.0
 
 升級器只更新 caretaker 管理程式、Python 環境、sudoers 與動態渲染的 systemd
 units；不下載遊戲、不改寫設定層、不刪除世界存檔，也不碰外部備份目的地。
 本指南假設既有部署的設定位於 `/srv/palworld/config`，包括舊式單一
 `palworld.env` 或新的分層設定檔。
 
-v0.8.0 將 REST、備份/還原、設定 schema、maintenance、audit log、跨行程鎖與
+v0.9.0 將 REST、備份/還原、設定 schema、maintenance、audit log、跨行程鎖與
 可設定 Web UI listener 的安全決策集中在 `src/palworld_caretaker/` Python 核心；systemd、
 Bash 與 Discord 只作為平台入口與 adapter。升級會保留既有設定與世界資料，並讓
 所有入口共用同一套 fail-closed 契約。
@@ -28,7 +28,7 @@ Bash 與 Discord 只作為平台入口與 adapter。升級會保留既有設定�
    ```
 
 3. 另行保存目前 release 原始檔或版本號。若升級後要完整回到舊管理程式，必須
-   重新執行舊 release 的升級器；v0.8.0 的自動 safety copy 保存設定、
+   重新執行舊 release 的升級器；v0.9.0 的自動 safety copy 保存設定、
    `PalWorldSettings.ini`、systemd units 與 sudoers，但不是舊程式碼封包。
 
 請先確認備份目的地已掛載且最新 snapshot 含有 `savegames/`、`config/` 與
@@ -36,7 +36,7 @@ Bash 與 Discord 只作為平台入口與 adapter。升級會保留既有設定�
 
 ## 驗證既有設定
 
-下載並解壓 v0.8.0 release，從解壓目錄執行只讀驗證：
+下載並解壓 v0.9.0 release，從解壓目錄執行只讀驗證：
 
 ```bash
 python3 scripts/palworld_manager.py \
@@ -46,7 +46,7 @@ python3 scripts/palworld_manager.py \
 ```
 
 舊式 `palworld.env` 仍受支援，升級不要求拆檔；若使用 root-level
-`caretaker.env`/`server.env`，v0.8.0 會將可編輯 schema 欄位遷移到
+`caretaker.env`/`server.env`，v0.9.0 會將可編輯 schema 欄位遷移到
 `config/editable/`。若要自行重整其他設定，應在另一個維護時段依
 [設定契約](CONFIGURATION.md) 操作，避免同時升級與重整設定。
 不要以 `.example` 覆蓋正式設定。
@@ -54,7 +54,7 @@ python3 scripts/palworld_manager.py \
 ### Docker Compose：v0.7 設定 volume 升級
 
 v0.7 建立的 Docker `config/` volume 沒有
-`PALWORLD_WEB_BIND_IP`。v0.8 會在 container mode 自動將這個**未宣告**的 internal
+`PALWORLD_WEB_BIND_IP`。v0.9 會在 container mode 自動將這個**未宣告**的 internal
 listener 補為 `0.0.0.0`，因此既有 `8765` port mapping 在升級後仍可連線；不必為了這項
 相容性覆寫或重建 volume。若要明確寫入，請在 `config/caretaker.env` 設定：
 

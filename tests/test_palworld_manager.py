@@ -427,6 +427,7 @@ class ManagerTests(unittest.TestCase):
                 "PALWORLD_INSTALL_ROOT": str(install),
                 "PALWORLD_BACKUP_DIR": str(backup),
                 "PALWORLD_BACKUP_MOUNT": str(backup_mount),
+                "PALWORLD_BACKUP_REQUIRE_MOUNT": "true",
                 "PALWORLD_MANAGER_STATE_DIR": str(state),
                 "SERVER_PASSWORD": "server-secret",
                 "ADMIN_PASSWORD": "admin-secret",

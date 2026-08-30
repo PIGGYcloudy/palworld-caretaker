@@ -66,13 +66,38 @@ validate_ids "$admin_ids" || { printf 'Invalid administrator role ID list.\n' >&
 stamp="$(date +%Y%m%d-%H%M%S)"
 backups=()
 temporary_files=()
+published=0
 cleanup() { ((${#temporary_files[@]} == 0)) || rm -f -- "${temporary_files[@]}"; }
-trap cleanup EXIT
+
+rollback_config() {
+  # Every backup retains the target's original mode and ownership.  Restore
+  # through a same-directory temporary plus rename so a failed second write
+  # cannot leave the first Discord setting published on its own.
+  local backup source temporary
+  for backup in "${backups[@]}"; do
+    source="${backup%.pre-discord-$stamp}"
+    temporary="$(mktemp "${source}.rollback.XXXXXX")" || continue
+    if cp --preserve=mode,ownership -- "$backup" "$temporary"; then
+      mv -f -- "$temporary" "$source"
+    else
+      rm -f -- "$temporary"
+    fi
+  done
+}
+
+finish() {
+  local rc=$?
+  trap - EXIT
+  cleanup
+  if (( rc != 0 && published == 0 )); then rollback_config; fi
+  exit "$rc"
+}
+trap finish EXIT
 
 backup_config() {
   local source=$1 backup="${1}.pre-discord-$stamp"
   if [[ ! -e "$backup" ]]; then
-    install -o root -g root -m 0600 "$source" "$backup"
+    cp --preserve=mode,ownership -- "$source" "$backup"
     backups+=("$backup")
   fi
 }
@@ -109,9 +134,10 @@ replace_discord_values "$IDS_CONFIG" 0640 "$IDS_OWNER" \
 unset token
 
 python3 "$MANAGER" --config-dir "$CONFIG_DIR" --no-filesystem >/dev/null || {
-  printf 'Updated Discord configuration failed validation; restore: %s\n' "${backups[*]}" >&2
+  printf 'Updated Discord configuration failed validation; changes were rolled back.\n' >&2
   exit 3
 }
+published=1
 
 systemctl daemon-reload
 systemctl enable --now palworld-discord-bot.service >/dev/null

@@ -219,6 +219,11 @@ class WebUITests(unittest.TestCase):
         self.assertIn(b"label.htmlFor=inputId", page)
         self.assertIn(b"reset.type='button'", page)
         self.assertIn(b"input.value=field.default", page)
+        self.assertIn("首次開服精靈".encode(), page)
+        self.assertIn("常用參數".encode(), page)
+        self.assertIn("全部參數".encode(), page)
+        self.assertIn("Discord 4 步嚮導".encode(), page)
+        self.assertNotIn("好友連線".encode(), page)
 
         status, raw, _headers = self.request("/api/settings")
         self.assertEqual(status, 200)
@@ -238,7 +243,10 @@ class WebUITests(unittest.TestCase):
 
         status, raw, _headers = self.request("/api/backups")
         self.assertEqual(status, 200)
-        self.assertEqual(json.loads(raw)["snapshots"][0]["size"], "4.0 KiB")
+        backups = json.loads(raw)
+        self.assertEqual(backups["snapshots"][0]["size"], "4.0 KiB")
+        self.assertEqual((backups["total_count"], backups["total_size"]), (1, "4.0 KiB"))
+        self.assertTrue(backups["snapshots"][0]["display_time"])
 
     def test_settings_frontend_builds_accessible_controls_and_binds_actions(self):
         """Keep the dynamic DOM contract testable without a browser runtime."""

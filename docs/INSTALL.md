@@ -6,7 +6,7 @@
 
 ## 系統需求
 
-- Ubuntu 24.04 LTS amd64，使用 systemd 與 APT；其他發行版尚未列入 v0.8.0
+- Ubuntu 24.04 LTS amd64，使用 systemd 與 APT；其他發行版尚未列入 v0.9.0
   的支援範圍。
 - 具 `sudo` 權限的登入帳號，以及可連線至 Ubuntu 套件庫、Steam 與 Discord
   （若啟用 Bot）的網路。
@@ -22,13 +22,13 @@
 
 ## 準備設定
 
-先把 `palworld-caretaker-v0.8.0.tar.gz` 與 `SHA256SUMS` 放在同一目錄，驗證並
+先把 `palworld-caretaker-v0.9.0.tar.gz` 與 `SHA256SUMS` 放在同一目錄，驗證並
 解壓：
 
 ```bash
 sha256sum --check SHA256SUMS
-tar -xzf palworld-caretaker-v0.8.0.tar.gz
-cd palworld-caretaker-v0.8.0
+tar -xzf palworld-caretaker-v0.9.0.tar.gz
+cd palworld-caretaker-v0.9.0
 ```
 
 驗證必須顯示 `OK`。接著在專案根目錄建立不受 Git 管理的部署設定：
@@ -72,6 +72,14 @@ Web UI 一律使用 HTTP Basic Auth。帳號由 `caretaker.env` 的
 放入該子目錄。
 
 ### 備份目的地
+
+預設值直接使用遊戲存檔同級目錄：
+
+```env
+PALWORLD_BACKUP_DIR=/srv/palworld/server/Pal/Saved/SaveGames_Backups
+PALWORLD_BACKUP_MOUNT=
+PALWORLD_BACKUP_REQUIRE_MOUNT=false
+```
 
 一般本機磁碟可設定為：
 
@@ -129,9 +137,11 @@ PALWORLD_MANAGER_STATE_DIR=/var/lib/palworld-manager
 <PALWORLD_INSTALL_ROOT>/backups-local
 ```
 
-備份目錄必須位於安裝根目錄之外，所有部署路徑不得為 `/`、相互危險重疊或
-使用 symbolic link。後續命令請使用實際絕對路徑；升級與 Discord 設定尤其要
-傳入 `<PALWORLD_INSTALL_ROOT>/config`。
+備份目錄預設為遊戲存檔同級的 `server/Pal/Saved/SaveGames_Backups`；只有這個
+精確的 `SaveGames_Backups` 位置允許位於 server root 內。其他備份位置必須位於
+安裝根目錄之外，所有部署路徑不得為 `/`、相互危險重疊或使用 symbolic link。
+後續命令請使用實際絕對路徑；升級與 Discord 設定尤其要傳入
+`<PALWORLD_INSTALL_ROOT>/config`。
 
 ## 安裝後驗證
 

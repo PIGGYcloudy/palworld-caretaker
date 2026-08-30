@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import ipaddress
 import os
 from pathlib import Path
 import re
@@ -10,11 +11,13 @@ import shutil
 import stat
 import tempfile
 from typing import Mapping
+from urllib.parse import urlsplit
 
 from .config import CaretakerConfig, SETTINGS_BACKUP_DIRECTORY, load_config
 from .errors import ConfigError
+from .settings import canonical_web_origin, normalize_web_bind_ip
 from .paths import native_path
-from .settings import SETTING_SPECS, validate_edit
+from .settings import SETTING_SPECS, validate_edit, validate_ini_password
 from .windows import is_reparse_point
 
 
@@ -184,6 +187,70 @@ class SettingsStore:
             raise SettingsPersistenceError("configuration backup could not be created") from exc
         return destination
 
+    def _publish_editable(self, updates: Mapping[str, Mapping[str, str]], *, directory: Path | None = None) -> Path:
+        """Back up and atomically publish a group of editable files.
+
+        This is the transaction primitive shared by the normal editor and
+        small-purpose wizards.  Every target is first captured in one backup;
+        a failure while replacing any later file restores all earlier files,
+        including targets created for this attempt.
+        """
+        _safe_directory(self.directory, message="configuration directory is unavailable")
+        editable = directory or self.directory / _EDITABLE_DIRECTORY
+        editable_info = _safe_directory(editable, message="editable configuration directory is unavailable")
+        if os.name != "nt" and (editable_info.st_uid != os.geteuid() or editable_info.st_gid != os.getegid()):
+            raise SettingsPersistenceError("editable configuration directory ownership is unsafe")
+        targets: dict[Path, Mapping[str, str]] = {}
+        for filename, fields in updates.items():
+            if filename not in {*_EDITABLE_FILES, "secrets.env"}:
+                raise SettingsPersistenceError("settings target is not editable")
+            if not fields or any(not isinstance(key, str) or not isinstance(value, str)
+                                 for key, value in fields.items()):
+                raise SettingsPersistenceError("settings update is invalid")
+            targets[editable / filename] = fields
+        originals: dict[Path, bytes | None] = {}
+        owners: dict[Path, tuple[int, int]] = {}
+        for path in targets:
+            info = _regular_file(path, allow_missing=True)
+            if info is not None:
+                if os.name != "nt" and (info.st_uid != os.geteuid() or info.st_gid != os.getegid()):
+                    raise SettingsPersistenceError(f"configuration file ownership is unsafe: {path.name}")
+                originals[path] = path.read_bytes()
+                owners[path] = (info.st_uid, info.st_gid)
+            else:
+                originals[path] = None
+                owners[path] = (os.geteuid(), os.getegid()) if os.name != "nt" else (0, 0)
+        backup = self._backup(originals)
+        attempted: list[Path] = []
+        try:
+            for path, fields in targets.items():
+                attempted.append(path)
+                uid, gid = owners[path]
+                _atomic_write(path, _render_updates(originals[path] or b"", fields), 0o640, uid, gid)
+            # A post-write config parse is part of the transaction, not an
+            # optional follow-up; invalid layered configuration is rolled back.
+            self.current()
+        except (OSError, SettingsPersistenceError, ConfigError) as exc:
+            rollback_error = False
+            for path in reversed(attempted):
+                try:
+                    original = originals[path]
+                    if original is None:
+                        if _regular_file(path, allow_missing=True) is not None:
+                            path.unlink()
+                            _sync_directory(path.parent)
+                    else:
+                        uid, gid = owners[path]
+                        _atomic_write(path, original, 0o640, uid, gid)
+                except (OSError, SettingsPersistenceError):
+                    rollback_error = True
+            if rollback_error:
+                raise SettingsPersistenceError(
+                    "fatal settings commit failure: rollback could not be completed; the automatic backup was retained"
+                ) from exc
+            raise SettingsPersistenceError("settings were not fully applied; the automatic backup was retained") from exc
+        return backup
+
     def commit(self, requested: Mapping[str, object]) -> tuple[CaretakerConfig, tuple[dict[str, str], ...], Path | None]:
         """Back up then atomically publish all changed target files.
 
@@ -196,66 +263,97 @@ class SettingsStore:
         candidate, diff = self.preview(requested, current)
         if not diff:
             return current, diff, None
-        updates: dict[Path, dict[str, str]] = {}
+        updates: dict[str, dict[str, str]] = {}
         editable = self._editable_directory()
-        editable_info = _safe_directory(editable, message="editable configuration directory is unavailable")
-        if os.name != "nt" and (editable_info.st_uid != os.geteuid() or editable_info.st_gid != os.getegid()):
-            raise SettingsPersistenceError("editable configuration directory ownership is unsafe")
         for change in diff:
             spec = SETTING_SPECS[change["key"]]
             filename = f"{spec.target}.env"
             if filename not in _EDITABLE_FILES:
                 raise SettingsPersistenceError("settings target is not editable")
-            updates.setdefault(editable / filename, {})[spec.key] = change["new"]
-        originals: dict[Path, bytes | None] = {}
-        modes: dict[Path, int] = {}
-        owners: dict[Path, tuple[int, int]] = {}
-        for path in updates:
-            info = _regular_file(path, allow_missing=True)
-            if info is not None:
-                # Editable files must remain owned by the web service account.
-                # A root-owned target here would make the next atomic replace
-                # change ownership unexpectedly and indicates a bad migration.
-                if os.name != "nt" and (info.st_uid != os.geteuid() or info.st_gid != os.getegid()):
-                    raise SettingsPersistenceError(f"configuration file ownership is unsafe: {path.name}")
-                originals[path] = path.read_bytes()
-                modes[path] = 0o640
-                owners[path] = (info.st_uid, info.st_gid)
-            else:
-                originals[path] = None
-                modes[path] = 0o640
-                owners[path] = (os.geteuid(), os.getegid()) if os.name != "nt" else (0, 0)
-        backup = self._backup(originals)
-        attempted: list[Path] = []
-        try:
-            for path, fields in updates.items():
-                source = originals[path] if originals[path] is not None else b""
-                uid, gid = owners[path]
-                # os.replace may have happened even if the final directory
-                # fsync reports an error, so include the target in rollback
-                # before attempting the write.
-                attempted.append(path)
-                _atomic_write(path, _render_updates(source, fields), modes[path], uid, gid)
-            # Reload belongs in the protected transaction.  A parse/validation
-            # failure after publishing is a failed commit, not a partial save.
-            reloaded = self.current()
-        except (OSError, SettingsPersistenceError, ConfigError) as exc:
-            rollback_error = False
-            for path in reversed(attempted):
-                try:
-                    original = originals[path]
-                    if original is None:
-                        if _regular_file(path, allow_missing=True) is not None:
-                            path.unlink()
-                            _sync_directory(path.parent)
-                    else:
-                        uid, gid = owners[path]
-                        _atomic_write(path, original, modes[path], uid, gid)
-                except (OSError, SettingsPersistenceError):
-                    rollback_error = True
-            if rollback_error:
-                raise SettingsPersistenceError(
-                    "fatal settings commit failure: rollback could not be completed; the automatic backup was retained"
-                ) from exc
-            raise SettingsPersistenceError("settings were not fully applied; the automatic backup was retained") from exc
-        return reloaded, diff, backup
+            updates.setdefault(filename, {})[spec.key] = change["new"]
+        backup = self._publish_editable(updates, directory=editable)
+        return self.current(), diff, backup
+
+    def complete_onboarding(self, *, server_password: object, backup_time: object,
+                            bind_mode: object, lan_origin: object = "") -> CaretakerConfig:
+        """Persist the deliberately small first-run-only configuration surface.
+
+        The manager account never writes root's secrets file.  Instead its
+        server password is stored in ``editable/secrets.env``; its loader
+        allowlist is deliberately tiny. This keeps the first-run browser flow
+        usable without turning the editable directory into a general secret
+        editor.
+        """
+        server_password = validate_ini_password(server_password)
+        if bind_mode not in {"local", "lan"}:
+            raise ConfigError("bind mode must be local or lan")
+        if backup_time == "off":
+            schedule_enabled, rendered_time = "false", None
+        elif isinstance(backup_time, str) and re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", backup_time):
+            schedule_enabled, rendered_time = "true", backup_time
+        else:
+            raise ConfigError("backup time must be HH:MM or off")
+        origin = ""
+        if bind_mode == "lan":
+            origin = canonical_web_origin(lan_origin) if isinstance(lan_origin, str) else None
+            hostname = urlsplit(origin).hostname if origin is not None else None
+            try:
+                address = ipaddress.ip_address(hostname) if hostname is not None else None
+            except ValueError:
+                address = None
+            # A LAN listener accepts a literal RFC1918/ULA-style private
+            # address only.  DNS, public, loopback, link-local and IPv6
+            # authorities cannot express the bound IPv4 LAN control plane.
+            if (origin is None or not origin.startswith("http://") or not isinstance(address, ipaddress.IPv4Address)
+                    or not address.is_private or address.is_loopback or address.is_link_local
+                    or address.is_unspecified or address.is_multicast):
+                raise ConfigError("a valid private IPv4 LAN http:// address is required")
+            normalize_web_bind_ip("0.0.0.0")
+
+        current = self.current()
+        values = dict(current.values)
+        values.update({
+            "SERVER_PASSWORD": server_password,
+            "PALWORLD_BACKUP_SCHEDULE_ENABLED": schedule_enabled,
+            "PALWORLD_WEB_BIND_IP": "0.0.0.0" if bind_mode == "lan" else "127.0.0.1",
+            "PALWORLD_WEB_ALLOWED_ORIGINS": origin,
+            "PALWORLD_WEB_ALLOWED_HOSTS": "",
+        })
+        if rendered_time is not None:
+            values["BACKUP_TIME"] = rendered_time
+        # Exercise the full config schema before any write.
+        candidate = CaretakerConfig(values, current.schema, current.directory)
+        editable = self.directory / _EDITABLE_DIRECTORY
+        # First-run provisioning must never fall back to the protected root
+        # used by older deployments.  Upgrade once so the installer creates
+        # the manager-owned editable directory.
+        if not editable.is_dir() or editable.is_symlink():
+            raise SettingsPersistenceError("first-run setup requires the editable configuration directory")
+        info = _safe_directory(editable, message="editable configuration directory is unavailable")
+        if os.name != "nt" and (info.st_uid != os.geteuid() or info.st_gid != os.getegid()):
+            raise SettingsPersistenceError("editable configuration directory ownership is unsafe")
+
+        caretaker_updates = {
+            "PALWORLD_BACKUP_SCHEDULE_ENABLED": schedule_enabled,
+            "PALWORLD_WEB_BIND_IP": values["PALWORLD_WEB_BIND_IP"],
+            "PALWORLD_WEB_ALLOWED_ORIGINS": origin,
+            "PALWORLD_WEB_ALLOWED_HOSTS": "",
+        }
+        if rendered_time is not None:
+            caretaker_updates["BACKUP_TIME"] = rendered_time
+        self._publish_editable({
+            "caretaker.env": caretaker_updates,
+            "secrets.env": {"SERVER_PASSWORD": server_password},
+        }, directory=editable)
+        return self.current()
+
+    def configure_discord(self, *, token: str, channel_id: str) -> CaretakerConfig:
+        """Atomically commit the two files used by the Discord mini-wizard."""
+        editable = self.directory / _EDITABLE_DIRECTORY
+        if not editable.is_dir() or editable.is_symlink():
+            raise SettingsPersistenceError("Discord setup requires the editable configuration directory")
+        self._publish_editable({
+            "secrets.env": {"DISCORD_BOT_TOKEN": token},
+            "server.env": {"DISCORD_PALWORLD_ALLOWED_CHANNEL_IDS": channel_id},
+        }, directory=editable)
+        return self.current()
