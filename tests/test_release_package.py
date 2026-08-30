@@ -101,6 +101,14 @@ class ReleasePackageTests(unittest.TestCase):
             )
         )
 
+    def test_windows_launcher_is_tracked_and_packaged(self):
+        launcher = "啟動伺服器與管理面板.bat"
+        tracked = self._run("git", "-c", "core.quotepath=false", "ls-files", "--error-unmatch", launcher)
+        self.assertEqual(tracked.stdout.strip(), launcher)
+        archive = self._package(self.base / "launcher-artifact")
+        with tarfile.open(archive, "r:gz") as release:
+            self.assertIn(f"palworld-caretaker-v{self.VERSION}/{launcher}", release.getnames())
+
     def test_package_is_reproducible_for_the_same_commit(self):
         first = self._package(self.base / "first")
         second = self._package(self.base / "second")

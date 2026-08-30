@@ -3,27 +3,30 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 SERVICE='palworld.service'
+RUN_MODE='manual'
+case "${1:-}" in
+  '') ;;
+  --scheduled) RUN_MODE='scheduled'; shift ;;
+  *) printf 'usage: %s [--scheduled]\n' "$0" >&2; exit 2 ;;
+esac
+(( $# == 0 )) || { printf 'usage: %s [--scheduled]\n' "$0" >&2; exit 2; }
 SCRIPT_HOME="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_DIR="${PALWORLD_CONFIG_DIR:-$(dirname -- "$SCRIPT_HOME")/config}"
 MANAGER="$SCRIPT_HOME/palworld_manager.py"
 [[ -r "$MANAGER" ]] || { printf 'ERROR: configuration manager is missing\n' >&2; exit 1; }
 python3 "$MANAGER" --config-dir "$CONFIG_DIR" || exit $?
-if [[ "$(python3 "$MANAGER" --config-dir "$CONFIG_DIR" --get PALWORLD_BACKUP_SCHEDULE_ENABLED)" != true ]]; then
-  printf '[%s] Scheduled backup is disabled by PALWORLD_BACKUP_SCHEDULE_ENABLED.\n' "$(date --iso-8601=seconds)"
-  exit 0
-fi
-BACKUP_TIME="$(python3 "$MANAGER" --config-dir "$CONFIG_DIR" --get BACKUP_TIME)"
-# The timer wakes once per minute so a web edit of BACKUP_TIME takes effect
-# without a privileged daemon-reload.  Keep the actual daily operation gated
-# here, after loading the current layered configuration.
-# Direct administrator invocations deliberately remain an explicit maintenance
-# request.  A systemd-launched unit has PID 1 as its immediate parent; that is
-# the recurring execution path where the exact-time gate is needed.  Do not
-# rely on INVOCATION_ID because it can be inherited by unrelated shells.
-PARENT_COMM=""
-[[ -r "/proc/$PPID/comm" ]] && IFS= read -r PARENT_COMM < "/proc/$PPID/comm" || true
-if [[ "$PARENT_COMM" == systemd && "$(date +%H:%M)" != "$BACKUP_TIME" ]]; then
-  exit 0
+if [[ "$RUN_MODE" == scheduled ]]; then
+  if [[ "$(python3 "$MANAGER" --config-dir "$CONFIG_DIR" --get PALWORLD_BACKUP_SCHEDULE_ENABLED)" != true ]]; then
+    printf '[%s] Scheduled backup is disabled by PALWORLD_BACKUP_SCHEDULE_ENABLED.\n' "$(date --iso-8601=seconds)"
+    exit 0
+  fi
+  BACKUP_TIME="$(python3 "$MANAGER" --config-dir "$CONFIG_DIR" --get BACKUP_TIME)"
+  # The timer wakes once per minute so a web edit of BACKUP_TIME takes effect
+  # without a privileged daemon-reload.  Only its explicit scheduled unit is
+  # time-gated: systemctl starts from Web/Discord are always manual requests.
+  if [[ "$(date +%H:%M)" != "$BACKUP_TIME" ]]; then
+    exit 0
+  fi
 fi
 STATE_ROOT="$(python3 "$MANAGER" --config-dir "$CONFIG_DIR" --get PALWORLD_MANAGER_STATE_DIR)"
 BACKUP_SCRIPT="$SCRIPT_HOME/backup-palworld.sh"

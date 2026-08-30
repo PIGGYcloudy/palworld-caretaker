@@ -327,6 +327,53 @@ exec /usr/bin/rsync "$@"
         self.assertEqual(self.service_state.read_text(), "active")
         self.assertIn("systemctl start palworld.service", self.command_log.read_text())
 
+    def test_manual_maintenance_runs_when_scheduled_backups_are_disabled(self):
+        caretaker = self.config_dir / "caretaker.env"
+        caretaker.write_text(
+            caretaker.read_text(encoding="utf-8").replace(
+                "PALWORLD_BACKUP_REQUIRE_MOUNT=false\n",
+                "PALWORLD_BACKUP_REQUIRE_MOUNT=false\nPALWORLD_BACKUP_SCHEDULE_ENABLED=false\n",
+            ),
+            encoding="utf-8",
+        )
+
+        result = self._run("daily-palworld-maintenance.sh")
+
+        self.assertEqual(result.returncode, 23, result.stderr)
+        self.assertIn("systemctl stop palworld.service", self.command_log.read_text())
+
+    def test_manual_maintenance_runs_outside_the_scheduled_minute(self):
+        self._write_executable(
+            "date",
+            "#!/usr/bin/env bash\n[[ ${1:-} == +%H:%M ]] && { printf '00:00\\n'; exit 0; }\nexec /usr/bin/date \"$@\"\n",
+        )
+        caretaker = self.config_dir / "caretaker.env"
+        caretaker.write_text(
+            caretaker.read_text(encoding="utf-8") + "BACKUP_TIME=23:59\n",
+            encoding="utf-8",
+        )
+
+        result = self._run("daily-palworld-maintenance.sh")
+
+        self.assertEqual(result.returncode, 23, result.stderr)
+        self.assertIn("systemctl stop palworld.service", self.command_log.read_text())
+
+    def test_scheduled_maintenance_skips_when_scheduled_backups_are_disabled(self):
+        caretaker = self.config_dir / "caretaker.env"
+        caretaker.write_text(
+            caretaker.read_text(encoding="utf-8").replace(
+                "PALWORLD_BACKUP_REQUIRE_MOUNT=false\n",
+                "PALWORLD_BACKUP_REQUIRE_MOUNT=false\nPALWORLD_BACKUP_SCHEDULE_ENABLED=false\n",
+            ),
+            encoding="utf-8",
+        )
+
+        result = self._run("daily-palworld-maintenance.sh", "--scheduled")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Scheduled backup is disabled", result.stdout)
+        self.assertFalse(self.command_log.exists())
+
     def test_restore_rejects_incomplete_snapshot_before_prompt_or_service_stop(self):
         incomplete = self.backup_root / "palworld-20000101-000000"
         (incomplete / "savegames/0/backup").mkdir(parents=True)

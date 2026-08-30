@@ -139,6 +139,26 @@ class UninstallIntegrationTests(unittest.TestCase):
         self.assertFalse(self.config_dir.exists())
         self._assert_backups_preserved()
 
+    def test_full_level_preserves_default_backup_directory_inside_saved(self):
+        default_backups = self.server_root / "Pal/Saved/SaveGames_Backups"
+        default_backups.mkdir()
+        snapshot = default_backups / "palworld-20260830-120000.tar"
+        snapshot.write_text("default backup", encoding="utf-8")
+        caretaker = self.config_dir / "caretaker.env"
+        caretaker.write_text(
+            caretaker.read_text(encoding="utf-8").replace(
+                f"PALWORLD_BACKUP_DIR='{self.external_backups}'",
+                f"PALWORLD_BACKUP_DIR='{default_backups}'",
+            ),
+            encoding="utf-8",
+        )
+
+        result = self._run("all", "--confirm", "DELETE PALWORLD DATA")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.save.exists())
+        self.assertEqual(snapshot.read_text(encoding="utf-8"), "default backup")
+
 
 @unittest.skipUnless(os.name == "posix", "Bash/systemd lifecycle integration is POSIX-only")
 class UpgradeIntegrationTests(unittest.TestCase):

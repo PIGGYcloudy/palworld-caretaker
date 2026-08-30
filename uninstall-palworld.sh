@@ -52,7 +52,8 @@ fi
 
 units=(
   palworld-discord-bot.service palworld-idle-watcher.service
-  palworld-backup.timer palworld-maintenance.service palworld-backup.service
+  palworld-backup.timer palworld-scheduled-maintenance.service
+  palworld-maintenance.service palworld-backup.service
   palworld.service palworld-rest-firewall.service
 )
 if command -v systemctl >/dev/null 2>&1; then
@@ -76,7 +77,22 @@ if [[ "$LEVEL" == game || "$LEVEL" == all ]]; then
 fi
 
 if [[ "$LEVEL" == all ]]; then
-  rm -rf -- "$SERVER_ROOT/Pal/Saved" "$EXPECTED_CONFIG"
+  SAVED_ROOT="$(realpath -m -- "$SERVER_ROOT/Pal/Saved")"
+  BACKUP_ROOT="$(realpath -m -- "$EXTERNAL_BACKUPS")"
+  if [[ "$BACKUP_ROOT" == "$SAVED_ROOT/"* ]]; then
+    # The default backup destination lives inside Pal/Saved.  Preserve its
+    # top-level ancestor and delete only sibling trees; string comparisons
+    # avoid treating any configured path characters as find globs.
+    while IFS= read -r -d '' saved_child; do
+      if [[ "$saved_child" == "$BACKUP_ROOT" || "$BACKUP_ROOT" == "$saved_child/"* ]]; then
+        continue
+      fi
+      rm -rf -- "$saved_child"
+    done < <(find "$SAVED_ROOT" -mindepth 1 -maxdepth 1 -print0)
+  else
+    rm -rf -- "$SAVED_ROOT"
+  fi
+  rm -rf -- "$EXPECTED_CONFIG"
   find "$SERVER_ROOT" -depth -type d -empty -delete 2>/dev/null || true
 fi
 

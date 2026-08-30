@@ -9,14 +9,16 @@ This project follows [Semantic Versioning](https://semver.org/).
 - 新增根目錄「啟動伺服器與管理面板.bat」Windows 雙擊入口：檢查設定與 Python、提升權限啟動 PalServer service、等待 Web UI 健康檢查並開啟瀏覽器。
 - 新增首次開服精靈：伺服器密碼由使用者手動輸入，可選自動備份時間，並可選本機或可信任 LAN/VPN 面板範圍；不隨機產生或顯示密碼，也不提供容易誤導的好友連線卡片。
 - 新增 Discord 4 步快速嚮導，可在 Web UI 填入 Token、Application ID 與頻道 ID；完整 guild／角色權限仍須依文件明確設定。
-- 預設備份改為遊戲存檔同級的 `SaveGames_Backups/`；Web UI 提供備份資料夾位置、直觀時間、檔案大小、總份數與總佔用空間。
-- Web UI 將遊戲設定整理為預設展開的「常用參數」與預設摺疊的「全部參數」，並將 LAN 綁定切換與安全提醒置於「進階設定」。
+- 遊戲參數分層為預設展開的「常用參數」9 項與預設摺疊的「全部參數」40 項；兩個區塊即時雙向連動，調整任一處都會同步另一處。
+- 預設備份路徑改為遊戲存檔同級目錄 `Pal/Saved/SaveGames_Backups`；Web UI 支援備份總佔用空間統計，並可一鍵複製備份路徑。
+- `uninstall-palworld.sh --level all` 會智慧保留自訂備份路徑，以及位於存檔同級目錄的預設 `SaveGames_Backups`；只清理由解除安裝範圍涵蓋的其他資料。
+- 排程維護與 Web／Discord 手動立即維護單元解耦：排程專用 `palworld-scheduled-maintenance.service` 以 `--scheduled` 執行，手動維護不再受排程時間或開關限制。
 - 強化 POSIX 備份樹的 descriptor-pinned、`O_NOFOLLOW` 與 inode 身分驗證；Windows 備份／還原同步維持 reparse point、目錄替換與 Safety Copy／rollback 防護。
 - 新增備份排程開關與可編輯層原子保存，首次設定、Discord 設定與網路設定均受 operation lock、schema 驗證及 audit log 保護。
 
 ### 驗證
 
-- 完整 `python3 -m unittest discover -v tests` 通過 195 項測試；18 項 Windows/PowerShell 專用測試依平台條件跳過。
+- 完整 `python3 -m unittest discover -v tests` 通過 200/200 項測試；18 項 Windows/PowerShell 專用測試依平台條件跳過。
 
 ## [0.8.0] - 2026-08-30
 

@@ -327,7 +327,7 @@ class ManagerTests(unittest.TestCase):
         })
         with tempfile.TemporaryDirectory() as directory:
             rendered = render_systemd_units(config, repository / "units", directory)
-            self.assertEqual(len(rendered), 8)
+            self.assertEqual(len(rendered), 9)
             game = (Path(directory) / "palworld.service").read_text(encoding="utf-8")
             bot = (Path(directory) / "palworld-discord-bot.service").read_text(encoding="utf-8")
             timer = (Path(directory) / "palworld-backup.timer").read_text(encoding="utf-8")
@@ -347,6 +347,9 @@ class ManagerTests(unittest.TestCase):
             self.assertIn('Environment="PALWORLD_CONFIG=/opt/Pal World/%%instance/config"', web)
             self.assertNotIn("EnvironmentFile=", web)
             self.assertIn('OnCalendar=*-*-* 03:17:00', timer)
+            self.assertIn('Unit=palworld-scheduled-maintenance.service', timer)
+            scheduled = (Path(directory) / "palworld-scheduled-maintenance.service").read_text(encoding="utf-8")
+            self.assertIn('daily-palworld-maintenance.sh" --scheduled', scheduled)
             self.assertFalse(any("@" in path.read_text(encoding="utf-8") for path in rendered))
 
     def test_deployment_scripts_and_units_have_no_legacy_deployment_paths(self):

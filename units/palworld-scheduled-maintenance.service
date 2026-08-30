@@ -1,0 +1,13 @@
+[Unit]
+Description=Scheduled Palworld backup and update
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+Environment=@CONFIG_DIR_ENV@
+ExecStart=@MAINTENANCE_SCRIPT@ --scheduled
+TimeoutStartSec=90min
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7

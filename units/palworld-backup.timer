@@ -6,10 +6,11 @@ OnCalendar=@BACKUP_TIME@
 # The configured calendar entry is a readable anchor in systemctl output.  A
 # minute cadence lets daily-palworld-maintenance.sh reload BACKUP_TIME after a
 # manager-owned editable config change; its exact-time gate prevents extra
-# maintenance runs.
+# maintenance runs.  It targets a separate unit so manually starting
+# palworld-maintenance.service is never mistaken for a timer invocation.
 OnCalendar=*-*-* *:*:00
 Persistent=true
-Unit=palworld-maintenance.service
+Unit=palworld-scheduled-maintenance.service
 
 [Install]
 WantedBy=timers.target
