@@ -37,7 +37,7 @@ if not defined PYTHON (
 %PYTHON% -c "import palworld_caretaker" >nul 2>&1
 if errorlevel 1 (
   echo Installing Palworld Caretaker for this Python 3 environment...
-  %PYTHON% -m pip install -e "%ROOT%"
+  %PYTHON% -m pip install -e "%ROOT:~0,-1%"
   if errorlevel 1 (
     echo [ERROR] Palworld Caretaker could not be installed automatically.
     pause
