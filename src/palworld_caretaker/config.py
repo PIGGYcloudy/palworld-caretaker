@@ -220,9 +220,10 @@ def load_config(directory: str | Path, *, schema: ConfigSchema = DEFAULT_SCHEMA,
     editable_secret = editable / EDITABLE_SECRET_FILE
     if editable_secret.is_file():
         editable_values = load_env(editable_secret)
-        forbidden = sorted(set(editable_values) - {"SERVER_PASSWORD", "DISCORD_BOT_TOKEN"})
+        forbidden = sorted(set(editable_values) - {"SERVER_PASSWORD", "DISCORD_BOT_TOKEN", "PALWORLD_WEB_UI_PASSWORD"})
         if forbidden:
-            raise ConfigError(f"{editable_secret}: editable secrets may contain only SERVER_PASSWORD or DISCORD_BOT_TOKEN: "
+            raise ConfigError(f"{editable_secret}: editable secrets may contain only SERVER_PASSWORD, "
+                              f"PALWORLD_WEB_UI_PASSWORD or DISCORD_BOT_TOKEN: "
                               f"{', '.join(forbidden)}")
         values.update(editable_values)
         count += 1

@@ -274,15 +274,15 @@ class SettingsStore:
         backup = self._publish_editable(updates, directory=editable)
         return self.current(), diff, backup
 
-    def complete_onboarding(self, *, server_password: object, backup_time: object,
+    def complete_onboarding(self, *, server_name: object, server_password: object, backup_time: object,
                             bind_mode: object, lan_origin: object = "") -> CaretakerConfig:
         """Persist the deliberately small first-run-only configuration surface.
 
         The manager account never writes root's secrets file.  Instead its
         server password is stored in ``editable/secrets.env``; its loader
-        allowlist is deliberately tiny. This keeps the first-run browser flow
-        usable without turning the editable directory into a general secret
-        editor.
+        allowlist is deliberately tiny. A placeholder panel credential is
+        replaced by the same first-run password, so a copied release template
+        never leaves the local management UI protected by CHANGE_ME text.
         """
         server_password = validate_ini_password(server_password)
         if bind_mode not in {"local", "lan"}:
@@ -311,8 +311,12 @@ class SettingsStore:
             normalize_web_bind_ip("0.0.0.0")
 
         current = self.current()
+        server_name = validate_edit({"SERVER_NAME": server_name}, current.values)["SERVER_NAME"]
         values = dict(current.values)
+        panel_password = values.get("PALWORLD_WEB_UI_PASSWORD") or values.get("ADMIN_PASSWORD", "")
+        replace_placeholder_panel_password = not panel_password or panel_password.startswith("CHANGE_ME")
         values.update({
+            "SERVER_NAME": server_name,
             "SERVER_PASSWORD": server_password,
             "PALWORLD_BACKUP_SCHEDULE_ENABLED": schedule_enabled,
             "PALWORLD_WEB_BIND_IP": "0.0.0.0" if bind_mode == "lan" else "127.0.0.1",
@@ -341,9 +345,14 @@ class SettingsStore:
         }
         if rendered_time is not None:
             caretaker_updates["BACKUP_TIME"] = rendered_time
+        secrets_updates = {"SERVER_PASSWORD": server_password}
+        if replace_placeholder_panel_password:
+            values["PALWORLD_WEB_UI_PASSWORD"] = server_password
+            secrets_updates["PALWORLD_WEB_UI_PASSWORD"] = server_password
         self._publish_editable({
             "caretaker.env": caretaker_updates,
-            "secrets.env": {"SERVER_PASSWORD": server_password},
+            "server.env": {"SERVER_NAME": server_name},
+            "secrets.env": secrets_updates,
         }, directory=editable)
         return self.current()
 

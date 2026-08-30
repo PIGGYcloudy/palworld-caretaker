@@ -778,7 +778,8 @@ class WebDependencies:
                 if password and not password.startswith("CHANGE_ME"):
                     raise SettingsValidationError("首次開服精靈已完成，拒絕重複提交")
                 current = store.complete_onboarding(
-                    server_password=payload.get("server_password"), backup_time=payload.get("backup_time"),
+                    server_name=payload.get("server_name"), server_password=payload.get("server_password"),
+                    backup_time=payload.get("backup_time"),
                     bind_mode=payload.get("bind_mode"), lan_origin=payload.get("lan_origin", ""),
                 )
                 self.config = current
@@ -812,7 +813,7 @@ class WebDependencies:
         try:
             with self.operation_lock():
                 current = self._settings_store().complete_onboarding(
-                    server_password=password,
+                    server_name=self.config.values.get("SERVER_NAME", ""), server_password=password,
                     backup_time=self.config.values.get("BACKUP_TIME", "04:30")
                     if self.config.values.get("PALWORLD_BACKUP_SCHEDULE_ENABLED", "true") == "true" else "off",
                     bind_mode=mode, lan_origin=payload.get("lan_origin", ""),
@@ -862,7 +863,7 @@ def _page(token: str) -> bytes:
 <title>Palworld Caretaker</title><style nonce={token}>
 body{{font:16px system-ui,sans-serif;margin:2rem;max-width:58rem;color:#17212b;background:#f8fafc}}h1{{margin-bottom:.2rem}}section{{background:#fff;border:1px solid #d9e1ea;border-radius:.5rem;padding:1rem;margin:1rem 0}}button{{padding:.55rem .8rem;margin:.2rem}}#message{{min-height:1.5rem}}ul{{padding-left:1.3rem}}fieldset{{border:0;border-top:1px solid #d9e1ea;margin:1rem 0;padding:1rem 0}}legend{{font-weight:650}}.setting-row{{display:grid;grid-template-columns:minmax(12rem,1fr) auto minmax(12rem,2fr) auto;gap:.5rem;align-items:center;margin:.55rem 0}}input,select{{font:inherit;padding:.35rem}}#settings-diff{{white-space:pre-wrap}}.notice{{color:#8a4b00}}.help{{position:relative;border:1px solid #64748b;border-radius:50%;width:1.35rem;height:1.35rem;padding:0;margin:0;background:#fff;color:#334155;font-weight:700;line-height:1;cursor:help}}.help-tooltip{{display:none;position:absolute;z-index:1;left:calc(100% + .45rem);top:-.5rem;width:min(21rem,70vw);padding:.55rem;border-radius:.35rem;background:#17212b;color:#fff;font-weight:400;font-size:.875rem;line-height:1.35;text-align:left;box-shadow:0 .2rem .7rem #0004}}.help:hover .help-tooltip,.help:focus .help-tooltip{{display:block}}.reset-setting{{white-space:nowrap}}@media(max-width:42rem){{.setting-row{{grid-template-columns:1fr auto}}.setting-row input,.setting-row select{{grid-column:1/-1}}.help-tooltip{{left:0;top:calc(100% + .35rem)}}}}
 </style></head><body><h1>Palworld Caretaker</h1><p>受認證的管理介面；請只透過受信任的本機、LAN 或 VPN 網路使用。</p>
-<section id=\"onboarding\" hidden><h2>首次開服精靈</h2><p>密碼由你手動輸入；系統不會隨機生成。</p><form id=\"onboarding-form\"><label>伺服器密碼 <input name=\"server_password\" type=\"password\" required></label><p><label>自動備份時間 <select name=\"backup_time\"><option value=\"04:30\">每天 04:30</option><option value=\"00:00\">每天 00:00</option><option value=\"12:00\">每天 12:00</option><option value=\"off\">關閉自動備份</option></select></label></p><p><label>面板範圍 <select name=\"bind_mode\" id=\"wizard-bind\"><option value=\"local\">本機 (127.0.0.1)</option><option value=\"lan\">家中區網 (0.0.0.0)</option></select></label></p><p id=\"wizard-lan\" hidden><label>家中區網面板網址 <input name=\"lan_origin\" placeholder=\"http://192.168.1.20:8765\"></label><br><span class=\"notice\">僅限可信任 LAN/VPN，勿公開到網際網路。</span></p><button type=\"submit\">完成首次設定</button></form></section>
+<section id=\"onboarding\" hidden><h2>首次開服精靈</h2><p>填寫伺服器名稱與你自訂的密碼；系統不會隨機生成或顯示密碼。首次設定時，這個密碼也會保護本機管理面板。</p><form id=\"onboarding-form\"><p><label>伺服器名稱 <input name=\"server_name\" maxlength=\"80\" required></label></p><label>伺服器密碼 <input name=\"server_password\" type=\"password\" required></label><p><label>自動備份時間 <select name=\"backup_time\"><option value=\"04:30\">每天 04:30</option><option value=\"00:00\">每天 00:00</option><option value=\"12:00\">每天 12:00</option><option value=\"off\">關閉自動備份</option></select></label></p><p><label>面板範圍 <select name=\"bind_mode\" id=\"wizard-bind\"><option value=\"local\">本機 (127.0.0.1)</option><option value=\"lan\">家中區網 (0.0.0.0)</option></select></label></p><p id=\"wizard-lan\" hidden><label>家中區網面板網址 <input name=\"lan_origin\" placeholder=\"http://192.168.1.20:8765\"></label><br><span class=\"notice\">僅限可信任 LAN/VPN，勿公開到網際網路。</span></p><button type=\"submit\">完成首次設定</button></form></section>
 <section><h2>伺服器狀態</h2><div id=\"status\">讀取中…</div></section>
 <section><h2>線上玩家</h2><ul id=\"players\"></ul></section>
 <section><h2>遊戲內公告</h2><form id=\"announce-form\"><label><span>公告內容</span><input id=\"announce-message\" name=\"message\" maxlength=\"1024\" required></label><button type=\"submit\">發送公告</button></form></section>
@@ -874,8 +875,8 @@ body{{font:16px system-ui,sans-serif;margin:2rem;max-width:58rem;color:#17212b;b
 <section><h2>世界設定</h2><p id=\"restart-notice\" class=\"notice\" hidden>伺服器正在運行；儲存後必須重新啟動才會生效。</p><form id=\"settings-form\"><details open><summary>常用參數</summary><div id=\"common-settings\">讀取中…</div></details><details><summary>全部參數</summary><div id=\"settings-fields\">讀取中…</div></details><button type=\"button\" id=\"preview-settings\">預覽變更</button><button type=\"submit\">儲存設定</button></form><output id=\"settings-diff\" aria-live=\"polite\"></output></section>
 <section><h2>Discord 4 步嚮導</h2><ol><li>建立 Bot</li><li>填 Token</li><li>一鍵邀群</li><li>填頻道 ID</li></ol><form id=\"discord-form\"><label>Bot Token <input name=\"token\" type=\"password\" required></label><p><label>Application ID <input name=\"application_id\" inputmode=\"numeric\" pattern=\"[0-9]+\" required></label><button type=\"button\" id=\"discord-invite\">一鍵邀群</button></p><label>頻道 ID <input name=\"channel_id\" inputmode=\"numeric\" pattern=\"[0-9]+\" required></label><button type=\"submit\">儲存</button></form><p>完整 guild／角色設定請看 GitHub 文件。</p></section>
 <section><details><summary>進階設定</summary><p>預設為本機模式。家中區網 (0.0.0.0) 僅限可信任 LAN/VPN，勿公開到網際網路。</p><form id=\"advanced-network-form\"><label>面板範圍 <select name=\"bind_mode\" id=\"advanced-bind\"><option value=\"local\">本機 (127.0.0.1)</option><option value=\"lan\">家中區網 (0.0.0.0)</option></select></label><p id=\"advanced-lan\" hidden><label>家中區網面板網址 <input name=\"lan_origin\" placeholder=\"http://192.168.1.20:8765\"></label></p><button type=\"submit\">儲存網路設定</button></form></details></section>
-<script nonce={token}>const csrf={escaped_token};
-const request=async(path,options={{}})=>{{const r=await fetch(path,options);const d=await r.json();if(!r.ok)throw Error(d.error||'操作失敗');return d;}};
+<script nonce={token}>const csrf={escaped_token};let wizardPassword='';
+const request=async(path,options={{}})=>{{const headers=new Headers(options.headers||{{}});if(wizardPassword)headers.set('Authorization','Basic '+btoa('palworld-manager:'+wizardPassword));const r=await fetch(path,{{...options,headers}});const d=await r.json();if(!r.ok)throw Error(d.error||'操作失敗');return d;}};
 const text=(v)=>v===null?'未知':String(v);
 async function refresh(){{try{{const [s,p,b,m,a]=await Promise.all([request('/api/status'),request('/api/players'),request('/api/backups'),request('/api/maintenance/status'),request('/api/audit/logs?limit=10')]);
 document.querySelector('#status').textContent=`服務：${{s.service}}；REST：${{s.api_reachable?'可連線':'無法連線'}}；玩家：${{s.players===null?'未知':s.players.join('、')||'無'}}；CPU：${{text(s.metrics.cpu)}}；記憶體：${{text(s.metrics.memory)}}`;
@@ -898,7 +899,7 @@ settingsForm.addEventListener('submit',async event=>{{event.preventDefault();if(
 document.querySelector('#copy-backup-folder').addEventListener('click',async()=>{{const path=document.querySelector('#backup-folder').textContent.replace('備份資料夾：','');try{{await navigator.clipboard.writeText(path);document.querySelector('#message').textContent='備份資料夾位置已複製。';}}catch(_e){{document.querySelector('#message').textContent=path;}}}});
 const wizard=document.querySelector('#onboarding'),wizardForm=document.querySelector('#onboarding-form'),wizardBind=document.querySelector('#wizard-bind');wizardBind.addEventListener('change',()=>{{document.querySelector('#wizard-lan').hidden=wizardBind.value!=='lan';}});
 async function loadOnboarding(){{try{{const data=await request('/api/onboarding');wizard.hidden=!data.required;wizardForm.backup_time.value=data.backup_enabled?data.backup_time:'off';wizardBind.value=data.bind_mode;wizardBind.dispatchEvent(new Event('change'));}}catch(e){{document.querySelector('#message').textContent=e.message;}}}}loadOnboarding();
-wizardForm.addEventListener('submit',async event=>{{event.preventDefault();if(!wizardForm.reportValidity())return;try{{const data=await request('/api/onboarding',{{method:'POST',headers:{{'Content-Type':'application/json','X-Palworld-CSRF':csrf}},body:JSON.stringify(Object.fromEntries(new FormData(wizardForm).entries()))}});document.querySelector('#message').textContent=data.message;wizard.hidden=true;}}catch(e){{document.querySelector('#message').textContent=e.message;}}}});
+wizardForm.addEventListener('submit',async event=>{{event.preventDefault();if(!wizardForm.reportValidity())return;try{{const password=wizardForm.server_password.value,data=await request('/api/onboarding',{{method:'POST',headers:{{'Content-Type':'application/json','X-Palworld-CSRF':csrf}},body:JSON.stringify(Object.fromEntries(new FormData(wizardForm).entries()))}});wizardPassword=password;document.querySelector('#message').textContent=data.message;wizard.hidden=true;await refresh();}}catch(e){{document.querySelector('#message').textContent=e.message;}}}});
 const discordForm=document.querySelector('#discord-form');document.querySelector('#discord-invite').addEventListener('click',()=>{{const id=discordForm.application_id.value;if(!/^[0-9]+$/.test(id)){{document.querySelector('#message').textContent='請先填入數字 Application ID。';return;}}window.open('https://discord.com/oauth2/authorize?client_id='+encodeURIComponent(id)+'&scope=bot%20applications.commands&permissions=3072','_blank','noopener');}});discordForm.addEventListener('submit',async event=>{{event.preventDefault();if(!discordForm.reportValidity())return;try{{const data=await request('/api/discord/setup',{{method:'POST',headers:{{'Content-Type':'application/json','X-Palworld-CSRF':csrf}},body:JSON.stringify(Object.fromEntries(new FormData(discordForm).entries()))}});document.querySelector('#message').textContent=data.message;discordForm.token.value='';}}catch(e){{document.querySelector('#message').textContent=e.message;}}}});
 const networkForm=document.querySelector('#advanced-network-form'),advancedBind=document.querySelector('#advanced-bind');advancedBind.addEventListener('change',()=>{{document.querySelector('#advanced-lan').hidden=advancedBind.value!=='lan';}});networkForm.addEventListener('submit',async event=>{{event.preventDefault();try{{const data=await request('/api/advanced/network',{{method:'POST',headers:{{'Content-Type':'application/json','X-Palworld-CSRF':csrf}},body:JSON.stringify(Object.fromEntries(new FormData(networkForm).entries()))}});document.querySelector('#message').textContent=data.message;}}catch(e){{document.querySelector('#message').textContent=e.message;}}}});
 </script></body></html>""".encode("utf-8")
@@ -971,8 +972,12 @@ class _Handler(BaseHTTPRequestHandler):
         except (ValueError, UnicodeDecodeError):
             return False
         username, separator, password = supplied.partition(":")
+        current_password = (
+            self.server.dependencies.config.values.get("PALWORLD_WEB_UI_PASSWORD")
+            or self.server.dependencies.config.values["ADMIN_PASSWORD"]
+        )
         return bool(separator) and hmac.compare_digest(username, self.server.auth_username) and \
-            hmac.compare_digest(password, self.server.auth_password)
+            hmac.compare_digest(password, current_password)
 
     def _auth_required(self) -> bool:
         if self._authenticated():

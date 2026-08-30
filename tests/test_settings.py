@@ -265,12 +265,18 @@ class SettingsStoreTests(unittest.TestCase):
     def test_first_run_wizard_writes_only_allowed_editable_secret_and_schedule(self):
         editable = self.config_dir / "editable"
         editable.mkdir()
+        (self.config_dir / "secrets.env").write_text("ADMIN_PASSWORD=CHANGE_ME_ADMIN_PASSWORD\n", encoding="utf-8")
         current = self.store.complete_onboarding(
-            server_password="chosen-by-player", backup_time="off", bind_mode="local",
+            server_name="My first Palworld", server_password="chosen-by-player",
+            backup_time="off", bind_mode="local",
         )
+        self.assertEqual(current.values["SERVER_NAME"], "My first Palworld")
         self.assertEqual(current.values["SERVER_PASSWORD"], "chosen-by-player")
+        self.assertEqual(current.values["PALWORLD_WEB_UI_PASSWORD"], "chosen-by-player")
         self.assertEqual(current.values["PALWORLD_BACKUP_SCHEDULE_ENABLED"], "false")
         self.assertIn("SERVER_PASSWORD=chosen-by-player", (editable / "secrets.env").read_text(encoding="utf-8"))
+        self.assertIn("PALWORLD_WEB_UI_PASSWORD=chosen-by-player", (editable / "secrets.env").read_text(encoding="utf-8"))
+        self.assertIn('SERVER_NAME="My first Palworld"', (editable / "server.env").read_text(encoding="utf-8"))
         caretaker = (editable / "caretaker.env").read_text(encoding="utf-8")
         self.assertIn("PALWORLD_WEB_BIND_IP=127.0.0.1", caretaker)
         self.assertIn("PALWORLD_BACKUP_SCHEDULE_ENABLED=false", caretaker)
@@ -279,7 +285,7 @@ class SettingsStoreTests(unittest.TestCase):
         (self.config_dir / "editable").mkdir()
         with self.assertRaisesRegex(ConfigError, "LAN"):
             self.store.complete_onboarding(
-                server_password="chosen-by-player", backup_time="04:30",
+                server_name="My first Palworld", server_password="chosen-by-player", backup_time="04:30",
                 bind_mode="lan", lan_origin="not a URL",
             )
 
@@ -385,8 +391,11 @@ class SettingsWebTests(unittest.TestCase):
         status, state = self.request("/api/onboarding")
         self.assertEqual(status, 200); self.assertTrue(state["required"])
         status, body = self.request("/api/onboarding", method="POST", payload={
-            "server_password": "player-chosen-password", "backup_time": "off", "bind_mode": "local",
+            "server_name": "My first Palworld", "server_password": "player-chosen-password",
+            "backup_time": "off", "bind_mode": "local",
         })
         self.assertEqual(status, 200); self.assertIn("首次設定", body["message"])
+        self.assertIn('SERVER_NAME="My first Palworld"',
+                      (self.config_dir / "editable" / "server.env").read_text(encoding="utf-8"))
         self.assertIn("SERVER_PASSWORD=player-chosen-password",
                       (self.config_dir / "editable" / "secrets.env").read_text(encoding="utf-8"))

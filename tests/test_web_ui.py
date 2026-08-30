@@ -220,6 +220,7 @@ class WebUITests(unittest.TestCase):
         self.assertIn(b"reset.type='button'", page)
         self.assertIn(b"input.value=field.default", page)
         self.assertIn("首次開服精靈".encode(), page)
+        self.assertIn(b'name=\"server_name\"', page)
         self.assertIn("常用參數".encode(), page)
         self.assertIn("全部參數".encode(), page)
         self.assertIn("Discord 4 步嚮導".encode(), page)

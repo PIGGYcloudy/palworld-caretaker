@@ -5,7 +5,19 @@ release archive 後，可從專案根目錄或已部署的 `scripts/windows/` �
 PowerShell 7（`pwsh`）。這套入口與 Python 核心共用設定格式、備份命名與操作鎖，
 但不會替 Windows 主機自動註冊 PalServer service。
 
-## 準備設定
+## 雙擊首次啟動
+
+解壓 release archive 後，直接雙擊根目錄的「啟動伺服器與管理面板.bat」。它會自動從三個
+`.env.example` 建立缺少的 `caretaker.env`、`server.env`、`secrets.env`，建立可由精靈寫入的
+`config/editable/`，並在目前 Python 環境尚未安裝套件時自動執行 `pip install -e .`。面板健康檢查
+通過後會開啟瀏覽器；首次精靈會要求填入伺服器名稱與自訂密碼，儲存後立即寫入可用設定。
+這個首次密碼同時取代範本的 `CHANGE_ME` 本機面板密碼；之後若需要分開管理，可在
+`secrets.env` 設定獨立的 `PALWORLD_WEB_UI_PASSWORD`。
+
+批次檔會在面板已可使用後才要求 UAC 啟動 `PalServer` service。因此 service 尚未安裝或名稱不符時，
+首次精靈仍可完成；請依畫面提示修正 Windows service 後再啟動。
+
+## 進階設定
 
 設定檔是 UTF-8 `KEY=VALUE` 純文字，不會被 shell 執行或展開。沿用 `config/` 下的
 三個 `.env.example` 檔案，將正式檔案放在例如 `C:\Palworld\config`，並調整 Windows
@@ -64,7 +76,7 @@ Palworld 的 live tree 預期位於：
 
 ## 快速操作
 
-解壓 release archive 並完成設定後，可以直接雙擊根目錄的「啟動伺服器與管理面板.bat」。它會要求 UAC 管理員權限、檢查 Python 與設定檔、啟動 PalServer Windows service、等待 Web UI 健康檢查，然後自動開啟本機面板。首次開啟時請依 Web 的首次開服精靈手動設定伺服器密碼；不會自動生成或顯示密碼。
+解壓 release archive 後可以直接雙擊根目錄的「啟動伺服器與管理面板.bat」。首次雙擊會建立設定、檢查 Python、啟動 Web UI 並開啟本機面板，然後請求 UAC 啟動 PalServer Windows service。首次開啟時依 Web 的首次開服精靈設定伺服器名稱與密碼；系統不會自動生成或顯示密碼。
 
 ```powershell
 $Repository = 'C:\palworld-caretaker'
