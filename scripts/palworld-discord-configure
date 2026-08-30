@@ -75,7 +75,7 @@ rollback_config() {
   # cannot leave the first Discord setting published on its own.
   local backup source temporary
   for backup in "${backups[@]}"; do
-    source="${backup%.pre-discord-$stamp}"
+    source="${backup%.pre-discord-"$stamp"}"
     temporary="$(mktemp "${source}.rollback.XXXXXX")" || continue
     if cp --preserve=mode,ownership -- "$backup" "$temporary"; then
       mv -f -- "$temporary" "$source"
