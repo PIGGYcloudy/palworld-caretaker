@@ -346,7 +346,8 @@ class ManagerTests(unittest.TestCase):
             )
             self.assertIn('Environment="PALWORLD_CONFIG=/opt/Pal World/%%instance/config"', web)
             self.assertNotIn("EnvironmentFile=", web)
-            self.assertIn('OnCalendar=*-*-* 03:17:00', timer)
+            self.assertIn('OnCalendar=*-*-* *:*:00', timer)
+            self.assertNotIn('03:17:00', timer)
             self.assertIn('Unit=palworld-scheduled-maintenance.service', timer)
             scheduled = (Path(directory) / "palworld-scheduled-maintenance.service").read_text(encoding="utf-8")
             self.assertIn('daily-palworld-maintenance.sh" --scheduled', scheduled)
@@ -443,7 +444,7 @@ class ManagerTests(unittest.TestCase):
             report = preflight_config(config, config_dir=install / "config", mount_checker=lambda _p: True)
             self.assertTrue(report.ok, report.errors)
 
-    def test_value_only_preflight_rejects_placeholders_and_weak_secret_mode(self):
+    def test_value_only_preflight_allows_blank_server_password_and_rejects_weak_secret_mode(self):
         with tempfile.TemporaryDirectory() as directory:
             secrets = Path(directory) / "secrets.env"
             secrets.write_text("SERVER_PASSWORD=CHANGE_ME\nADMIN_PASSWORD=valid\n")
@@ -452,7 +453,7 @@ class ManagerTests(unittest.TestCase):
             config["ADMIN_PASSWORD"] = "valid"
             report = preflight_values(config, config_dir=directory)
             self.assertFalse(report.ok)
-            self.assertTrue(any("SERVER_PASSWORD" in error for error in report.errors))
+            self.assertFalse(any("SERVER_PASSWORD" in error for error in report.errors))
             self.assertTrue(any("permissions" in error for error in report.errors))
 
     def test_deployed_preflight_requires_root_manager_secret_ownership(self):

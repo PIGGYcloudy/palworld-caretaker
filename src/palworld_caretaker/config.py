@@ -13,6 +13,7 @@ from .settings import (
     DEFAULT_WEB_BIND_IP,
     EDITABLE_DEFAULTS,
     SETTING_SPECS,
+    normalize_backup_schedule,
     normalize_web_bind_ip,
     normalize_web_authorities,
     validate_settings_values,
@@ -61,8 +62,11 @@ DEFAULTS: dict[str, str] = {
     "PALWORLD_MEMORY_ALERT_PERCENT": "85", "PALWORLD_MEMORY_ALERT_COOLDOWN_SECONDS": "1800",
     "DISCORD_PALWORLD_ALLOWED_GUILD_IDS": "", "DISCORD_PALWORLD_ALLOWED_ROLE_IDS": "",
     "DISCORD_PALWORLD_ADMIN_ROLE_IDS": "", "DISCORD_PALWORLD_ALLOWED_CHANNEL_IDS": "",
-    "BACKUP_RETENTION_COUNT": "14", "BACKUP_TIME": "04:30",
+    "BACKUP_RETENTION_COUNT": "14", "BACKUP_TIME": "daily-04:30",
     "PALWORLD_BACKUP_SCHEDULE_ENABLED": "true",
+    # This is deliberately independent of SERVER_PASSWORD: public servers
+    # may use an empty game password and still have completed first-run setup.
+    "PALWORLD_ONBOARDING_COMPLETED": "false",
     "SERVER_PASSWORD": "", "ADMIN_PASSWORD": "", "DISCORD_BOT_TOKEN": "",
     "PALWORLD_WEB_UI_USERNAME": "palworld-manager", "PALWORLD_WEB_UI_PASSWORD": "",
     "PALWORLD_WEB_BIND_IP": DEFAULT_WEB_BIND_IP,
@@ -85,6 +89,7 @@ EDITABLE_SETTING_KEYS = frozenset(SETTING_SPECS)
 WIZARD_EDITABLE_KEYS = frozenset({
     "PALWORLD_WEB_BIND_IP", "PALWORLD_WEB_ALLOWED_ORIGINS",
     "PALWORLD_WEB_ALLOWED_HOSTS", "PALWORLD_BACKUP_SCHEDULE_ENABLED",
+    "PALWORLD_ONBOARDING_COMPLETED",
     "DISCORD_PALWORLD_ALLOWED_CHANNEL_IDS",
 })
 # This child is deliberately separate from the general manager state files so
@@ -311,9 +316,9 @@ def _validate_core(values: Mapping[str, str]) -> None:
         normalize_web_authorities(values)
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
-    if not re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", values.get("BACKUP_TIME", "")):
-        raise ConfigError("BACKUP_TIME must use 24-hour HH:MM format")
+    normalize_backup_schedule(values.get("BACKUP_TIME", ""))
     _bool(values, "PALWORLD_BACKUP_SCHEDULE_ENABLED")
+    _bool(values, "PALWORLD_ONBOARDING_COMPLETED")
     for key in ("PALWORLD_SERVICE_USER", "PALWORLD_MANAGER_USER"):
         if not _ACCOUNT_RE.fullmatch(values.get(key, "")):
             raise ConfigError(f"{key} is not a valid system account name")

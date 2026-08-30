@@ -89,7 +89,14 @@ validate_ini_value() {
   [[ -n "$value" ]] || die "$name must not be empty"
 }
 
-validate_ini_value SERVER_PASSWORD "$SERVER_PASSWORD"
+validate_ini_password() {
+  local value="$1"
+  [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] || die "SERVER_PASSWORD contains a newline"
+  [[ "$value" != *','* && "$value" != *'('* && "$value" != *')'* && "$value" != *'"'* && "$value" != *"'"* ]] || die "SERVER_PASSWORD contains an INI-reserved character"
+  [[ "$value" != *\\ ]] || die "SERVER_PASSWORD must not end with a backslash"
+}
+
+validate_ini_password "$SERVER_PASSWORD"
 validate_ini_value ADMIN_PASSWORD "$ADMIN_PASSWORD"
 validate_ini_value SERVER_NAME "$SERVER_NAME"
 validate_ini_value SERVER_DESCRIPTION "$SERVER_DESCRIPTION"

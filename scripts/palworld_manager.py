@@ -141,8 +141,9 @@ DEFAULT_CONFIG: dict[str, str] = {
     "PALWORLD_WEB_ALLOWED_HOSTS": "",
     "PALWORLD_SAVEGAMES_EXPORT_MAX_BYTES": str(8 * 1024 ** 3),
     "BACKUP_RETENTION_COUNT": "14",
-    "BACKUP_TIME": "04:30",
+    "BACKUP_TIME": "daily-04:30",
     "PALWORLD_BACKUP_SCHEDULE_ENABLED": "true",
+    "PALWORLD_ONBOARDING_COMPLETED": "false",
     "SERVER_PASSWORD": "",
     "ADMIN_PASSWORD": "",
     "DISCORD_BOT_TOKEN": "",
@@ -175,7 +176,8 @@ EDITABLE_SETTING_KEYS = frozenset({
     "AUTO_RESET_WORKER_PAL_WHEN_SERVER_RESTART", "PALWORLD_IDLE_SHUTDOWN_ENABLED",
     "PALWORLD_IDLE_TIMEOUT_MINUTES", "BACKUP_RETENTION_COUNT", "BACKUP_TIME",
     "PALWORLD_WEB_BIND_IP", "PALWORLD_WEB_ALLOWED_ORIGINS", "PALWORLD_WEB_ALLOWED_HOSTS",
-    "PALWORLD_BACKUP_SCHEDULE_ENABLED", "DISCORD_PALWORLD_ALLOWED_CHANNEL_IDS",
+    "PALWORLD_BACKUP_SCHEDULE_ENABLED", "PALWORLD_ONBOARDING_COMPLETED",
+    "DISCORD_PALWORLD_ALLOWED_CHANNEL_IDS",
 })
 SETTINGS_BACKUP_DIRECTORY = "settings-backups"
 _KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
@@ -287,9 +289,9 @@ def load_config(
     editable_secret = directory / EDITABLE_CONFIG_DIRECTORY / "secrets.env"
     if editable_secret.is_file():
         values = load_env(editable_secret)
-        forbidden = sorted(set(values) - {"SERVER_PASSWORD", "DISCORD_BOT_TOKEN"})
+        forbidden = sorted(set(values) - {"SERVER_PASSWORD", "DISCORD_BOT_TOKEN", "PALWORLD_WEB_UI_PASSWORD"})
         if forbidden:
-            raise ConfigError(f"{editable_secret}: editable secrets may contain only SERVER_PASSWORD or DISCORD_BOT_TOKEN: "
+            raise ConfigError(f"{editable_secret}: editable secrets may contain only SERVER_PASSWORD, PALWORLD_WEB_UI_PASSWORD or DISCORD_BOT_TOKEN: "
                               f"{', '.join(forbidden)}")
         config.update(values)
         loaded += 1
@@ -403,13 +405,17 @@ def validate_config(config: dict[str, str]) -> dict[str, Path | None]:
     env_bool(config, "PALWORLD_IDLE_SHUTDOWN_ENABLED", True)
     env_bool(config, "PALWORLD_IDLE_WATCHER_DRY_RUN", True)
     env_bool(config, "PALWORLD_BACKUP_SCHEDULE_ENABLED", True)
+    env_bool(config, "PALWORLD_ONBOARDING_COMPLETED", False)
     env_bool(config, "AUTO_RESET_WORKER_PAL_WHEN_SERVER_RESTART", False)
     if config.get("DEATH_PENALTY") not in {"None", "Item", "ItemAndEquipment", "All"}:
         raise ConfigError("DEATH_PENALTY must be one of: None, Item, ItemAndEquipment, All")
     if config.get("PALWORLD_REST_API_HOST", "") != "127.0.0.1":
         raise ConfigError("PALWORLD_REST_API_HOST must be 127.0.0.1")
-    if not re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", config.get("BACKUP_TIME", "")):
-        raise ConfigError("BACKUP_TIME must use 24-hour HH:MM format")
+    backup_schedule = config.get("BACKUP_TIME", "")
+    if not (backup_schedule == "off" or backup_schedule in {"every-2h", "every-4h", "every-6h", "every-12h"}
+            or re.fullmatch(r"daily-(?:[01][0-9]|2[0-3]):[0-5][0-9]", backup_schedule)
+            or re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", backup_schedule)):
+        raise ConfigError("BACKUP_TIME must be daily-HH:MM, every-2h, every-4h, every-6h, every-12h, or off")
     for key in ("PALWORLD_SERVICE_USER", "PALWORLD_MANAGER_USER"):
         if not _SAFE_ACCOUNT_RE.fullmatch(config.get(key, "")):
             raise ConfigError(f"{key} is not a valid system account name")
@@ -515,7 +521,6 @@ def render_systemd_units(
         "@DISCORD_SCRIPT@": _systemd_quote(str(paths["scripts_root"] / "palworld-discord-bot.py")),
         "@WEB_UI_SCRIPT@": _systemd_quote(str(paths["scripts_root"] / "palworld-web-ui.py")),
         "@VENV_PYTHON@": _systemd_quote(str(paths["install_root"] / "venv/bin/python")),
-        "@BACKUP_TIME@": f"*-*-* {config['BACKUP_TIME']}:00",
     }
     rendered: list[Path] = []
     for template in sorted(source.glob("palworld*.service")) + sorted(source.glob("palworld*.timer")):
@@ -585,12 +590,17 @@ def preflight_values(
                                 "secrets.env owner/group must be root:"
                                 f"{config['PALWORLD_MANAGER_USER']}"
                             )
-    for key in ("SERVER_PASSWORD", "ADMIN_PASSWORD"):
+    for key in ("ADMIN_PASSWORD",):
         value = config.get(key, "")
         if not value or value.startswith("CHANGE_ME"):
             errors.append(f"{key} must be configured")
         elif value.endswith("\\") or any(character in value for character in ',()"\'\r\n'):
             errors.append(f"{key} contains a Palworld INI-reserved character")
+    server_password = config.get("SERVER_PASSWORD", "")
+    if server_password.startswith("CHANGE_ME"):
+        errors.append("SERVER_PASSWORD must not use a CHANGE_ME placeholder")
+    elif server_password and (server_password.endswith("\\") or any(character in server_password for character in ',()"\'\r\n')):
+        errors.append("SERVER_PASSWORD contains a Palworld INI-reserved character")
     for key in ("SERVER_NAME", "SERVER_DESCRIPTION"):
         value = config.get(key, "")
         if not value:

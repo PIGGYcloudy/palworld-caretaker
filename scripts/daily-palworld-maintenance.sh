@@ -20,13 +20,22 @@ if [[ "$RUN_MODE" == scheduled ]]; then
     printf '[%s] Scheduled backup is disabled by PALWORLD_BACKUP_SCHEDULE_ENABLED.\n' "$(date --iso-8601=seconds)"
     exit 0
   fi
-  BACKUP_TIME="$(python3 "$MANAGER" --config-dir "$CONFIG_DIR" --get BACKUP_TIME)"
-  # The timer wakes once per minute so a web edit of BACKUP_TIME takes effect
-  # without a privileged daemon-reload.  Only its explicit scheduled unit is
-  # time-gated: systemctl starts from Web/Discord are always manual requests.
-  if [[ "$(date +%H:%M)" != "$BACKUP_TIME" ]]; then
-    exit 0
-  fi
+  BACKUP_SCHEDULE="$(python3 "$MANAGER" --config-dir "$CONFIG_DIR" --get BACKUP_TIME)"
+  # The timer wakes once per minute so edits take effect without a privileged
+  # daemon-reload. Only its explicit scheduled unit is gated: Web/Discord
+  # starts remain manual requests.
+  case "$BACKUP_SCHEDULE" in
+    off) exit 0 ;;
+    daily-*) [[ "$(date +%H:%M)" == "${BACKUP_SCHEDULE#daily-}" ]] || exit 0 ;;
+    [0-2][0-9]:[0-5][0-9]) [[ "$(date +%H:%M)" == "$BACKUP_SCHEDULE" ]] || exit 0 ;;
+    every-2h|every-4h|every-6h|every-12h)
+      interval="${BACKUP_SCHEDULE#every-}"; interval="${interval%h}"
+      [[ "$(date +%M)" == 00 ]] || exit 0
+      hour="$(date +%H)"
+      (( 10#$hour % interval == 0 )) || exit 0
+      ;;
+    *) printf 'ERROR: invalid BACKUP_TIME schedule: %s\n' "$BACKUP_SCHEDULE" >&2; exit 1 ;;
+  esac
 fi
 STATE_ROOT="$(python3 "$MANAGER" --config-dir "$CONFIG_DIR" --get PALWORLD_MANAGER_STATE_DIR)"
 BACKUP_SCRIPT="$SCRIPT_HOME/backup-palworld.sh"

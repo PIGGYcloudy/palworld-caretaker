@@ -294,18 +294,33 @@ class Supervisor:
             pass
 
     def backup_loop(self) -> None:
-        """Run one scheduled backup per local calendar day without cron."""
+        """Run daily or interval backups without relying on cron in a container."""
         last_run = ""
-        backup_time = self.config.get("BACKUP_TIME")
         while not STOPPING.wait(15):
+            if self.config.get("PALWORLD_BACKUP_SCHEDULE_ENABLED", "true") != "true":
+                continue
             now = time.localtime()
-            today = time.strftime("%Y-%m-%d", now)
-            if time.strftime("%H:%M", now) != backup_time or last_run == today:
+            schedule = self.config.get("BACKUP_TIME", "daily-04:30")
+            clock = time.strftime("%H:%M", now)
+            if schedule.startswith("daily-"):
+                due, slot = clock == schedule[6:], time.strftime("%Y-%m-%d", now)
+            elif re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", schedule):
+                due, slot = clock == schedule, time.strftime("%Y-%m-%d", now)
+            elif schedule in {"every-2h", "every-4h", "every-6h", "every-12h"}:
+                interval = int(schedule[6:-1])
+                due = now.tm_min == 0 and now.tm_hour % interval == 0
+                slot = time.strftime("%Y-%m-%d-%H", now)
+            elif schedule == "off":
+                continue
+            else:
+                print(f"docker supervisor: invalid backup schedule: {schedule}", file=sys.stderr)
+                continue
+            if not due or last_run == slot:
                 continue
             try:
                 with self.operation_lock:
                     self.backup_once()
-                last_run = today
+                last_run = slot
             except (ApiError, OSError, RuntimeError, ValueError) as exc:
                 print(f"docker supervisor: scheduled backup failed: {exc}", file=sys.stderr)
 

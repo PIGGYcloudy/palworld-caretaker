@@ -1,13 +1,10 @@
 [Unit]
-Description=Daily Palworld Backup and Update Timer
+Description=Palworld Backup and Update Schedule Timer
 
 [Timer]
-OnCalendar=@BACKUP_TIME@
-# The configured calendar entry is a readable anchor in systemctl output.  A
-# minute cadence lets daily-palworld-maintenance.sh reload BACKUP_TIME after a
-# manager-owned editable config change; its exact-time gate prevents extra
-# maintenance runs.  It targets a separate unit so manually starting
-# palworld-maintenance.service is never mistaken for a timer invocation.
+# A minute cadence lets daily-palworld-maintenance.sh reload daily and
+# interval schedules after a manager-owned editable config change. Its gate
+# prevents extra maintenance runs and keeps manual maintenance independent.
 OnCalendar=*-*-* *:*:00
 Persistent=true
 Unit=palworld-scheduled-maintenance.service

@@ -411,6 +411,14 @@ class WebUITests(unittest.TestCase):
         status, _raw, _headers = self.request("/api/status", authenticate=False)
         self.assertEqual(status, 401)
 
+    def test_empty_panel_password_allows_loopback_without_an_auth_loop(self):
+        # This simulates onboarding clearing the placeholder password while
+        # the already-running local server is still serving the wizard.
+        self.fixture.dependencies.config.values["ADMIN_PASSWORD"] = ""
+        self.fixture.dependencies.config.values["PALWORLD_WEB_UI_PASSWORD"] = ""
+        status, _raw, _headers = self.request("/api/status", authenticate=False)
+        self.assertEqual(status, 200)
+
     def test_mutations_require_csrf_json_same_origin_and_reject_query_paths(self):
         self.fixture.lifecycle.state = ServiceState.INACTIVE
         status, _raw, _headers = self.post("start")

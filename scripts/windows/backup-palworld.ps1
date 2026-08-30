@@ -2,7 +2,10 @@
 param(
     [string]$ConfigDir = (Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) 'config'),
     [string]$ServiceName = 'PalServer',
-    [switch]$NoServiceControl
+    [switch]$NoServiceControl,
+    # A Windows Task Scheduler trigger may invoke this every minute. The
+    # schedule gate then uses the same BACKUP_TIME syntax as Linux.
+    [switch]$Scheduled
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -13,6 +16,22 @@ $staging = $null
 $wasRunning = $false
 try {
     $config = Get-CaretakerConfig $ConfigDir
+    if ($Scheduled) {
+        if ((Get-ConfigValue $config 'PALWORLD_BACKUP_SCHEDULE_ENABLED' 'true').ToLowerInvariant() -ne 'true') {
+            Write-Output 'Scheduled backup is disabled by PALWORLD_BACKUP_SCHEDULE_ENABLED.'
+            return
+        }
+        $schedule = Get-ConfigValue $config 'BACKUP_TIME' 'daily-04:30'
+        $now = Get-Date
+        $due = switch -Regex ($schedule) {
+            '^off$' { $false; break }
+            '^daily-(?<time>(?:[01][0-9]|2[0-3]):[0-5][0-9])$' { $now.ToString('HH:mm') -eq $Matches.time; break }
+            '^(?<time>(?:[01][0-9]|2[0-3]):[0-5][0-9])$' { $now.ToString('HH:mm') -eq $Matches.time; break }
+            '^every-(?<hours>2|4|6|12)h$' { $interval = [int]$Matches['hours']; $now.Minute -eq 0 -and ($now.Hour % $interval -eq 0); break }
+            default { throw 'BACKUP_TIME must be daily-HH:MM, every-2h, every-4h, every-6h, every-12h, or off.' }
+        }
+        if (-not $due) { return }
+    }
     $paths = Get-PalworldPaths $config
     Assert-SafeTree $paths.Save 'Palworld save directory'
     Assert-SafeTree $paths.Config 'Palworld config directory'

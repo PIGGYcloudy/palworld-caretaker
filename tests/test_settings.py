@@ -22,7 +22,7 @@ from palworld_caretaker.operations import OperationLock
 from palworld_caretaker.service import ServerDiagnostics, ServerStatus, ServiceState
 from palworld_caretaker.settings import (
     SETTING_SPECS, canonical_web_host, canonical_web_origin, caretaker_options_from,
-    normalize_value, world_settings_from,
+    normalize_backup_schedule, normalize_value, world_settings_from,
 )
 from palworld_caretaker.settings_store import SettingsPersistenceError, SettingsStore
 from palworld_caretaker.web import WebDependencies, create_server
@@ -107,6 +107,15 @@ class SettingsSchemaTests(unittest.TestCase):
                     values = next(self.values())
                     values[key] = value
                     CaretakerConfig(values)
+
+    def test_backup_schedule_accepts_daily_intervals_off_and_legacy_daily_time(self):
+        self.assertEqual(normalize_backup_schedule("daily-23:59"), "daily-23:59")
+        self.assertEqual(normalize_backup_schedule("04:30"), "daily-04:30")
+        for value in ("every-2h", "every-4h", "every-6h", "every-12h", "off"):
+            with self.subTest(value=value):
+                self.assertEqual(normalize_backup_schedule(value), value)
+        with self.assertRaisesRegex(ConfigError, "BACKUP_TIME"):
+            normalize_backup_schedule("every-3h")
 
     def test_all_boolean_settings_have_boolean_schema_kinds(self):
         boolean_keys = {key for key, spec in SETTING_SPECS.items() if spec.kind == "boolean"}
@@ -233,7 +242,7 @@ class SettingsStoreTests(unittest.TestCase):
         self.assertIsNotNone(backup)
         self.assertIn('SERVER_NAME=After', (self.config_dir / "server.env").read_text(encoding="utf-8"))
         self.assertIn("MAX_PLAYERS=10", (self.config_dir / "server.env").read_text(encoding="utf-8"))
-        self.assertIn("BACKUP_TIME=05:15", (self.config_dir / "caretaker.env").read_text(encoding="utf-8"))
+        self.assertIn("BACKUP_TIME=daily-05:15", (self.config_dir / "caretaker.env").read_text(encoding="utf-8"))
         self.assertEqual((backup / "server.env").read_text(encoding="utf-8"), "SERVER_NAME='Before'\nMAX_PLAYERS=10\n")
         self.assertTrue((backup / "caretaker.env").is_file())
 
@@ -280,6 +289,30 @@ class SettingsStoreTests(unittest.TestCase):
         caretaker = (editable / "caretaker.env").read_text(encoding="utf-8")
         self.assertIn("PALWORLD_WEB_BIND_IP=127.0.0.1", caretaker)
         self.assertIn("PALWORLD_BACKUP_SCHEDULE_ENABLED=false", caretaker)
+
+    def test_first_run_wizard_allows_blank_password_and_marks_onboarding_complete(self):
+        editable = self.config_dir / "editable"
+        editable.mkdir()
+        current = self.store.complete_onboarding(
+            server_name="Public Palworld", server_password="", backup_time="every-4h",
+            backup_retention_count="99", bind_mode="local",
+        )
+        self.assertEqual(current.values["SERVER_PASSWORD"], "")
+        self.assertEqual(current.values["PALWORLD_ONBOARDING_COMPLETED"], "true")
+        self.assertEqual(current.values["BACKUP_TIME"], "every-4h")
+        self.assertEqual(current.values["BACKUP_RETENTION_COUNT"], "99")
+        self.assertIn('SERVER_PASSWORD=""', (editable / "secrets.env").read_text(encoding="utf-8"))
+        caretaker = (editable / "caretaker.env").read_text(encoding="utf-8")
+        self.assertIn("PALWORLD_ONBOARDING_COMPLETED=true", caretaker)
+        self.assertIn("BACKUP_RETENTION_COUNT=99", caretaker)
+
+    def test_settings_schedule_change_keeps_legacy_enable_flag_in_sync(self):
+        self.store.commit({"BACKUP_TIME": "off"})
+        self.assertEqual(self.store.current().values["PALWORLD_BACKUP_SCHEDULE_ENABLED"], "false")
+        self.store.commit({"BACKUP_TIME": "every-2h"})
+        current = self.store.current()
+        self.assertEqual(current.values["BACKUP_TIME"], "every-2h")
+        self.assertEqual(current.values["PALWORLD_BACKUP_SCHEDULE_ENABLED"], "true")
 
     def test_first_run_wizard_requires_a_trusted_lan_origin(self):
         (self.config_dir / "editable").mkdir()
@@ -385,17 +418,29 @@ class SettingsWebTests(unittest.TestCase):
         status, saved = self.request("/api/settings", method="POST", payload={"values": {"MAX_PLAYERS": "12"}})
         self.assertEqual(status, 200); self.assertIsNotNone(saved["backup"])
         self.assertIn("MAX_PLAYERS=12", (self.config_dir / "server.env").read_text(encoding="utf-8"))
+        status, saved = self.request("/api/settings", method="POST", payload={
+            "values": {"BACKUP_TIME": "every-12h", "BACKUP_RETENTION_COUNT": "1000"},
+        })
+        self.assertEqual(status, 200); self.assertEqual({item["key"] for item in saved["changes"]}, {"BACKUP_TIME", "BACKUP_RETENTION_COUNT"})
+        caretaker = (self.config_dir / "caretaker.env").read_text(encoding="utf-8")
+        self.assertIn("BACKUP_TIME=every-12h", caretaker)
+        self.assertIn("BACKUP_RETENTION_COUNT=1000", caretaker)
 
-    def test_onboarding_api_requires_manual_password_and_writes_editable_layer(self):
+    def test_onboarding_api_allows_blank_password_and_writes_editable_layer(self):
         (self.config_dir / "editable").mkdir()
         status, state = self.request("/api/onboarding")
         self.assertEqual(status, 200); self.assertTrue(state["required"])
         status, body = self.request("/api/onboarding", method="POST", payload={
-            "server_name": "My first Palworld", "server_password": "player-chosen-password",
-            "backup_time": "off", "bind_mode": "local",
+            "server_name": "My first Palworld", "server_password": "",
+            "backup_time": "every-6h", "backup_retention_count": "31", "bind_mode": "local",
         })
         self.assertEqual(status, 200); self.assertIn("首次設定", body["message"])
         self.assertIn('SERVER_NAME="My first Palworld"',
                       (self.config_dir / "editable" / "server.env").read_text(encoding="utf-8"))
-        self.assertIn("SERVER_PASSWORD=player-chosen-password",
+        self.assertIn('SERVER_PASSWORD=""',
                       (self.config_dir / "editable" / "secrets.env").read_text(encoding="utf-8"))
+        status, state = self.request("/api/onboarding")
+        self.assertEqual(status, 200); self.assertFalse(state["required"])
+        caretaker = (self.config_dir / "editable" / "caretaker.env").read_text(encoding="utf-8")
+        self.assertIn("BACKUP_TIME=every-6h", caretaker)
+        self.assertIn("BACKUP_RETENTION_COUNT=31", caretaker)

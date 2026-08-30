@@ -10,8 +10,9 @@ PowerShell 7（`pwsh`）。這套入口與 Python 核心共用設定格式、備
 解壓 release archive 後，直接雙擊根目錄的「啟動伺服器與管理面板.bat」。它會自動從三個
 `.env.example` 建立缺少的 `caretaker.env`、`server.env`、`secrets.env`，建立可由精靈寫入的
 `config/editable/`，並在目前 Python 環境尚未安裝套件時自動執行 `pip install -e .`。面板健康檢查
-通過後會開啟瀏覽器；首次精靈會要求填入伺服器名稱與自訂密碼，儲存後立即寫入可用設定。
-這個首次密碼同時取代範本的 `CHANGE_ME` 本機面板密碼；之後若需要分開管理，可在
+通過後會開啟瀏覽器；首次精靈會要求填入伺服器名稱，遊戲密碼可留白以建立公開伺服器，儲存後立即寫入可用設定。
+若有填寫，這個首次密碼會取代範本的 `CHANGE_ME` 本機面板密碼；未設定面板密碼時僅 loopback
+面板可直接使用。之後若需要分開管理，可在
 `secrets.env` 設定獨立的 `PALWORLD_WEB_UI_PASSWORD`。
 
 批次檔會在面板已可使用後才要求 UAC 啟動 `PalServer` service。因此 service 尚未安裝或名稱不符時，
@@ -89,6 +90,11 @@ pwsh -NoProfile -File "$Repository\scripts\windows\palworld-service.ps1" `
 # 建立並驗證 snapshot
 pwsh -NoProfile -File "$Repository\scripts\windows\backup-palworld.ps1" `
   -ConfigDir $ConfigDir
+
+# For a Task Scheduler trigger that runs every minute, add -Scheduled. The
+# script gates itself using BACKUP_TIME (daily-HH:MM, every-Nh, or off).
+pwsh -NoProfile -File "$Repository\scripts\windows\backup-palworld.ps1" `
+  -ConfigDir $ConfigDir -Scheduled
 
 # 列出 snapshot，或依精確名稱互動式還原
 pwsh -NoProfile -File "$Repository\scripts\windows\restore-palworld.ps1" `

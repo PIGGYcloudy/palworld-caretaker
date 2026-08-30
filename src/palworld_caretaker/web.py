@@ -12,6 +12,7 @@ import base64
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hmac
+import ipaddress
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -51,6 +52,17 @@ _SAFE_STATES = {"active", "activating", "deactivating", "inactive", "failed"}
 _EXPORT_PREFIX = "palworld-savegames-"
 _EXPORT_SUFFIX = ".zip"
 _EXPORT_CHUNK = 64 * 1024
+
+
+def _web_auth_password(config: CaretakerConfig) -> str:
+    """Return a real panel credential, never a copied template placeholder."""
+    for key in ("PALWORLD_WEB_UI_PASSWORD", "ADMIN_PASSWORD"):
+        value = config.values.get(key, "")
+        if value and not value.startswith("CHANGE_ME"):
+            return value
+    return ""
+
+
 def _configured_values(config: CaretakerConfig, name: str) -> str:
     """Return a Docker/explicit-process override for web authority values."""
     return os.environ.get(name, config.values.get(name, "")).strip()
@@ -740,12 +752,15 @@ class WebDependencies:
             current = self._settings_store().current()
         except WebUIError:
             current = self.config
+        displayed_values = dict(current.values)
+        if displayed_values.get("PALWORLD_BACKUP_SCHEDULE_ENABLED", "true") != "true":
+            displayed_values["BACKUP_TIME"] = "off"
         fields = []
         for category, specifications in categories():
             fields.append({"name": category, "fields": [
                 {"key": spec.key, "label": spec.label, "kind": spec.kind,
                  "minimum": spec.minimum, "maximum": spec.maximum,
-                 "choices": spec.choices, "value": current.values[spec.key],
+                 "choices": spec.choices, "value": displayed_values[spec.key],
                  "default": spec.default, "description": spec.description}
                 for spec in specifications if not spec.secret
             ]})
@@ -753,6 +768,7 @@ class WebDependencies:
             "SERVER_NAME", "SERVER_PASSWORD", "MAX_PLAYERS", "EXP_RATE", "PAL_CAPTURE_RATE",
             "COLLECTION_DROP_RATE", "DEATH_PENALTY", "BASE_CAMP_WORKER_MAX_NUM",
             "PALWORLD_IDLE_SHUTDOWN_ENABLED", "PALWORLD_IDLE_TIMEOUT_MINUTES",
+            "BACKUP_TIME", "BACKUP_RETENTION_COUNT",
         )
         # Password is intentionally not returned through the normal editor;
         # the onboarding screen owns its manual first-run entry.
@@ -761,11 +777,20 @@ class WebDependencies:
 
     def onboarding_payload(self) -> dict[str, Any]:
         password = self.config.values.get("SERVER_PASSWORD", "")
-        required = not password or password.startswith("CHANGE_ME")
+        completed = self.config.values.get("PALWORLD_ONBOARDING_COMPLETED", "false") == "true"
+        # Existing password-protected installations predate the explicit flag.
+        # Preserve their completed state while allowing a newly configured
+        # public server to persist an intentionally empty password.
+        required = not completed and (not password or password.startswith("CHANGE_ME"))
+        schedule = self.config.values.get("BACKUP_TIME", "daily-04:30")
+        if self.config.values.get("PALWORLD_BACKUP_SCHEDULE_ENABLED", "true") != "true":
+            schedule = "off"
         return {
             "required": required,
-            "backup_time": self.config.values.get("BACKUP_TIME", "04:30"),
-            "backup_enabled": self.config.values.get("PALWORLD_BACKUP_SCHEDULE_ENABLED", "true") == "true",
+            "backup_time": schedule,  # compatibility name for older clients
+            "backup_schedule": schedule,
+            "backup_enabled": schedule != "off",
+            "backup_retention_count": self.config.values.get("BACKUP_RETENTION_COUNT", "14"),
             "bind_mode": "lan" if self.config.values.get("PALWORLD_WEB_BIND_IP") == "0.0.0.0" else "local",
         }
 
@@ -774,12 +799,14 @@ class WebDependencies:
             with self.operation_lock():
                 store = self._settings_store()
                 before = store.current()
+                completed = before.values.get("PALWORLD_ONBOARDING_COMPLETED", "false") == "true"
                 password = before.values.get("SERVER_PASSWORD", "")
-                if password and not password.startswith("CHANGE_ME"):
+                if completed or (password and not password.startswith("CHANGE_ME")):
                     raise SettingsValidationError("首次開服精靈已完成，拒絕重複提交")
                 current = store.complete_onboarding(
                     server_name=payload.get("server_name"), server_password=payload.get("server_password"),
-                    backup_time=payload.get("backup_time"),
+                    backup_time=payload.get("backup_time", payload.get("backup_schedule")),
+                    backup_retention_count=payload.get("backup_retention_count", before.values.get("BACKUP_RETENTION_COUNT", "14")),
                     bind_mode=payload.get("bind_mode"), lan_origin=payload.get("lan_origin", ""),
                 )
                 self.config = current
@@ -808,14 +835,15 @@ class WebDependencies:
     def configure_network(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         mode = payload.get("bind_mode")
         password = self.config.values.get("SERVER_PASSWORD", "")
-        if not password or password.startswith("CHANGE_ME"):
+        if self.onboarding_payload()["required"]:
             raise SettingsValidationError("請先完成首次開服精靈")
         try:
             with self.operation_lock():
                 current = self._settings_store().complete_onboarding(
                     server_name=self.config.values.get("SERVER_NAME", ""), server_password=password,
-                    backup_time=self.config.values.get("BACKUP_TIME", "04:30")
+                    backup_time=self.config.values.get("BACKUP_TIME", "daily-04:30")
                     if self.config.values.get("PALWORLD_BACKUP_SCHEDULE_ENABLED", "true") == "true" else "off",
+                    backup_retention_count=self.config.values.get("BACKUP_RETENTION_COUNT", "14"),
                     bind_mode=mode, lan_origin=payload.get("lan_origin", ""),
                 )
                 self.config = current
@@ -863,11 +891,11 @@ def _page(token: str) -> bytes:
 <title>Palworld Caretaker</title><style nonce={token}>
 body{{font:16px system-ui,sans-serif;margin:2rem;max-width:58rem;color:#17212b;background:#f8fafc}}h1{{margin-bottom:.2rem}}section{{background:#fff;border:1px solid #d9e1ea;border-radius:.5rem;padding:1rem;margin:1rem 0}}button{{padding:.55rem .8rem;margin:.2rem}}#message{{min-height:1.5rem}}ul{{padding-left:1.3rem}}fieldset{{border:0;border-top:1px solid #d9e1ea;margin:1rem 0;padding:1rem 0}}legend{{font-weight:650}}.setting-row{{display:grid;grid-template-columns:minmax(12rem,1fr) auto minmax(12rem,2fr) auto;gap:.5rem;align-items:center;margin:.55rem 0}}input,select{{font:inherit;padding:.35rem}}#settings-diff{{white-space:pre-wrap}}.notice{{color:#8a4b00}}.help{{position:relative;border:1px solid #64748b;border-radius:50%;width:1.35rem;height:1.35rem;padding:0;margin:0;background:#fff;color:#334155;font-weight:700;line-height:1;cursor:help}}.help-tooltip{{display:none;position:absolute;z-index:1;left:calc(100% + .45rem);top:-.5rem;width:min(21rem,70vw);padding:.55rem;border-radius:.35rem;background:#17212b;color:#fff;font-weight:400;font-size:.875rem;line-height:1.35;text-align:left;box-shadow:0 .2rem .7rem #0004}}.help:hover .help-tooltip,.help:focus .help-tooltip{{display:block}}.reset-setting{{white-space:nowrap}}@media(max-width:42rem){{.setting-row{{grid-template-columns:1fr auto}}.setting-row input,.setting-row select{{grid-column:1/-1}}.help-tooltip{{left:0;top:calc(100% + .35rem)}}}}
 </style></head><body><h1>Palworld Caretaker</h1><p>受認證的管理介面；請只透過受信任的本機、LAN 或 VPN 網路使用。</p>
-<section id=\"onboarding\" hidden><h2>首次開服精靈</h2><p>填寫伺服器名稱與你自訂的密碼；系統不會隨機生成或顯示密碼。首次設定時，這個密碼也會保護本機管理面板。</p><form id=\"onboarding-form\"><p><label>伺服器名稱 <input name=\"server_name\" maxlength=\"80\" required></label></p><label>伺服器密碼 <input name=\"server_password\" type=\"password\" required></label><p><label>自動備份時間 <select name=\"backup_time\"><option value=\"04:30\">每天 04:30</option><option value=\"00:00\">每天 00:00</option><option value=\"12:00\">每天 12:00</option><option value=\"off\">關閉自動備份</option></select></label></p><p><label>面板範圍 <select name=\"bind_mode\" id=\"wizard-bind\"><option value=\"local\">本機 (127.0.0.1)</option><option value=\"lan\">家中區網 (0.0.0.0)</option></select></label></p><p id=\"wizard-lan\" hidden><label>家中區網面板網址 <input name=\"lan_origin\" placeholder=\"http://192.168.1.20:8765\"></label><br><span class=\"notice\">僅限可信任 LAN/VPN，勿公開到網際網路。</span></p><button type=\"submit\">完成首次設定</button></form></section>
+<section id=\"onboarding\" hidden><h2>首次開服精靈</h2><p>伺服器密碼可留白，供公開社群伺服器使用；系統不會隨機生成或顯示密碼。未設定面板密碼時，本機 loopback 面板可直接使用。</p><form id=\"onboarding-form\"><p><label>伺服器名稱 <input name=\"server_name\" maxlength=\"80\" required></label></p><p><label>伺服器密碼（可留白） <input name=\"server_password\" type=\"password\"></label></p><p><label>自動備份排程 <select name=\"backup_schedule\" id=\"wizard-backup-schedule\"><option value=\"daily\">每天指定時間</option><option value=\"every-2h\">每 2 小時</option><option value=\"every-4h\">每 4 小時</option><option value=\"every-6h\">每 6 小時</option><option value=\"every-12h\">每 12 小時</option><option value=\"off\">關閉自動備份</option></select></label> <label id=\"wizard-daily-time\">每天時間 <input name=\"backup_daily_time\" type=\"time\" value=\"04:30\"></label></p><p><label>備份保留數 <input name=\"backup_retention_count\" type=\"number\" min=\"1\" max=\"1000\" value=\"14\" required></label></p><p><label>面板範圍 <select name=\"bind_mode\" id=\"wizard-bind\"><option value=\"local\">本機 (127.0.0.1)</option><option value=\"lan\">家中區網 (0.0.0.0)</option></select></label></p><p id=\"wizard-lan\" hidden><label>家中區網面板網址 <input name=\"lan_origin\" placeholder=\"http://192.168.1.20:8765\"></label><br><span class=\"notice\">僅限可信任 LAN/VPN，勿公開到網際網路。</span></p><button type=\"submit\">完成首次設定</button></form></section>
 <section><h2>伺服器狀態</h2><div id=\"status\">讀取中…</div></section>
 <section><h2>線上玩家</h2><ul id=\"players\"></ul></section>
 <section><h2>遊戲內公告</h2><form id=\"announce-form\"><label><span>公告內容</span><input id=\"announce-message\" name=\"message\" maxlength=\"1024\" required></label><button type=\"submit\">發送公告</button></form></section>
-<section><h2>備份快照</h2><p id=\"backup-summary\">讀取中…</p><ul id=\"backups\"></ul><button data-action=\"backup\">立即安全備份</button><button id=\"copy-backup-folder\">查看備份資料夾</button><p id=\"backup-folder\"></p><p>還原會先停止伺服器並保留本機 safety backup。</p><select id=\"restore-snapshot\"></select><button id=\"restore\">從快照還原</button></section>
+<section><h2>備份快照</h2><p id=\"backup-summary\">讀取中…</p><p><label>排程 <select id=\"backup-schedule\"><option value=\"daily\">每天指定時間</option><option value=\"every-2h\">每 2 小時</option><option value=\"every-4h\">每 4 小時</option><option value=\"every-6h\">每 6 小時</option><option value=\"every-12h\">每 12 小時</option><option value=\"off\">關閉自動備份</option></select></label> <label id=\"backup-daily-time\">每天時間 <input id=\"backup-daily-time-input\" type=\"time\" value=\"04:30\"></label> <label>保留數 <input id=\"backup-retention-count\" type=\"number\" min=\"1\" max=\"1000\" value=\"14\"></label></p><p class=\"notice\">變更會隨「世界設定」的儲存按鈕一併套用。</p><ul id=\"backups\"></ul><button data-action=\"backup\">立即安全備份</button><button id=\"copy-backup-folder\">查看備份資料夾</button><p id=\"backup-folder\"></p><p>還原會先停止伺服器並保留本機 safety backup。</p><select id=\"restore-snapshot\"></select><button id=\"restore\">從快照還原</button></section>
 <section><h2>SaveGames 匯出</h2><p>會先要求伺服器存檔，再下載目前使用中的 SaveGames 壓縮檔。</p><button id=\"savegames-download\">下載 SaveGames</button></section>
 <section><h2>安全操作</h2><button data-action=\"start\">啟動</button><button data-action=\"stop\">安全關閉</button><button data-action=\"restart\">安全重啟</button><p id=\"message\" role=\"status\"></p></section>
 <section><h2>SteamCMD 維護</h2><div id=\"maintenance\">讀取中…</div><button id=\"maintenance-trigger\">執行備份與更新</button></section>
@@ -890,16 +918,20 @@ document.querySelector('#restore').addEventListener('click',async()=>{{const sna
 document.querySelector('#maintenance-trigger').addEventListener('click',async()=>{{try{{const data=await request('/api/maintenance/trigger',{{method:'POST',headers:{{'Content-Type':'application/json','X-Palworld-CSRF':csrf}},body:'{{}}'}});document.querySelector('#message').textContent=data.message;await refresh();}}catch(e){{document.querySelector('#message').textContent=e.message;}}}});
 document.querySelector('#announce-form').addEventListener('submit',async event=>{{event.preventDefault();const input=document.querySelector('#announce-message');if(!input.reportValidity())return;try{{const data=await request('/api/announce',{{method:'POST',headers:{{'Content-Type':'application/json','X-Palworld-CSRF':csrf}},body:JSON.stringify({{message:input.value}})}});document.querySelector('#message').textContent=data.message;input.value='';await refresh();}}catch(e){{document.querySelector('#message').textContent=e.message;}}}});
 document.querySelector('#savegames-download').addEventListener('click',async()=>{{const button=document.querySelector('#savegames-download');button.disabled=true;try{{const response=await fetch('/api/savegames/download',{{method:'POST',headers:{{'Content-Type':'application/json','X-Palworld-CSRF':csrf}},body:'{{}}'}});if(!response.ok){{const data=await response.json();throw Error(data.error||'匯出失敗');}}const blob=await response.blob(),url=URL.createObjectURL(blob),link=document.createElement('a');link.href=url;link.download='palworld-savegames.zip';link.click();URL.revokeObjectURL(url);document.querySelector('#message').textContent='SaveGames 匯出完成。';await refresh();}}catch(e){{document.querySelector('#message').textContent=e.message;}}finally{{button.disabled=false;}}}});
-const settingsForm=document.querySelector('#settings-form');const settingsValues=()=>Object.fromEntries(new FormData(settingsForm).entries());
+const settingsForm=document.querySelector('#settings-form'),backupSchedule=document.querySelector('#backup-schedule'),backupDailyTime=document.querySelector('#backup-daily-time'),backupDailyInput=document.querySelector('#backup-daily-time-input'),backupRetention=document.querySelector('#backup-retention-count');
+const setBackupScheduleControls=value=>{{const daily=value.match(/^(?:daily-)?([0-2][0-9]:[0-5][0-9])$/);backupSchedule.value=daily?'daily':value;backupDailyInput.value=daily?daily[1]:'04:30';backupDailyTime.hidden=backupSchedule.value!=='daily';}};
+const syncBackupFields=()=>{{const scheduleField=document.querySelector('#setting-BACKUP_TIME'),retentionField=document.querySelector('#setting-BACKUP_RETENTION_COUNT');if(scheduleField){{scheduleField.value=backupSchedule.value==='daily'?'daily-'+backupDailyInput.value:backupSchedule.value;scheduleField.dispatchEvent(new Event('input',{{bubbles:true}}));}}if(retentionField){{retentionField.value=backupRetention.value;retentionField.dispatchEvent(new Event('input',{{bubbles:true}}));}}backupDailyTime.hidden=backupSchedule.value!=='daily';}};
+backupSchedule.addEventListener('change',syncBackupFields);backupDailyInput.addEventListener('input',syncBackupFields);backupRetention.addEventListener('input',syncBackupFields);
+const settingsValues=()=>Object.fromEntries(new FormData(settingsForm).entries());
 const showDiff=data=>{{const changes=data.changes||[];document.querySelector('#settings-diff').textContent=changes.length?changes.map(x=>`${{x.category}} — ${{x.label}}: ${{x.old}} → ${{x.new}}`).join('\\n'):'沒有變更。';document.querySelector('#restart-notice').hidden=!data.restart_required;}};
-async function loadSettings(){{try{{const data=await request('/api/settings');const root=document.querySelector('#settings-fields');root.replaceChildren();for(const category of data.categories){{const fieldset=document.createElement('fieldset'),legend=document.createElement('legend');legend.textContent=category.name;fieldset.append(legend);for(const field of category.fields){{const row=document.createElement('div'),label=document.createElement('label'),help=document.createElement('button'),tooltip=document.createElement('span'),input=document.createElement(field.kind==='choice'||field.kind==='boolean'?'select':'input'),reset=document.createElement('button'),inputId='setting-'+field.key;row.className='setting-row';label.htmlFor=inputId;label.textContent=field.label;help.type='button';help.className='help';help.setAttribute('aria-label',field.label+' 的說明');help.setAttribute('aria-describedby','help-'+field.key);help.textContent='?';tooltip.id='help-'+field.key;tooltip.className='help-tooltip';tooltip.setAttribute('role','tooltip');tooltip.textContent=field.description;help.append(tooltip);input.id=inputId;input.name=field.key;input.required=true;input.setAttribute('aria-describedby',tooltip.id);if(field.kind==='boolean'){{for(const optionValue of ['true','false']){{const option=document.createElement('option');option.value=optionValue;option.textContent=optionValue==='true'?'Enabled':'Disabled';input.append(option);}}}}else if(field.kind==='integer'||field.kind==='number'){{input.type='number';input.step=field.kind==='integer'?'1':'0.1';if(field.minimum!==null)input.min=field.minimum;if(field.maximum!==null)input.max=field.maximum;}}else input.type='text';if(field.kind==='choice')for(const optionValue of field.choices){{const option=document.createElement('option');option.value=optionValue;option.textContent=optionValue;input.append(option);}}input.value=field.value;reset.type='button';reset.className='reset-setting';reset.textContent='重置';reset.title='重置為預設值：'+field.default;reset.setAttribute('aria-label',field.label+' 重置為預設值 '+field.default);reset.addEventListener('click',()=>{{input.value=field.default;input.dispatchEvent(new Event('input',{{bubbles:true}}));input.focus();}});row.append(label,help,input,reset);fieldset.append(row);}}root.append(fieldset);}}showDiff({{changes:[],restart_required:data.restart_required}});}}catch(e){{document.querySelector('#settings-fields').textContent=e.message;}}}}
+async function loadSettings(){{try{{const data=await request('/api/settings');const root=document.querySelector('#settings-fields');root.replaceChildren();for(const category of data.categories){{const fieldset=document.createElement('fieldset'),legend=document.createElement('legend');legend.textContent=category.name;fieldset.append(legend);for(const field of category.fields){{const row=document.createElement('div'),label=document.createElement('label'),help=document.createElement('button'),tooltip=document.createElement('span'),input=document.createElement(field.kind==='choice'||field.kind==='boolean'?'select':'input'),reset=document.createElement('button'),inputId='setting-'+field.key;row.className='setting-row';label.htmlFor=inputId;label.textContent=field.label;help.type='button';help.className='help';help.setAttribute('aria-label',field.label+' 的說明');help.setAttribute('aria-describedby','help-'+field.key);help.textContent='?';tooltip.id='help-'+field.key;tooltip.className='help-tooltip';tooltip.setAttribute('role','tooltip');tooltip.textContent=field.description;help.append(tooltip);input.id=inputId;input.name=field.key;input.required=true;input.setAttribute('aria-describedby',tooltip.id);if(field.kind==='boolean'){{for(const optionValue of ['true','false']){{const option=document.createElement('option');option.value=optionValue;option.textContent=optionValue==='true'?'Enabled':'Disabled';input.append(option);}}}}else if(field.kind==='integer'||field.kind==='number'){{input.type='number';input.step=field.kind==='integer'?'1':'0.1';if(field.minimum!==null)input.min=field.minimum;if(field.maximum!==null)input.max=field.maximum;}}else input.type='text';if(field.kind==='choice')for(const optionValue of field.choices){{const option=document.createElement('option');option.value=optionValue;option.textContent=optionValue;input.append(option);}}input.value=field.value;reset.type='button';reset.className='reset-setting';reset.textContent='重置';reset.title='重置為預設值：'+field.default;reset.setAttribute('aria-label',field.label+' 重置為預設值 '+field.default);reset.addEventListener('click',()=>{{input.value=field.default;input.dispatchEvent(new Event('input',{{bubbles:true}}));input.focus();}});row.append(label,help,input,reset);fieldset.append(row);}}root.append(fieldset);}}const scheduleField=document.querySelector('#setting-BACKUP_TIME'),retentionField=document.querySelector('#setting-BACKUP_RETENTION_COUNT');if(scheduleField)setBackupScheduleControls(scheduleField.value);if(retentionField)backupRetention.value=retentionField.value;showDiff({{changes:[],restart_required:data.restart_required}});}}catch(e){{document.querySelector('#settings-fields').textContent=e.message;}}}}
 const settingsRequest=path=>request(path,{{method:'POST',headers:{{'Content-Type':'application/json','X-Palworld-CSRF':csrf}},body:JSON.stringify({{values:settingsValues()}})}});
 document.querySelector('#preview-settings').addEventListener('click',async()=>{{if(!settingsForm.reportValidity())return;try{{showDiff(await settingsRequest('/api/settings/preview'));}}catch(e){{document.querySelector('#settings-diff').textContent=e.message;}}}});
 settingsForm.addEventListener('submit',async event=>{{event.preventDefault();if(!settingsForm.reportValidity())return;try{{const preview=await settingsRequest('/api/settings/preview');showDiff(preview);if(preview.changes.length&&!confirm('套用以上變更？'))return;const saved=await settingsRequest('/api/settings');showDiff(saved);document.querySelector('#message').textContent=saved.message+(saved.backup?' Backup: '+saved.backup:'');}}catch(e){{document.querySelector('#settings-diff').textContent=e.message;}}}});async function loadCommon(){{const data=await request('/api/settings'),all=data.categories.flatMap(category=>category.fields),keys=data.common_keys,root=document.querySelector('#common-settings');root.replaceChildren();for(const key of keys){{const field=all.find(item=>item.key===key),full=document.querySelector('#setting-'+key);if(!field||!full)continue;const row=document.createElement('p'),label=document.createElement('label'),input=full.cloneNode(true);input.removeAttribute('name');input.id='common-'+key;label.htmlFor=input.id;label.textContent=field.label+' ';input.addEventListener('input',()=>{{full.value=input.value;full.dispatchEvent(new Event('input',{{bubbles:true}}));}});label.append(input);row.append(label);root.append(row);}}const password=document.createElement('p');password.textContent='伺服器密碼：請於首次開服精靈手動設定。';root.append(password);}}loadSettings().then(loadCommon).catch(()=>{{}});
 document.querySelector('#copy-backup-folder').addEventListener('click',async()=>{{const path=document.querySelector('#backup-folder').textContent.replace('備份資料夾：','');try{{await navigator.clipboard.writeText(path);document.querySelector('#message').textContent='備份資料夾位置已複製。';}}catch(_e){{document.querySelector('#message').textContent=path;}}}});
-const wizard=document.querySelector('#onboarding'),wizardForm=document.querySelector('#onboarding-form'),wizardBind=document.querySelector('#wizard-bind');wizardBind.addEventListener('change',()=>{{document.querySelector('#wizard-lan').hidden=wizardBind.value!=='lan';}});
-async function loadOnboarding(){{try{{const data=await request('/api/onboarding');wizard.hidden=!data.required;wizardForm.backup_time.value=data.backup_enabled?data.backup_time:'off';wizardBind.value=data.bind_mode;wizardBind.dispatchEvent(new Event('change'));}}catch(e){{document.querySelector('#message').textContent=e.message;}}}}loadOnboarding();
-wizardForm.addEventListener('submit',async event=>{{event.preventDefault();if(!wizardForm.reportValidity())return;try{{const password=wizardForm.server_password.value,data=await request('/api/onboarding',{{method:'POST',headers:{{'Content-Type':'application/json','X-Palworld-CSRF':csrf}},body:JSON.stringify(Object.fromEntries(new FormData(wizardForm).entries()))}});wizardPassword=password;document.querySelector('#message').textContent=data.message;wizard.hidden=true;await refresh();await loadSettings();await loadCommon();}}catch(e){{document.querySelector('#message').textContent=e.message;}}}});
+const wizard=document.querySelector('#onboarding'),wizardForm=document.querySelector('#onboarding-form'),wizardBind=document.querySelector('#wizard-bind'),wizardBackupSchedule=document.querySelector('#wizard-backup-schedule'),wizardDailyTime=document.querySelector('#wizard-daily-time');wizardBind.addEventListener('change',()=>{{document.querySelector('#wizard-lan').hidden=wizardBind.value!=='lan';}});wizardBackupSchedule.addEventListener('change',()=>{{wizardDailyTime.hidden=wizardBackupSchedule.value!=='daily';}});
+async function loadOnboarding(){{try{{const data=await request('/api/onboarding'),schedule=data.backup_schedule||data.backup_time;wizard.hidden=!data.required;const daily=schedule.match(/^(?:daily-)?([0-2][0-9]:[0-5][0-9])$/);wizardBackupSchedule.value=daily?'daily':schedule;wizardForm.backup_daily_time.value=daily?daily[1]:'04:30';wizardDailyTime.hidden=wizardBackupSchedule.value!=='daily';wizardForm.backup_retention_count.value=data.backup_retention_count;wizardBind.value=data.bind_mode;wizardBind.dispatchEvent(new Event('change'));}}catch(e){{document.querySelector('#message').textContent=e.message;}}}}loadOnboarding();
+wizardForm.addEventListener('submit',async event=>{{event.preventDefault();if(!wizardForm.reportValidity())return;try{{const password=wizardForm.server_password.value,payload=Object.fromEntries(new FormData(wizardForm).entries());payload.backup_time=payload.backup_schedule==='daily'?'daily-'+payload.backup_daily_time:payload.backup_schedule;const data=await request('/api/onboarding',{{method:'POST',headers:{{'Content-Type':'application/json','X-Palworld-CSRF':csrf}},body:JSON.stringify(payload)}});wizardPassword=password;document.querySelector('#message').textContent=data.message;wizard.hidden=true;await refresh();await loadSettings();await loadCommon();}}catch(e){{document.querySelector('#message').textContent=e.message;}}}});
 const discordForm=document.querySelector('#discord-form');document.querySelector('#discord-invite').addEventListener('click',()=>{{const id=discordForm.application_id.value;if(!/^[0-9]+$/.test(id)){{document.querySelector('#message').textContent='請先填入數字 Application ID。';return;}}window.open('https://discord.com/oauth2/authorize?client_id='+encodeURIComponent(id)+'&scope=bot%20applications.commands&permissions=3072','_blank','noopener');}});discordForm.addEventListener('submit',async event=>{{event.preventDefault();if(!discordForm.reportValidity())return;try{{const data=await request('/api/discord/setup',{{method:'POST',headers:{{'Content-Type':'application/json','X-Palworld-CSRF':csrf}},body:JSON.stringify(Object.fromEntries(new FormData(discordForm).entries()))}});document.querySelector('#message').textContent=data.message;discordForm.token.value='';}}catch(e){{document.querySelector('#message').textContent=e.message;}}}});
 const networkForm=document.querySelector('#advanced-network-form'),advancedBind=document.querySelector('#advanced-bind');advancedBind.addEventListener('change',()=>{{document.querySelector('#advanced-lan').hidden=advancedBind.value!=='lan';}});networkForm.addEventListener('submit',async event=>{{event.preventDefault();try{{const data=await request('/api/advanced/network',{{method:'POST',headers:{{'Content-Type':'application/json','X-Palworld-CSRF':csrf}},body:JSON.stringify(Object.fromEntries(new FormData(networkForm).entries()))}});document.querySelector('#message').textContent=data.message;}}catch(e){{document.querySelector('#message').textContent=e.message;}}}});
 </script></body></html>""".encode("utf-8")
@@ -972,14 +1004,15 @@ class _Handler(BaseHTTPRequestHandler):
         except (ValueError, UnicodeDecodeError):
             return False
         username, separator, password = supplied.partition(":")
-        current_password = (
-            self.server.dependencies.config.values.get("PALWORLD_WEB_UI_PASSWORD")
-            or self.server.dependencies.config.values["ADMIN_PASSWORD"]
-        )
+        current_password = _web_auth_password(self.server.dependencies.config)
         return bool(separator) and hmac.compare_digest(username, self.server.auth_username) and \
             hmac.compare_digest(password, current_password)
 
     def _auth_required(self) -> bool:
+        current_password = _web_auth_password(self.server.dependencies.config)
+        if (self.server.loopback_listener and not current_password
+                and ipaddress.ip_address(self.client_address[0]).is_loopback):
+            return False
         if self._authenticated():
             return False
         body = b'{"error":"Authentication required."}'
@@ -1267,12 +1300,12 @@ class WebServer(ThreadingHTTPServer):
         self.dependencies = dependencies
         self.csrf_token = secrets.token_urlsafe(32)
         self.auth_username = dependencies.config.values["PALWORLD_WEB_UI_USERNAME"]
-        self.auth_password = (
-            dependencies.config.values.get("PALWORLD_WEB_UI_PASSWORD")
-            or dependencies.config.values["ADMIN_PASSWORD"]
-        )
-        if not self.auth_username or not self.auth_password:
-            raise ValueError("web UI authentication credentials must be configured")
+        self.auth_password = _web_auth_password(dependencies.config)
+        if not self.auth_username:
+            raise ValueError("web UI authentication username must be configured")
+        self.loopback_listener = ipaddress.ip_address(host).is_loopback
+        if not self.auth_password and not self.loopback_listener:
+            raise ValueError("a non-loopback web UI requires authentication credentials")
         # Use the canonical address rather than the original user input.  In
         # particular, Python's socket layer must never receive a value such as
         # ``' 127.0.0.1 '`` which passed validation only after trimming.

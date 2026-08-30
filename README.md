@@ -372,8 +372,9 @@ API 不通時，先查看遊戲 log、確認 `RESTAPIEnabled=True`、8212 loopba
 
 ## 備份與還原
 
-維護時間、通用備份目的地與保留版本數分別由 `BACKUP_TIME`、
-`PALWORLD_BACKUP_DIR` 與 `BACKUP_RETENTION_COUNT` 決定。維護會先透過本機
+維護排程、通用備份目的地與保留版本數分別由 `BACKUP_TIME`、
+`PALWORLD_BACKUP_DIR` 與 `BACKUP_RETENTION_COUNT` 決定。`BACKUP_TIME` 支援
+`daily-HH:MM`、`every-2h`、`every-4h`、`every-6h`、`every-12h` 與 `off`。維護會先透過本機
 REST API 存檔並要求正常關服，才取得一致 snapshot，再以 SteamCMD 驗證並
 更新伺服器。若正常關服失敗，維護會中止，不會以強制終止取代。若維護開始
 前伺服器正在運行，完成後才會重新啟動；開始前已關閉則維持關閉。還原使用：

@@ -374,6 +374,19 @@ exec /usr/bin/rsync "$@"
         self.assertIn("Scheduled backup is disabled", result.stdout)
         self.assertFalse(self.command_log.exists())
 
+    def test_scheduled_maintenance_honors_interval_schedule(self):
+        self._write_executable(
+            "date",
+            "#!/usr/bin/env bash\ncase \"${1:-}\" in +%M) printf '00\\n' ;; +%H) printf '04\\n' ;; *) exec /usr/bin/date \"$@\" ;; esac\n",
+        )
+        caretaker = self.config_dir / "caretaker.env"
+        caretaker.write_text(caretaker.read_text(encoding="utf-8") + "BACKUP_TIME=every-4h\n", encoding="utf-8")
+
+        result = self._run("daily-palworld-maintenance.sh", "--scheduled")
+
+        self.assertEqual(result.returncode, 23, result.stderr)
+        self.assertIn("systemctl stop palworld.service", self.command_log.read_text())
+
     def test_restore_rejects_incomplete_snapshot_before_prompt_or_service_stop(self):
         incomplete = self.backup_root / "palworld-20000101-000000"
         (incomplete / "savegames/0/backup").mkdir(parents=True)

@@ -280,7 +280,7 @@ _SPECS = (
     SettingSpec("PALWORLD_IDLE_SHUTDOWN_ENABLED", "Idle shutdown enabled", "Caretaker", "server", "boolean", "true"),
     SettingSpec("PALWORLD_IDLE_TIMEOUT_MINUTES", "Idle shutdown timeout (minutes)", "Caretaker", "server", "integer", "10", 1, 1440),
     SettingSpec("BACKUP_RETENTION_COUNT", "Backup retention count", "Caretaker", "caretaker", "integer", "14", 1, 1000),
-    SettingSpec("BACKUP_TIME", "Daily backup time", "Caretaker", "caretaker", "string", "04:30"),
+    SettingSpec("BACKUP_TIME", "Backup schedule", "Caretaker", "caretaker", "string", "daily-04:30"),
 )
 
 _DESCRIPTIONS = {
@@ -323,7 +323,7 @@ _DESCRIPTIONS = {
     "PALWORLD_IDLE_SHUTDOWN_ENABLED": "Automatically stop the server after it has been empty for the configured period.",
     "PALWORLD_IDLE_TIMEOUT_MINUTES": "Minutes with no players before the idle shutdown watcher stops the server.",
     "BACKUP_RETENTION_COUNT": "Number of completed backups to retain; older backups are pruned safely.",
-    "BACKUP_TIME": "Daily local time at which the scheduled backup runs, in 24-hour HH:MM format.",
+    "BACKUP_TIME": "Schedule: daily-HH:MM, every-2h, every-4h, every-6h, every-12h, or off. Legacy HH:MM values remain supported.",
 }
 if set(_DESCRIPTIONS) != {spec.key for spec in _SPECS}:  # pragma: no cover - schema authoring guard
     raise AssertionError("every editable setting requires a description")
@@ -332,6 +332,27 @@ _SPECS = tuple(replace(spec, description=_DESCRIPTIONS[spec.key]) for spec in _S
 SETTING_SPECS: dict[str, SettingSpec] = {spec.key: spec for spec in _SPECS}
 EDITABLE_DEFAULTS: dict[str, str] = {spec.key: spec.default for spec in _SPECS}
 _TIME = re.compile(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]\Z")
+_BACKUP_INTERVALS = frozenset({"every-2h", "every-4h", "every-6h", "every-12h"})
+
+
+def normalize_backup_schedule(value: object, *, key: str = "BACKUP_TIME") -> str:
+    """Validate backup schedule syntax and canonicalize legacy daily times.
+
+    ``HH:MM`` was the original configuration contract.  Continue accepting it
+    when loading old deployments, but write new daily schedules as
+    ``daily-HH:MM`` so the cadence is unambiguous next to interval schedules.
+    """
+    if not isinstance(value, str):
+        raise ConfigError(f"{key} must be a backup schedule string")
+    if value in {"off", *_BACKUP_INTERVALS}:
+        return value
+    if value.startswith("daily-") and _TIME.fullmatch(value[6:]):
+        return value
+    if _TIME.fullmatch(value):
+        return f"daily-{value}"
+    raise ConfigError(
+        f"{key} must be daily-HH:MM, every-2h, every-4h, every-6h, every-12h, or off"
+    )
 _INI_RESERVED = frozenset(",()\"'")
 
 
@@ -344,8 +365,8 @@ def validate_ini_password(value: object, *, key: str = "SERVER_PASSWORD") -> str
     renderer rejects (or which alters the comma-delimited OptionSettings
     tuple).
     """
-    if not isinstance(value, str) or not value or len(value) > 256:
-        raise ConfigError(f"{key} must be 1–256 characters")
+    if not isinstance(value, str) or len(value) > 256:
+        raise ConfigError(f"{key} must be 0–256 characters")
     if any(character in value for character in ("\x00", "\r", "\n")):
         raise ConfigError(f"{key} contains a forbidden control character")
     if value.endswith("\\"):
@@ -374,8 +395,8 @@ def _string(value: object, spec: SettingSpec) -> str:
             raise ConfigError(f"{spec.key} must not be empty")
         if any(character in value for character in _INI_RESERVED):
             raise ConfigError(f"{spec.key} contains an INI-reserved character")
-    if spec.key == "BACKUP_TIME" and not _TIME.fullmatch(value):
-        raise ConfigError("BACKUP_TIME must use 24-hour HH:MM format")
+    if spec.key == "BACKUP_TIME":
+        return normalize_backup_schedule(value, key=spec.key)
     return value
 
 

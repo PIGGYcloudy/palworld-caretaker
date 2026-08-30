@@ -17,7 +17,7 @@ from .config import CaretakerConfig, SETTINGS_BACKUP_DIRECTORY, load_config
 from .errors import ConfigError
 from .settings import canonical_web_origin, normalize_web_bind_ip
 from .paths import native_path
-from .settings import SETTING_SPECS, validate_edit, validate_ini_password
+from .settings import SETTING_SPECS, normalize_backup_schedule, validate_edit, validate_ini_password
 from .windows import is_reparse_point
 
 
@@ -68,6 +68,11 @@ def _safe_directory(path: Path, *, message: str) -> os.stat_result:
 
 
 def _env_value(value: str) -> str:
+    # Empty game passwords are intentional for public servers.  Render them
+    # explicitly so an operator can distinguish a deliberate blank from an
+    # omitted setting in the editable layer.
+    if value == "":
+        return '""'
     if _SAFE_UNQUOTED.fullmatch(value):
         return value
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
@@ -271,11 +276,20 @@ class SettingsStore:
             if filename not in _EDITABLE_FILES:
                 raise SettingsPersistenceError("settings target is not editable")
             updates.setdefault(filename, {})[spec.key] = change["new"]
+        # ``PALWORLD_BACKUP_SCHEDULE_ENABLED`` predates interval schedules.
+        # Keep it synchronized whenever the editable schedule changes so a
+        # user can turn scheduling back on after selecting ``off``.
+        schedule_change = next((change for change in diff if change["key"] == "BACKUP_TIME"), None)
+        if schedule_change is not None:
+            updates.setdefault("caretaker.env", {})["PALWORLD_BACKUP_SCHEDULE_ENABLED"] = (
+                "false" if schedule_change["new"] == "off" else "true"
+            )
         backup = self._publish_editable(updates, directory=editable)
         return self.current(), diff, backup
 
     def complete_onboarding(self, *, server_name: object, server_password: object, backup_time: object,
-                            bind_mode: object, lan_origin: object = "") -> CaretakerConfig:
+                            backup_retention_count: object = 14, bind_mode: object,
+                            lan_origin: object = "") -> CaretakerConfig:
         """Persist the deliberately small first-run-only configuration surface.
 
         The manager account never writes root's secrets file.  Instead its
@@ -287,12 +301,11 @@ class SettingsStore:
         server_password = validate_ini_password(server_password)
         if bind_mode not in {"local", "lan"}:
             raise ConfigError("bind mode must be local or lan")
-        if backup_time == "off":
-            schedule_enabled, rendered_time = "false", None
-        elif isinstance(backup_time, str) and re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", backup_time):
-            schedule_enabled, rendered_time = "true", backup_time
+        rendered_schedule = normalize_backup_schedule(backup_time)
+        if rendered_schedule == "off":
+            schedule_enabled = "false"
         else:
-            raise ConfigError("backup time must be HH:MM or off")
+            schedule_enabled = "true"
         origin = ""
         if bind_mode == "lan":
             origin = canonical_web_origin(lan_origin) if isinstance(lan_origin, str) else None
@@ -312,19 +325,26 @@ class SettingsStore:
 
         current = self.current()
         server_name = validate_edit({"SERVER_NAME": server_name}, current.values)["SERVER_NAME"]
+        backup_retention_count = validate_edit(
+            {"BACKUP_RETENTION_COUNT": backup_retention_count}, current.values,
+        )["BACKUP_RETENTION_COUNT"]
         values = dict(current.values)
         panel_password = values.get("PALWORLD_WEB_UI_PASSWORD") or values.get("ADMIN_PASSWORD", "")
         replace_placeholder_panel_password = not panel_password or panel_password.startswith("CHANGE_ME")
+        effective_panel_password = server_password if replace_placeholder_panel_password else panel_password
+        if bind_mode == "lan" and not effective_panel_password:
+            raise ConfigError("a non-empty panel password is required for LAN mode")
         values.update({
             "SERVER_NAME": server_name,
             "SERVER_PASSWORD": server_password,
+            "BACKUP_TIME": rendered_schedule,
+            "BACKUP_RETENTION_COUNT": backup_retention_count,
             "PALWORLD_BACKUP_SCHEDULE_ENABLED": schedule_enabled,
+            "PALWORLD_ONBOARDING_COMPLETED": "true",
             "PALWORLD_WEB_BIND_IP": "0.0.0.0" if bind_mode == "lan" else "127.0.0.1",
             "PALWORLD_WEB_ALLOWED_ORIGINS": origin,
             "PALWORLD_WEB_ALLOWED_HOSTS": "",
         })
-        if rendered_time is not None:
-            values["BACKUP_TIME"] = rendered_time
         # Exercise the full config schema before any write.
         candidate = CaretakerConfig(values, current.schema, current.directory)
         editable = self.directory / _EDITABLE_DIRECTORY
@@ -339,12 +359,13 @@ class SettingsStore:
 
         caretaker_updates = {
             "PALWORLD_BACKUP_SCHEDULE_ENABLED": schedule_enabled,
+            "PALWORLD_ONBOARDING_COMPLETED": "true",
             "PALWORLD_WEB_BIND_IP": values["PALWORLD_WEB_BIND_IP"],
             "PALWORLD_WEB_ALLOWED_ORIGINS": origin,
             "PALWORLD_WEB_ALLOWED_HOSTS": "",
+            "BACKUP_TIME": rendered_schedule,
+            "BACKUP_RETENTION_COUNT": backup_retention_count,
         }
-        if rendered_time is not None:
-            caretaker_updates["BACKUP_TIME"] = rendered_time
         secrets_updates = {"SERVER_PASSWORD": server_password}
         if replace_placeholder_panel_password:
             values["PALWORLD_WEB_UI_PASSWORD"] = server_password
