@@ -8,36 +8,18 @@ set "PORT=8765"
 :: A release archive intentionally contains only safe .example files. Make a
 :: private working copy on the first double-click so the Web setup wizard can
 :: finish provisioning without asking a new user to run shell commands.
-if not exist "%CONFIG_DIR%\" mkdir "%CONFIG_DIR%" >nul 2>&1
-if not exist "%CONFIG_DIR%\" (
-  echo [ERROR] Could not create %CONFIG_DIR%
-  pause
-  exit /b 1
-)
+if not exist "%CONFIG_DIR%" md "%CONFIG_DIR%" >nul 2>&1
 for %%F in (caretaker.env server.env secrets.env) do (
   if not exist "%CONFIG_DIR%\%%F" (
-    if not exist "%CONFIG_DIR%\%%F.example" (
-      echo [ERROR] Missing %CONFIG_DIR%\%%F.example
-      pause
-      exit /b 1
-    )
-    echo Creating config\%%F from its safe example...
-    copy /Y "%CONFIG_DIR%\%%F.example" "%CONFIG_DIR%\%%F" >nul
-    if errorlevel 1 (
-      echo [ERROR] Could not create %CONFIG_DIR%\%%F
-      pause
-      exit /b 1
+    if exist "%CONFIG_DIR%\%%F.example" (
+      echo Creating config\%%F from its safe example...
+      copy /Y "%CONFIG_DIR%\%%F.example" "%CONFIG_DIR%\%%F" >nul
     )
   )
 )
 
 :: The first-run wizard persists only within this manager-owned child layer.
-if not exist "%CONFIG_DIR%\editable\" mkdir "%CONFIG_DIR%\editable" >nul 2>&1
-if not exist "%CONFIG_DIR%\editable\" (
-  echo [ERROR] Could not create %CONFIG_DIR%\editable
-  pause
-  exit /b 1
-)
+if not exist "%CONFIG_DIR%\editable" md "%CONFIG_DIR%\editable" >nul 2>&1
 
 set "PYTHON="
 where py >nul 2>&1 && set "PYTHON=py -3"
