@@ -4,7 +4,7 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [0.9.0] - 2026-08-30
 
-### 小白開箱體驗革命
+### 新手友善開箱體驗與日常設定優化
 
 - 新增根目錄「啟動伺服器與管理面板.bat」Windows 雙擊入口：檢查設定與 Python、提升權限啟動 PalServer service、等待 Web UI 健康檢查並開啟瀏覽器。
 - 新增首次開服精靈：伺服器密碼由使用者手動輸入，可選自動備份時間，並可選本機或可信任 LAN/VPN 面板範圍；不隨機產生或顯示密碼，也不提供容易誤導的好友連線卡片。
