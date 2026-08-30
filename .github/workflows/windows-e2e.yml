@@ -1,0 +1,64 @@
+name: Windows End-to-End Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  windows-e2e:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Simulate fresh download and extract
+        shell: cmd
+        run: |
+          mkdir %TEMP%\palworld-test
+          xcopy /E /I /Y . %TEMP%\palworld-test
+          cd /d %TEMP%\palworld-test
+          dir
+
+      - name: Execute 啟動伺服器與管理面板.bat in background & probe Web UI
+        shell: powershell
+        run: |
+          $testDir = "$env:TEMP\palworld-test"
+          Set-Location $testDir
+          
+          Write-Host "=== Starting 啟動伺服器與管理面板.bat ==="
+          # Run the bat directly
+          $process = Start-Process -FilePath "cmd.exe" -ArgumentList "/c", ".\啟動伺服器與管理面板.bat" -PassThru -NoNewWindow
+          
+          Write-Host "=== Waiting for Web UI to be ready on http://127.0.0.1:8765 ==="
+          $ready = $false
+          for ($i = 0; $i -lt 40; $i++) {
+            Start-Sleep -Seconds 1
+            try {
+              $resp = Invoke-WebRequest -Uri "http://127.0.0.1:8765/healthz" -UseBasicParsing -TimeoutSec 2
+              if ($resp.StatusCode -eq 200) {
+                Write-Host "[SUCCESS] Web UI responded 200 OK!"
+                $ready = $true
+                break
+              }
+            } catch {
+              Write-Host "Waiting... ($i/40) $($_.Exception.Message)"
+            }
+          }
+          
+          if (-not $ready) {
+            Write-Error "Web UI did not start within 40 seconds."
+            exit 1
+          }
+          
+          Write-Host "=== Testing Web UI Wizard Endpoint ==="
+          $auth = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("palworld-manager:CHANGE_ME_ADMIN_PASSWORD"))
+          $headers = @{ Authorization = "Basic $auth" }
+          $wizardResp = Invoke-WebRequest -Uri "http://127.0.0.1:8765/" -Headers $headers -UseBasicParsing
+          Write-Host "[SUCCESS] Wizard Page Loaded (Length: $($wizardResp.Content.Length))"
+          
+          # Clean up process
+          Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
