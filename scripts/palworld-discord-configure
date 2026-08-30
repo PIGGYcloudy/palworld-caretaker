@@ -89,6 +89,7 @@ finish() {
   local rc=$?
   trap - EXIT
   cleanup
+  # shellcheck disable=SC2317
   if (( rc != 0 && published == 0 )); then rollback_config; fi
   exit "$rc"
 }
