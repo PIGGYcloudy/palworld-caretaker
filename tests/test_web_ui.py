@@ -411,6 +411,96 @@ class WebUITests(unittest.TestCase):
         status, _raw, _headers = self.request("/api/status", authenticate=False)
         self.assertEqual(status, 401)
 
+    def test_unicode_credentials_and_password_updates(self):
+        self.server.auth_username = "管理員"
+        values = self.fixture.dependencies.config.values
+        values["PALWORLD_WEB_UI_PASSWORD"] = "密碼🔐:é"
+        for username, password, expected in (
+            ("管理員", "密碼🔐:é", 200),
+            ("管理員", "錯誤", 401),
+            ("別人", "密碼🔐:é", 401),
+        ):
+            with self.subTest(username=username, password=password):
+                header = "Basic " + base64.b64encode(f"{username}:{password}".encode("utf-8")).decode()
+                status, _, _ = self.request("/api/status", headers={"Authorization": header})
+                self.assertEqual(status, expected)
+        values["PALWORLD_WEB_UI_PASSWORD"] = "更新密碼"
+        for password, expected in (("密碼🔐:é", 401), ("更新密碼", 200)):
+            header = "Basic " + base64.b64encode(f"管理員:{password}".encode()).decode()
+            self.assertEqual(self.request("/api/status", headers={"Authorization": header})[0], expected)
+        save_root = self.fixture.dependencies.config.server_root / "Pal/Saved/SaveGames"
+        save_root.mkdir(parents=True)
+        (save_root / "World.sav").write_bytes(b"world-data")
+        status, _, headers = self.request("/api/savegames/download", method="POST", body=b"{}", headers={
+            "Authorization": header, "Content-Type": "application/json",
+            "X-Palworld-CSRF": self.server.csrf_token, "Origin": self.base,
+        })
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["Content-Type"], "application/zip")
+        for invalid in (b"\xff:password", b"missing-colon"):
+            header = "Basic " + base64.b64encode(invalid).decode()
+            self.assertEqual(self.request("/api/status", headers={"Authorization": header})[0], 401)
+
+    def test_onboarding_handoff_uses_effective_panel_credentials(self):
+        values = self.fixture.dependencies.config.values
+        for panel_password, admin_password, game_password, expected in (
+            ("密碼🔐", "", "密碼🔐", True),
+            ("panel-secret", "", "game-secret", False),
+            ("", "admin-secret", "", False),
+            ("", "", "", False),
+            ("", "", "game-secret", False),
+        ):
+            with self.subTest(panel_password=panel_password, game_password=game_password):
+                values["PALWORLD_WEB_UI_PASSWORD"] = ""
+                values["ADMIN_PASSWORD"] = "admin-secret-never-rendered"
+
+                def complete(_payload):
+                    values["PALWORLD_WEB_UI_PASSWORD"] = panel_password
+                    values["ADMIN_PASSWORD"] = admin_password
+                    return {"message": "saved"}
+
+                with patch.object(self.fixture.dependencies, "complete_onboarding", side_effect=complete):
+                    status, raw, _ = self.post_json("/api/onboarding", {"server_password": game_password})
+                self.assertEqual(status, 200, raw)
+                self.assertEqual(json.loads(raw)["auth"], {
+                    "use_server_password": expected, "username": self.server.auth_username,
+                })
+                self.assertNotIn("panel-secret", raw.decode())
+
+    @unittest.skipUnless(shutil.which("node"), "JavaScript regression requires Node.js")
+    def test_frontend_auth_unicode_handoff_and_download(self):
+        _, page, _ = self.request("/")
+        script = page.decode().split("<script nonce=", 1)[1].split(">", 1)[1].split("</script>", 1)[0]
+        helpers = script[:script.index("\nconst text=")]
+        handoff = script[script.index("wizardPassword=data.auth"):script.index("document.querySelector('#message').textContent=data.message;wizard.hidden=true")]
+        self.assertIn("await authenticatedFetch('/api/savegames/download'", script)
+        program = helpers + "\n" + r"""
+const assert=require('node:assert/strict');
+const calls=[];
+global.fetch=async(path,options)=>{calls.push({path,...options});return {ok:true,json:async()=>({ok:true})};};
+(async()=>{
+  await request('/api/status');
+  assert.equal(calls.at(-1).headers.has('Authorization'),false);
+  const password='密碼🔐:é';
+  let data={auth:{use_server_password:true,username:'管理員'}};
+  HANDOFF
+  await request('/api/status');
+  const expected='Basic '+Buffer.from('管理員:'+password,'utf8').toString('base64');
+  assert.equal(calls.at(-1).headers.get('Authorization'),expected);
+  await authenticatedFetch('/api/savegames/download',{method:'POST',headers:{'X-Palworld-CSRF':csrf}});
+  assert.equal(calls.at(-1).headers.get('Authorization'),expected);
+  assert.equal(calls.at(-1).headers.get('X-Palworld-CSRF'),csrf);
+  await request('/api/status',{headers:{Authorization:'Basic explicit'}});
+  assert.equal(calls.at(-1).headers.get('Authorization'),'Basic explicit');
+  data={auth:{use_server_password:false,username:'管理員'}};
+  HANDOFF
+  await request('/api/status');
+  assert.equal(calls.at(-1).headers.has('Authorization'),false);
+})().catch(error=>{console.error(error);process.exitCode=1;});
+""".replace("HANDOFF", handoff)
+        result = subprocess.run(["node", "-e", program], capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_empty_panel_password_allows_loopback_without_an_auth_loop(self):
         # This simulates onboarding clearing the placeholder password while
         # the already-running local server is still serving the wizard.

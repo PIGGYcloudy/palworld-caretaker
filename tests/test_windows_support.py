@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import os
+import re
 import errno
+import json
 from pathlib import Path
 import shutil
 import subprocess
@@ -38,6 +40,20 @@ class PortablePathTests(unittest.TestCase):
             self.assertIn("palworld-service.ps1", launcher)
             self.assertIn("/healthz", launcher)
             self.assertIn("http://127.0.0.1:%PORT%/", launcher)
+
+    def test_windows_renderer_covers_all_world_schema_settings(self):
+        from palworld_caretaker.settings import SETTING_SPECS
+        script = (Path(__file__).parents[1] / "scripts/windows/render-settings.ps1").read_text()
+        configured = set(re.findall(r"Get-ConfigValue \$config '([A-Z_]+)'", script))
+        world = {key for key, spec in SETTING_SPECS.items() if spec.category != "Caretaker"}
+        self.assertFalse(world - configured, world - configured)
+
+    def test_launchers_quote_elevated_script_and_config_paths(self):
+        for name in ("start-caretaker.bat", "啟動伺服器與管理面板.bat"):
+            script = (Path(__file__).parents[1] / name).read_text()
+            self.assertIn("DisableDelayedExpansion", script)
+            for variable in ("CARETAKER_SERVICE_SCRIPT", "CARETAKER_SERVICE_CONFIG_DIR"):
+                self.assertIn(f"([string][char]34+$env:{variable}+[char]34)", script)
 
     def test_native_path_normalizes_current_platform_separators(self):
         value = native_path("alpha/beta" if os.name == "nt" else "alpha/beta")
@@ -196,7 +212,7 @@ class PortablePathTests(unittest.TestCase):
 @unittest.skipUnless(os.name == "nt" and shutil.which("pwsh"), "requires Windows PowerShell")
 class WindowsPowerShellIntegrationTests(unittest.TestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory(prefix="palworld-windows-")
+        self.temporary = tempfile.TemporaryDirectory(prefix="palworld windows space-")
         self.base = Path(self.temporary.name)
         self.repository = Path(__file__).parents[1]
         self.install = self.base / "install"
@@ -259,6 +275,64 @@ class WindowsPowerShellIntegrationTests(unittest.TestCase):
         lifecycle = self.run_ps("palworld-service.ps1", "-Action", "restart", "-ServiceName", "ignored", "-WhatIf")
         self.assertEqual(lifecycle.returncode, 0, lifecycle.stderr)
         self.assertIn("WHATIF restart ignored", lifecycle.stdout)
+
+    def test_launcher_passes_quoted_paths_to_start_process(self):
+        for name in ("start-caretaker.bat", "啟動伺服器與管理面板.bat"):
+            launcher = (self.repository / name).read_text()
+            line = next(line for line in launcher.splitlines() if "$p=Start-Process" in line)
+            command = line.split('-Command "', 1)[1][:-1]
+            script_path = str(self.base / "server tools's" / "palworld-service.ps1")
+            config_path = str(self.base / "config with spaces")
+            mock = """function Start-Process {
+                param($FilePath, $ArgumentList, $Verb, [switch]$Wait, [switch]$PassThru)
+                [Console]::WriteLine((ConvertTo-Json -InputObject @($ArgumentList) -Compress))
+                return @{ExitCode=0}
+            }
+            """
+            result = self.run_ps_command(mock + command, environment={
+                "CARETAKER_SERVICE_SCRIPT": script_path,
+                "CARETAKER_SERVICE_CONFIG_DIR": config_path,
+            })
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout), [
+                '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', f'"{script_path}"',
+                '-Action', 'start', '-ConfigDir', f'"{config_path}"',
+            ])
+
+    def test_render_merges_world_settings_and_preserves_other_sections(self):
+        ini = self.settings_dir / "PalWorldSettings.ini"
+        unmanaged = 'Unknown="commas, parentheses () and \\"quotes\\"",Nested=(A=1,B=(C=2))'
+        before = '[Other]\r\nOptionSettings=(Keep=1)\r\n'
+        after = '[After]\r\nOptionSettings=(Keep=2)\r\n'
+        ini.write_bytes((before + '[/Script/Pal.PalWorldSettings]\r\n'
+                         + 'OptionSettings=(ExpRate=1,' + unmanaged + ')\r\n' + after).encode())
+        editable = self.config / "editable"
+        editable.mkdir()
+        (editable / "server.env").write_text(
+            "EXP_RATE=2.5\nBASE_CAMP_WORKER_MAX_NUM=30\n"
+            "AUTO_RESET_WORKER_PAL_WHEN_SERVER_RESTART=true\n", encoding="utf-8")
+        result = self.run_ps("render-settings.ps1", "-ConfigDir", str(self.config))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        text = ini.read_bytes().decode()
+        self.assertTrue(text.startswith(before))
+        self.assertTrue(text.endswith(after))
+        for value in (unmanaged, 'ExpRate=2.5', 'BaseCampWorkerMaxNum=30',
+                      'AutoResetWorkerPalWhenServerRestart=True', 'PalAutoHPRegeneRate=1.0'):
+            self.assertIn(value, text)
+
+    def test_render_rejects_ambiguous_or_malformed_input_without_writing(self):
+        ini = self.settings_dir / "PalWorldSettings.ini"
+        for body in ('OptionSettings=(ExpRate=1,ExpRate=2)',
+                     'OptionSettings=(Unknown="unfinished)',
+                     'OptionSettings=(Unknown=(A=1)',
+                     'OptionSettings=(ExpRate=1)\nOptionSettings=(ExpRate=2)',
+                     '[Other]\nOptionSettings=(ExpRate=1)'):
+            with self.subTest(body=body):
+                original = ('[/Script/Pal.PalWorldSettings]\n' + body + '\n').encode()
+                ini.write_bytes(original)
+                result = self.run_ps("render-settings.ps1", "-ConfigDir", str(self.config))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(ini.read_bytes(), original)
 
     def test_restore_rejects_tampered_manifest_before_touching_live_data(self):
         backup = self.run_ps("backup-palworld.ps1", "-ConfigDir", str(self.config), "-NoServiceControl")

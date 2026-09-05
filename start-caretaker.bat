@@ -1,5 +1,5 @@
 @echo off
-setlocal EnableExtensions
+setlocal EnableExtensions DisableDelayedExpansion
 title Palworld Caretaker
 set "ROOT=%~dp0"
 set "CONFIG_DIR=%ROOT%config"
@@ -65,11 +65,13 @@ start "" "http://127.0.0.1:%PORT%/"
 
 :: The browser-facing panel remains the invoking account. Elevate only the
 :: fixed service-control script, after the setup UI is already available.
+:: Start-Process joins ArgumentList into one command line, so both path
+:: arguments must contain literal quotes. Read paths from the environment.
 if exist "%ROOT%scripts\windows\palworld-service.ps1" (
   set "CARETAKER_SERVICE_SCRIPT=%ROOT%scripts\windows\palworld-service.ps1"
   set "CARETAKER_SERVICE_CONFIG_DIR=%CONFIG_DIR%"
   echo Requesting administrator permission to start Palworld...
-  powershell -NoProfile -ExecutionPolicy Bypass -Command "$p=Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',$env:CARETAKER_SERVICE_SCRIPT,'-Action','start','-ConfigDir',$env:CARETAKER_SERVICE_CONFIG_DIR) -Verb RunAs -Wait -PassThru; exit $p.ExitCode"
+  powershell -NoProfile -ExecutionPolicy Bypass -Command "$p=Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',([string][char]34+$env:CARETAKER_SERVICE_SCRIPT+[char]34),'-Action','start','-ConfigDir',([string][char]34+$env:CARETAKER_SERVICE_CONFIG_DIR+[char]34)) -Verb RunAs -Wait -PassThru; exit $p.ExitCode"
   if errorlevel 1 (
     echo [WARNING] The management panel is running, but PalServer did not start.
     echo Complete the first-run wizard, then check the Windows service name and service log.
