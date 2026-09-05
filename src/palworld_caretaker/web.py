@@ -36,7 +36,7 @@ from .operations import OperationLock, OperationLockBusy
 from .rest import RESTClient
 from .service import (ContainerCommandChannel, ContainerServiceController, RestCommandChannel,
                       ServerDiagnostics, ServerLifecycle, ServiceState, SystemdServiceController,
-                      UnsupportedServiceController)
+                      WindowsServiceController)
 from .container import SupervisorControlClient, container_mode
 from .settings import (
     canonical_web_host, canonical_web_origin, categories, normalize_web_authorities,
@@ -238,7 +238,12 @@ class WebDependencies:
         supervisor = SupervisorControlClient() if container_mode() else None
         service = (
             ContainerServiceController(supervisor) if supervisor else
-            UnsupportedServiceController() if os.name == "nt" else
+            WindowsServiceController(
+                script_path=config.scripts_root / "windows" / "palworld-service.ps1",
+                config_dir=config.directory or config.config_root,
+                server_executable=config.server_root / "PalServer.exe",
+                api=api,
+            ) if os.name == "nt" else
             SystemdServiceController()
         )
         lifecycle = ServerLifecycle(
@@ -330,6 +335,9 @@ class WebDependencies:
         if self.supervisor is not None:
             self.supervisor.request("start")
             return
+        if os.name == "nt":
+            self.lifecycle.start()
+            return
         self._require_systemd_support()
         result = self.runner(
             ["sudo", "-n", self.control_path, "start"],
@@ -377,7 +385,7 @@ class WebDependencies:
         """
         if action not in {"backup", "start", "stop", "restart"}:
             raise WebUIError("unsupported operation")
-        if self.supervisor is None:
+        if self.supervisor is None and os.name != "nt":
             self._require_systemd_support()
         if action == "backup":
             return self._backup()
@@ -400,9 +408,23 @@ class WebDependencies:
             with self.operation_lock():
                 self._require_idle_maintenance()
                 if action == "stop":
-                    self._graceful_stop()
+                    try:
+                        self._graceful_stop()
+                    except ApiError:
+                        # A Windows service can still make its own orderly
+                        # stop request when REST has already disappeared.
+                        # Linux deliberately does not take this fallback: its
+                        # privileged control workflow owns that contract.
+                        if os.name != "nt":
+                            raise
+                        self.lifecycle.stop()
                     return {"message": "Save confirmed; shutdown has been requested."}
-                self._graceful_stop()
+                try:
+                    self._graceful_stop()
+                except ApiError:
+                    if os.name != "nt":
+                        raise
+                    self.lifecycle.stop()
                 self._wait_for_inactive()
             # The stop phase above is complete and has released Python's lock.
             # The control adapter now owns the start phase and takes the same

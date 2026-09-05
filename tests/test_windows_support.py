@@ -23,7 +23,7 @@ from palworld_caretaker.operations import OperationLock, OperationLockBusy
 from palworld_caretaker.audit import AuditLog
 from palworld_caretaker.settings_store import SettingsPersistenceError, _safe_directory
 from palworld_caretaker.paths import has_parent_reference, is_filesystem_root, native_path
-from palworld_caretaker.service import UnsupportedServiceController
+from palworld_caretaker.service import ServiceState, WindowsServiceController
 from palworld_caretaker.web import WebDependencies, WebUIError
 
 
@@ -111,7 +111,47 @@ class PortablePathTests(unittest.TestCase):
             self.assertFalse(lock._locked)
             self.assertIsNone(lock._fd)
 
-    def test_web_ui_windows_mode_never_constructs_or_runs_systemd_commands(self):
+    def test_windows_controller_probes_and_controls_the_service_without_shell_interpolation(self):
+        script = Path(tempfile.mkdtemp(prefix="palworld-windows-service-")) / "palworld-service.ps1"
+        try:
+            script.touch()
+            calls: list[list[str]] = []
+
+            def runner(argv, **_kwargs):
+                calls.append(argv)
+                if argv[0] == "tasklist":
+                    return subprocess.CompletedProcess(argv, 0, '"PalServer.exe","123","Console","1","10 K"\n', "")
+                action = argv[argv.index("-Action") + 1]
+                return subprocess.CompletedProcess(argv, 0, "RUNNING\n" if action == "status" else "", "")
+
+            controller = WindowsServiceController(script_path=script, config_dir=script.parent, runner=runner)
+            self.assertEqual(controller.state(), ServiceState.ACTIVE)
+            controller.start()
+            controller.stop()
+            powershell_actions = [call[call.index("-Action") + 1] for call in calls if call[0] == "powershell.exe"]
+            self.assertEqual(powershell_actions, ["status", "start", "stop"])
+            self.assertTrue(all(call[0] != "cmd.exe" for call in calls))
+        finally:
+            shutil.rmtree(script.parent)
+
+    def test_windows_controller_starts_installed_executable_when_no_service_script_exists(self):
+        root = Path(tempfile.mkdtemp(prefix="palworld-windows-process-"))
+        executable = root / "PalServer.exe"
+        try:
+            executable.touch()
+            launches: list[tuple[list[str], dict[str, object]]] = []
+
+            def launcher(argv, **kwargs):
+                launches.append((argv, kwargs))
+
+            controller = WindowsServiceController(server_executable=executable, launcher=launcher)
+            controller.start()
+            self.assertEqual(launches[0][0], [str(executable)])
+            self.assertEqual(launches[0][1]["cwd"], str(root))
+        finally:
+            shutil.rmtree(root)
+
+    def test_web_ui_windows_mode_uses_windows_controller_and_never_constructs_systemd_commands(self):
         """Exercise the Windows branch on every CI platform without subprocesses."""
         with tempfile.TemporaryDirectory(prefix="palworld-web-windows-") as temporary:
             root = Path(temporary)
@@ -139,13 +179,11 @@ class PortablePathTests(unittest.TestCase):
             with patch("palworld_caretaker.web.os", SimpleNamespace(name="nt")), \
                  patch("palworld_caretaker.web.container_mode", return_value=False):
                 created = WebDependencies.create(config)
-                self.assertIsInstance(created.lifecycle.service, UnsupportedServiceController)
+                self.assertIsInstance(created.lifecycle.service, WindowsServiceController)
                 self.assertFalse(dependencies.maintenance_running())
                 self.assertEqual(dependencies.maintenance_payload()["service"], "unsupported")
                 for operation in (
-                    lambda: dependencies.perform("start"),
                     lambda: dependencies._sudo_start("palworld-maintenance.service", wait=False),
-                    dependencies._start_server,
                     dependencies._backup,
                     lambda: dependencies.restore({"snapshot": "palworld-20260830-120000"}),
                 ):

@@ -60,13 +60,12 @@ python -m palworld_caretaker.web --config-dir $ConfigDir
 
 ### Windows Web UI 支援範圍
 
-Windows Web UI 可安全提供 REST 狀態、玩家公告／管理與設定編輯。
-但原生 Windows 部署目前沒有等效的 systemd privileged workflow，因此「啟動／停止／
-重啟」、「建立 backup」、「還原 snapshot」與「maintenance update」按鈕會明確回報不
-支援；程式不會嘗試執行 `sudo`、`/usr/bin/systemctl` 或
-`/usr/local/sbin/palworld-control`。請改用本文件的 PowerShell
-`palworld-service.ps1`、`backup-palworld.ps1` 與 `restore-palworld.ps1` 完成這些
-操作。
+Windows Web UI 可安全提供 REST 狀態、玩家公告／管理、設定編輯，以及透過
+`palworld-service.ps1` 控制已註冊的 `PalServer` service（服務腳本遺失時，僅會啟動
+已安裝的 `PalServer.exe`）。它不會嘗試執行 `sudo`、`/usr/bin/systemctl` 或
+`/usr/local/sbin/palworld-control`。原生 Windows 部署仍沒有等效的 systemd privileged
+workflow，因此「建立 backup」、「還原 snapshot」與「maintenance update」按鈕維持不支援；
+請改用本文件的 `backup-palworld.ps1` 與 `restore-palworld.ps1`。
 
 Palworld 的 live tree 預期位於：
 
