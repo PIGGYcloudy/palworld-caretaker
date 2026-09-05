@@ -280,6 +280,24 @@ class WebUITests(unittest.TestCase):
         self.assertIn("settingsForm.addEventListener('submit'", script)
         self.assertIn("JSON.stringify({values:settingsValues()})", script)
 
+    def test_refresh_keeps_local_dashboard_sections_available_when_game_is_offline(self):
+        _status, page, _headers = self.request("/")
+        script = page.decode("utf-8")
+        refresh = script[script.index("async function refresh()"):script.index("document.querySelectorAll('button[data-action]')")]
+        self.assertIn("Promise.allSettled", refresh)
+        self.assertNotIn("Promise.all([", refresh)
+        self.assertIn("服務離線 / 尚未啟動", refresh)
+        self.assertIn("伺服器未連線（離線）", refresh)
+        # These independent local APIs must still render even when the game
+        # status and player API requests reject.
+        for endpoint in ("/api/backups", "/api/maintenance/status", "/api/audit/logs?limit=10"):
+            self.assertIn(endpoint, refresh)
+        for selector in ("#backup-summary", "#maintenance", "#audit"):
+            self.assertIn(selector, refresh)
+        # Settings has its own startup request chain rather than depending on
+        # the game-server status request in ``refresh``.
+        self.assertIn("loadSettings().then(loadCommon)", script)
+
     def test_player_controls_announce_and_savegames_export(self):
         status, raw, _headers = self.request("/api/players")
         self.assertEqual(status, 200)

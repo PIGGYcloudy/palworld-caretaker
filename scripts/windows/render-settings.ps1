@@ -45,7 +45,7 @@ function Split-IniFields([string]$Body) {
 }
 
 $config = Get-CaretakerConfig $ConfigDir; $paths = Get-PalworldPaths $config
-$settings = Join-Path $paths.Config 'LinuxServer\PalWorldSettings.ini'
+$settings = Join-Path $paths.Config 'WindowsServer\PalWorldSettings.ini'
 if (-not (Test-Path -LiteralPath $settings -PathType Leaf)) { throw 'PalWorldSettings.ini is missing; start the server once first.' }
 $fields = [ordered]@{
     ServerPlayerMaxNum = ConvertTo-IniValue 'MAX_PLAYERS' (Get-ConfigValue $config 'MAX_PLAYERS' '10')

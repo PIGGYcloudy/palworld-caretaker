@@ -48,6 +48,18 @@ class PortablePathTests(unittest.TestCase):
         world = {key for key, spec in SETTING_SPECS.items() if spec.category != "Caretaker"}
         self.assertFalse(world - configured, world - configured)
 
+    def test_windows_scripts_use_windows_server_settings_and_ps51_safe_manifest_encoding(self):
+        scripts = Path(__file__).parents[1] / "scripts" / "windows"
+        for name in ("render-settings.ps1", "backup-palworld.ps1", "restore-palworld.ps1"):
+            script = (scripts / name).read_text(encoding="utf-8")
+            self.assertIn("WindowsServer\\PalWorldSettings.ini", script)
+            self.assertNotIn("LinuxServer\\PalWorldSettings.ini", script)
+
+        backup = (scripts / "backup-palworld.ps1").read_text(encoding="utf-8")
+        self.assertIn("[System.IO.File]::WriteAllText", backup)
+        self.assertIn("[System.Text.UTF8Encoding]::new($false)", backup)
+        self.assertNotIn("utf8NoBOM", backup)
+
     def test_launchers_quote_elevated_script_and_config_paths(self):
         for name in ("start-caretaker.bat", "啟動伺服器與管理面板.bat"):
             script = (Path(__file__).parents[1] / name).read_text()
@@ -218,7 +230,7 @@ class WindowsPowerShellIntegrationTests(unittest.TestCase):
         self.install = self.base / "install"
         self.server = self.install / "server"
         self.save = self.server / "Pal" / "Saved" / "SaveGames" / "world"
-        self.settings_dir = self.server / "Pal" / "Saved" / "Config" / "LinuxServer"
+        self.settings_dir = self.server / "Pal" / "Saved" / "Config" / "WindowsServer"
         (self.save / "backup").mkdir(parents=True)
         self.settings_dir.mkdir(parents=True)
         (self.save / "world.sav").write_text("live", encoding="utf-8")

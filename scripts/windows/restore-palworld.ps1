@@ -23,7 +23,7 @@ try {
     Assert-SafeTree $snapshot 'Backup snapshot'
     Assert-SafeTree (Join-Path $snapshot 'savegames') 'Backup savegames directory'
     Assert-SafeTree (Join-Path $snapshot 'config') 'Backup config directory'
-    Assert-RealFile (Join-Path $snapshot 'config\LinuxServer\PalWorldSettings.ini') 'Backup settings file'
+    Assert-RealFile (Join-Path $snapshot 'config\WindowsServer\PalWorldSettings.ini') 'Backup settings file'
     # Capture the validated inventory now.  The later staging verification
     # intentionally does not reread this manifest, closing the check/copy
     # window if the snapshot pathname is replaced while copying.

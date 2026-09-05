@@ -35,7 +35,7 @@ try {
     $paths = Get-PalworldPaths $config
     Assert-SafeTree $paths.Save 'Palworld save directory'
     Assert-SafeTree $paths.Config 'Palworld config directory'
-    Assert-RealFile (Join-Path $paths.Config 'LinuxServer\PalWorldSettings.ini') 'PalWorldSettings.ini'
+    Assert-RealFile (Join-Path $paths.Config 'WindowsServer\PalWorldSettings.ini') 'PalWorldSettings.ini'
     if (-not (Get-ChildItem -LiteralPath $paths.Save -Directory -Recurse -Filter backup | Select-Object -First 1)) { throw 'Palworld built-in backup directory was not found.' }
     if (!$NoServiceControl) {
         $service = Get-Service -Name $ServiceName -ErrorAction Stop
@@ -54,7 +54,9 @@ try {
     Get-ChildItem -LiteralPath $paths.Config -Force | ForEach-Object {
         Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $staging 'config') -Recurse -Force
     }
-    (Get-SnapshotManifest $staging | ConvertTo-Json -Depth 20) | Set-Content -LiteralPath (Join-Path $staging 'metadata\manifest.json') -Encoding utf8NoBOM
+    $manifestPath = Join-Path $staging 'metadata\manifest.json'
+    $manifestJson = Get-SnapshotManifest $staging | ConvertTo-Json -Depth 20
+    [System.IO.File]::WriteAllText($manifestPath, $manifestJson, [System.Text.UTF8Encoding]::new($false))
     Move-Item -LiteralPath $staging -Destination $snapshot
     $retention = [int](Get-ConfigValue $config 'BACKUP_RETENTION_COUNT' '14')
     if ($retention -lt 1) { throw 'BACKUP_RETENTION_COUNT must be at least 1.' }
