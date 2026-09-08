@@ -211,6 +211,8 @@ symlink、junction 或其他 reparse point；還原會先建立毫秒時間戳�
 Copy，並在 live publish 失敗時自動 rollback。完整設定與安全注意事項見
 [`docs/WINDOWS.md`](docs/WINDOWS.md)。
 
+管理面板的「儲存位置」僅顯示及複製伺服器、SaveGames 與世界快照路徑，不提供資料夾選擇或位置切換。既有部署設定與資料會保留。
+
 ## 無人自動關服
 
 watcher 對每個 systemd `InvocationID` 視為一次新 lifecycle。新 lifecycle 先等待 startup grace，之後按間隔查詢 `GET /v1/api/players`。有玩家立即清除 timer；連續無人達 timeout 時再次查詢，接著執行：

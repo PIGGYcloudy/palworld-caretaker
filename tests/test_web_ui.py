@@ -206,6 +206,18 @@ class WebUITests(unittest.TestCase):
             "Origin": self.base,
         }, body=json.dumps(payload).encode())
 
+    def test_storage_is_read_only_and_old_operations_are_removed(self):
+        status, page, _ = self.request("/")
+        self.assertEqual(status, 200)
+        self.assertNotIn(b"storage-form", page)
+        self.assertNotIn(b"storage-server-root", page)
+        self.assertNotIn(b"/api/locations/open", page)
+        for path in ("/api/locations", "/api/locations/open"):
+            status, _, _ = self.post_json(path, {})
+            self.assertEqual(status, 404)
+        status, _, _ = self.request("/api/locations/browse?location=server")
+        self.assertEqual(status, 404)
+
     def test_dashboard_and_backup_api_render_only_safe_data(self):
         status, page, headers = self.request("/")
         self.assertEqual(status, 200)
@@ -224,6 +236,8 @@ class WebUITests(unittest.TestCase):
         self.assertIn("常用參數".encode(), page)
         self.assertIn("全部參數".encode(), page)
         self.assertIn("Discord 4 步嚮導".encode(), page)
+        self.assertIn("儲存位置".encode(), page)
+        self.assertIn(b"/api/locations", page)
         self.assertNotIn("好友連線".encode(), page)
 
         status, raw, _headers = self.request("/api/settings")
@@ -248,6 +262,14 @@ class WebUITests(unittest.TestCase):
         self.assertEqual(backups["snapshots"][0]["size"], "4.0 KiB")
         self.assertEqual((backups["total_count"], backups["total_size"]), (1, "4.0 KiB"))
         self.assertTrue(backups["snapshots"][0]["display_time"])
+
+        status, raw, _headers = self.request("/api/locations")
+        self.assertEqual(status, 200)
+        locations = json.loads(raw)
+        self.assertEqual([item["id"] for item in locations["locations"]], [
+            "server", "savegames", "backups",
+        ])
+        self.assertNotIn("capabilities", locations)
 
     def test_settings_frontend_builds_accessible_controls_and_binds_actions(self):
         """Keep the dynamic DOM contract testable without a browser runtime."""

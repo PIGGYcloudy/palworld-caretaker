@@ -100,6 +100,8 @@ PALWORLD_BACKUP_REQUIRE_MOUNT=true
 後者會在 preflight、備份與還原時確認 mount 確實存在；掛載遺失時會停止，
 避免把資料誤寫到本機 mountpoint。
 
+管理面板的「儲存位置」僅顯示及複製伺服器、SaveGames 與世界快照路徑，不提供資料夾選擇或位置切換。既有部署設定與資料會保留。
+
 ## 執行全新安裝
 
 先做不寫入系統的值驗證：
