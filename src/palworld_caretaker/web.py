@@ -12,6 +12,7 @@ import base64
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hmac
+import hashlib
 import ipaddress
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -56,6 +57,10 @@ _EXPORT_CHUNK = 64 * 1024
 
 def _web_auth_password(config: CaretakerConfig) -> str:
     """Return a real panel credential, never a copied template placeholder."""
+    if (config.values.get("PALWORLD_WEB_LOCAL_PASSWORDLESS") == "true"
+            and config.values.get("PALWORLD_WEB_BIND_IP") == "127.0.0.1"
+            and not config.values.get("PALWORLD_WEB_UI_PASSWORD")):
+        return ""
     for key in ("PALWORLD_WEB_UI_PASSWORD", "ADMIN_PASSWORD"):
         value = config.values.get(key, "")
         if value and not value.startswith("CHANGE_ME"):
@@ -1050,7 +1055,9 @@ class _Handler(BaseHTTPRequestHandler):
         # credentials so an orchestrator can distinguish a live UI process
         # from a failed one without placing a secret in its health command.
         if self.path == "/healthz":
-            self._send(HTTPStatus.OK, b'{"status":"ok"}', "application/json; charset=utf-8")
+            directory = self.server.dependencies.config.directory or self.server.dependencies.config.config_root
+            deployment = hashlib.sha256(str(directory.resolve()).casefold().encode("utf-8")).hexdigest()
+            self._json(HTTPStatus.OK, {"status": "ok", "deployment": deployment})
             return
         if not self._host_allowed():
             self._error(HTTPStatus.BAD_REQUEST, "Request host is not allowed.")

@@ -331,6 +331,8 @@ class SettingsStore:
         values = dict(current.values)
         panel_password = values.get("PALWORLD_WEB_UI_PASSWORD") or values.get("ADMIN_PASSWORD", "")
         replace_placeholder_panel_password = not panel_password or panel_password.startswith("CHANGE_ME")
+        if values.get("PALWORLD_WEB_LOCAL_PASSWORDLESS") == "true" and not values.get("PALWORLD_WEB_UI_PASSWORD"):
+            replace_placeholder_panel_password = True
         effective_panel_password = server_password if replace_placeholder_panel_password else panel_password
         if bind_mode == "lan" and not effective_panel_password:
             raise ConfigError("a non-empty panel password is required for LAN mode")

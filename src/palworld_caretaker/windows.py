@@ -50,7 +50,8 @@ def open_no_reparse(path: str | Path, flags: int, mode: int = 0o666) -> int:
         disposition = open_existing
     share_read, share_write = 0x00000001, 0x00000002
     file_attribute_normal, file_flag_open_reparse_point = 0x80, 0x00200000
-    create_file = ctypes.windll.kernel32.CreateFileW
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
     create_file.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32,
                             ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32,
                             ctypes.c_void_p]
@@ -65,7 +66,10 @@ def open_no_reparse(path: str | Path, flags: int, mode: int = 0o666) -> int:
     try:
         return msvcrt.open_osfhandle(handle, flags)
     except BaseException:
-        ctypes.windll.kernel32.CloseHandle(handle)
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = [ctypes.c_void_p]
+        close_handle.restype = ctypes.c_int
+        close_handle(handle)
         raise
 
 

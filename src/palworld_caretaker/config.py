@@ -69,6 +69,7 @@ DEFAULTS: dict[str, str] = {
     "PALWORLD_ONBOARDING_COMPLETED": "false",
     "SERVER_PASSWORD": "", "ADMIN_PASSWORD": "", "DISCORD_BOT_TOKEN": "",
     "PALWORLD_WEB_UI_USERNAME": "palworld-manager", "PALWORLD_WEB_UI_PASSWORD": "",
+    "PALWORLD_WEB_LOCAL_PASSWORDLESS": "false",
     "PALWORLD_WEB_BIND_IP": DEFAULT_WEB_BIND_IP,
     # Web request authorities are intentionally part of the protected
     # deployment configuration, never editable through the browser.
@@ -319,6 +320,7 @@ def _validate_core(values: Mapping[str, str]) -> None:
     normalize_backup_schedule(values.get("BACKUP_TIME", ""))
     _bool(values, "PALWORLD_BACKUP_SCHEDULE_ENABLED")
     _bool(values, "PALWORLD_ONBOARDING_COMPLETED")
+    _bool(values, "PALWORLD_WEB_LOCAL_PASSWORDLESS")
     for key in ("PALWORLD_SERVICE_USER", "PALWORLD_MANAGER_USER"):
         if not _ACCOUNT_RE.fullmatch(values.get(key, "")):
             raise ConfigError(f"{key} is not a valid system account name")

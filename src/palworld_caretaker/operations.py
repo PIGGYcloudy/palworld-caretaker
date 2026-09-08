@@ -127,8 +127,11 @@ class OperationLock(AbstractContextManager["OperationLock"]):
                 self.close()
                 raise
             except OSError as exc:
+                opened = self._fd is not None
                 self.close()
-                raise OperationLockBusy("another Palworld operation is active") from exc
+                if getattr(exc, "winerror", None) in {32, 33} or (opened and exc.errno in {errno.EACCES, errno.EAGAIN}):
+                    raise OperationLockBusy("another Palworld operation is active") from exc
+                raise OperationLockUnsafe("operation lock is unavailable or not writable") from exc
             return self
         if fcntl is None:
             raise RuntimeError("operation locking is unavailable on this platform")

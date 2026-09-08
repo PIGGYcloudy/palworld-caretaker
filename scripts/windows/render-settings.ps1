@@ -46,7 +46,12 @@ function Split-IniFields([string]$Body) {
 
 $config = Get-CaretakerConfig $ConfigDir; $paths = Get-PalworldPaths $config
 $settings = Join-Path $paths.Config 'WindowsServer\PalWorldSettings.ini'
-if (-not (Test-Path -LiteralPath $settings -PathType Leaf)) { throw 'PalWorldSettings.ini is missing; start the server once first.' }
+if (-not (Test-Path -LiteralPath $settings -PathType Leaf)) {
+    $template = Join-Path $paths.Server 'DefaultPalWorldSettings.ini'
+    if (-not (Test-Path -LiteralPath $template -PathType Leaf)) { throw 'DefaultPalWorldSettings.ini is missing; install the server first.' }
+    [System.IO.Directory]::CreateDirectory((Split-Path $settings -Parent)) | Out-Null
+    Copy-Item -LiteralPath $template -Destination $settings
+}
 $fields = [ordered]@{
     ServerPlayerMaxNum = ConvertTo-IniValue 'MAX_PLAYERS' (Get-ConfigValue $config 'MAX_PLAYERS' '10')
     ServerPassword = ConvertTo-IniValue 'SERVER_PASSWORD' (Get-ConfigValue $config 'SERVER_PASSWORD') $true
@@ -95,7 +100,7 @@ $text = [System.IO.File]::ReadAllText($settings)
 # Restrict edits to exactly one target section and tuple. Ambiguous or broken
 # input must fail before any write, rather than discard world configuration.
 $sections = [regex]::Matches($text, '(?m)^[ \t]*\[([^]\r\n]+)\][ \t]*\r?$')
-$targets = @($sections | Where-Object { $_.Groups[1].Value -ceq '/Script/Pal.PalWorldSettings' })
+$targets = @($sections | Where-Object { $_.Groups[1].Value -cin @('/Script/Pal.PalWorldSettings', '/Script/Pal.PalGameWorldSettings') })
 if ($targets.Count -ne 1) { throw 'Expected exactly one PalWorldSettings section.' }
 $start = $targets[0].Index + $targets[0].Length
 $end = $text.Length

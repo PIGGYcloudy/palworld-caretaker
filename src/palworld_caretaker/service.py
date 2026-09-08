@@ -129,7 +129,7 @@ class WindowsServiceController:
         if self.script_path is None:
             raise RuntimeError("Palworld Windows service script is not configured")
         command = [
-            "powershell.exe", "-NoProfile", "-NonInteractive", "-File", str(self.script_path),
+            "powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(self.script_path),
             "-Action", action, "-ServiceName", self.service_name,
         ]
         if self.config_dir is not None:
@@ -140,6 +140,7 @@ class WindowsServiceController:
         try:
             return self.runner(
                 self._script_command(action), text=True, capture_output=True, timeout=timeout, check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         except (OSError, subprocess.SubprocessError) as exc:
             raise RuntimeError(f"Windows service {action} failed") from exc
@@ -174,6 +175,9 @@ class WindowsServiceController:
             if result is not None and result.returncode == 0:
                 status = (result.stdout or "").strip().upper()
                 service_state = self._SERVICE_STATES.get(status, ServiceState.UNKNOWN)
+
+        if service_state != ServiceState.UNKNOWN:
+            return service_state
 
         # A registered service can be stale or an administrator may choose the
         # documented executable fallback, so always prefer an observed process.
