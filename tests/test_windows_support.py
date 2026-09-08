@@ -171,10 +171,9 @@ class PortablePathTests(unittest.TestCase):
                 created = WebDependencies.create(config)
                 self.assertIsInstance(created.lifecycle.service, WindowsServiceController)
                 self.assertFalse(dependencies.maintenance_running())
-                self.assertEqual(dependencies.maintenance_payload()["service"], "unsupported")
+                self.assertEqual(dependencies.maintenance_payload()["service"], "inactive")
                 for operation in (
                     lambda: dependencies._sudo_start("palworld-maintenance.service", wait=False),
-                    dependencies._backup,
                     lambda: dependencies.restore({"snapshot": "palworld-20260830-120000"}),
                 ):
                     with self.assertRaisesRegex(WebUIError, "Linux systemd deployment"):

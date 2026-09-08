@@ -111,11 +111,11 @@ class SettingsSchemaTests(unittest.TestCase):
     def test_backup_schedule_accepts_daily_intervals_off_and_legacy_daily_time(self):
         self.assertEqual(normalize_backup_schedule("daily-23:59"), "daily-23:59")
         self.assertEqual(normalize_backup_schedule("04:30"), "daily-04:30")
-        for value in ("every-2h", "every-4h", "every-6h", "every-12h", "off"):
+        for value in ("every-2h", "every-4h", "every-6h", "every-12h", "every-3h", "every-48h", "every-3d", "every-365d", "off"):
             with self.subTest(value=value):
                 self.assertEqual(normalize_backup_schedule(value), value)
         with self.assertRaisesRegex(ConfigError, "BACKUP_TIME"):
-            normalize_backup_schedule("every-3h")
+            normalize_backup_schedule("every-0h")
 
     def test_all_boolean_settings_have_boolean_schema_kinds(self):
         boolean_keys = {key for key, spec in SETTING_SPECS.items() if spec.kind == "boolean"}
@@ -125,7 +125,7 @@ class SettingsSchemaTests(unittest.TestCase):
         })
 
     def test_every_editable_setting_has_a_description(self):
-        self.assertEqual(len(SETTING_SPECS), 40)
+        self.assertEqual(len(SETTING_SPECS), 41)
         self.assertTrue(all(spec.description for spec in SETTING_SPECS.values()))
 
     def test_web_bind_ip_requires_ipv4(self):
@@ -398,8 +398,8 @@ class SettingsWebTests(unittest.TestCase):
             {category["name"] for category in settings["categories"]}))
         listed_fields = [field for category in settings["categories"] for field in category["fields"]]
         fields = {field["key"]: field for field in listed_fields}
-        self.assertEqual(len(listed_fields), 40)
-        self.assertEqual(len(fields), 40)
+        self.assertEqual(len(listed_fields), 41)
+        self.assertEqual(len(fields), 41)
         self.assertEqual(set(fields), {key for key, spec in SETTING_SPECS.items() if not spec.secret})
         self.assertTrue(all(field["description"] for field in listed_fields))
         self.assertTrue(all(field["default"] != "" for field in listed_fields))
@@ -425,6 +425,24 @@ class SettingsWebTests(unittest.TestCase):
         caretaker = (self.config_dir / "caretaker.env").read_text(encoding="utf-8")
         self.assertIn("BACKUP_TIME=every-12h", caretaker)
         self.assertIn("BACKUP_RETENTION_COUNT=1000", caretaker)
+
+    def test_password_is_only_returned_by_authenticated_connection_endpoint(self):
+        with (self.config_dir / "secrets.env").open("a", encoding="utf-8") as output:
+            output.write("SERVER_PASSWORD=game-only-password\n")
+        self.assertEqual(self.request("/api/connection/password", auth=False)[0], 401)
+        status, body = self.request("/api/connection/password")
+        self.assertEqual((status, body), (200, {"password": "game-only-password"}))
+        self.assertNotIn("game-only-password", json.dumps(self.request("/api/status")))
+        self.assertNotIn("game-only-password", json.dumps(self.request("/api/settings")))
+
+    def test_update_schedule_and_custom_backup_persist_independently(self):
+        for values in ({"BACKUP_TIME": "every-3d"}, {"UPDATE_TIME": "daily-06:15"}):
+            self.assertEqual(self.request("/api/settings", method="POST", payload={"values": values})[0], 200)
+        current = load_config(self.config_dir)
+        self.assertEqual(current.values["BACKUP_TIME"], "every-3d")
+        self.assertEqual(current.values["UPDATE_TIME"], "daily-06:15")
+        self.assertEqual(self.request("/api/settings", method="POST", payload={"values": {"UPDATE_TIME": "off"}})[0], 200)
+        self.assertEqual(load_config(self.config_dir).values["BACKUP_TIME"], "every-3d")
 
     def test_onboarding_api_allows_blank_password_and_writes_editable_layer(self):
         (self.config_dir / "editable").mkdir()

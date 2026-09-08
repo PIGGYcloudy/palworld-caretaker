@@ -26,6 +26,7 @@ import stat
 import subprocess
 import tempfile
 import time
+import threading
 from typing import Any, Callable, Mapping
 from urllib.parse import parse_qs, urlsplit
 
@@ -236,6 +237,7 @@ class WebDependencies:
     settings_store: SettingsStore | None = None
     audit: AuditLog | None = None
     supervisor: SupervisorControlClient | None = None
+    native_maintenance: bool = False
 
     @classmethod
     def create(cls, config: CaretakerConfig) -> "WebDependencies":
@@ -275,9 +277,7 @@ class WebDependencies:
     def maintenance_running(self) -> bool:
         """Fail closed when systemd cannot prove maintenance is inactive.
 
-        Windows has no systemd maintenance unit.  Its systemd-only mutation
-        endpoints reject requests explicitly, so treating that absent unit as
-        inactive keeps status/settings pages usable without invoking sudo.
+        Windows tracks the native maintenance workflow in this process.
         """
         if self.supervisor is not None:
             try:
@@ -285,7 +285,7 @@ class WebDependencies:
             except RuntimeError:
                 return True
         if os.name == "nt":
-            return False
+            return self.native_maintenance
         try:
             result = self.runner(
                 ["sudo", "-n", "/usr/bin/systemctl", "is-active", _MAINTENANCE_UNIT],
@@ -440,6 +440,8 @@ class WebDependencies:
             raise OperationInProgress(str(exc)) from exc
 
     def _backup(self) -> dict[str, Any]:
+        if os.name == "nt":
+            return self._windows_maintenance(update=False)
         if self.supervisor is None:
             self._require_systemd_support()
         before = {item.name for item in self.backups.list_snapshots()}
@@ -532,6 +534,8 @@ class WebDependencies:
     def trigger_maintenance(self) -> dict[str, Any]:
         """Ask systemd to run the fixed maintenance unit in the background."""
         self._require_idle_maintenance()
+        if os.name == "nt":
+            return self._windows_maintenance(update=True)
         if self.supervisor is not None:
             self.supervisor.request("update")
             return {"message": "Maintenance update completed.", "started": False}
@@ -539,6 +543,44 @@ class WebDependencies:
         if result.returncode:
             raise WebUIError("maintenance service could not be started")
         return {"message": "Maintenance update has been requested.", "started": True}
+
+    def _windows_maintenance(self, *, update: bool) -> dict[str, Any]:
+        was_running = False
+        owns_maintenance = False
+        try:
+            with self.operation_lock():
+                self._require_idle_maintenance()
+                self.native_maintenance = True
+                owns_maintenance = True
+                state = self.lifecycle.status().service
+                if state not in {ServiceState.ACTIVE, ServiceState.INACTIVE, ServiceState.FAILED}:
+                    raise WebUIError("無法確認伺服器狀態")
+                was_running = state == ServiceState.ACTIVE
+                if was_running:
+                    self._graceful_stop()
+                    self._wait_for_inactive()
+                result = self.runner([
+                    "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                    str(self.config.scripts_root / "windows/backup-palworld.ps1"),
+                    "-ConfigDir", str(self.config.directory), "-NoServiceControl", "-LockHeld",
+                ], capture_output=True, text=True, timeout=2100, check=False,
+                   creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                if result.returncode:
+                    raise WebUIError("備份失敗，請查看管理面板紀錄")
+                if update:
+                    from .steamcmd import SteamCMD
+                    SteamCMD(self.config.install_root / "steamcmd/steamcmd.exe", runner=self.runner).update(self.config.server_root)
+        except OperationLockBusy as exc:
+            raise OperationInProgress(str(exc)) from exc
+        finally:
+            # Start's PowerShell adapter takes the operation lock itself.
+            try:
+                if was_running:
+                    self._start_server()
+            finally:
+                if owns_maintenance:
+                    self.native_maintenance = False
+        return {"message": "備份與更新已完成。" if update else "備份已完成。", "started": False}
 
     def maintenance_payload(self) -> dict[str, Any]:
         """Return the current unit state plus the safe, persisted progress summary."""
@@ -552,7 +594,7 @@ class WebDependencies:
                 return {"service": "unknown", "running": True, "phase": None,
                         "latest_log_summary": None, "updated_at": None}
         if os.name == "nt":
-            return {"service": "unsupported", "running": False, "phase": None,
+            return {"service": "active" if self.native_maintenance else "inactive", "running": self.native_maintenance, "phase": "updating" if self.native_maintenance else None,
                     "latest_log_summary": None, "updated_at": None}
         try:
             result = self.runner(
@@ -597,6 +639,7 @@ class WebDependencies:
             except ApiError:
                 pass
         return {
+            "game_port": self.config.values.get("PUBLIC_PORT", "8211"),
             "service": status.service.value,
             "running": status.running,
             "api_reachable": status.api_reachable,
@@ -795,7 +838,6 @@ class WebDependencies:
             "SERVER_NAME", "SERVER_PASSWORD", "MAX_PLAYERS", "EXP_RATE", "PAL_CAPTURE_RATE",
             "COLLECTION_DROP_RATE", "DEATH_PENALTY", "BASE_CAMP_WORKER_MAX_NUM",
             "PALWORLD_IDLE_SHUTDOWN_ENABLED", "PALWORLD_IDLE_TIMEOUT_MINUTES",
-            "BACKUP_TIME", "BACKUP_RETENTION_COUNT",
         )
         # Password is intentionally not returned through the normal editor;
         # the onboarding screen owns its manual first-run entry.
@@ -916,16 +958,16 @@ def _page(token: str) -> bytes:
     return f"""<!doctype html>
 <html lang=\"zh-Hant\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">
 <title>Palworld Caretaker</title><style nonce={token}>
-body{{font:16px system-ui,sans-serif;margin:2rem;max-width:58rem;color:#17212b;background:#f8fafc}}h1{{margin-bottom:.2rem}}section{{background:#fff;border:1px solid #d9e1ea;border-radius:.5rem;padding:1rem;margin:1rem 0}}button{{padding:.55rem .8rem;margin:.2rem}}#message{{min-height:1.5rem}}ul{{padding-left:1.3rem}}fieldset{{border:0;border-top:1px solid #d9e1ea;margin:1rem 0;padding:1rem 0}}legend{{font-weight:650}}.setting-row{{display:grid;grid-template-columns:minmax(12rem,1fr) auto minmax(12rem,2fr) auto;gap:.5rem;align-items:center;margin:.55rem 0}}input,select{{font:inherit;padding:.35rem}}#settings-diff{{white-space:pre-wrap}}.notice{{color:#8a4b00}}.help{{position:relative;border:1px solid #64748b;border-radius:50%;width:1.35rem;height:1.35rem;padding:0;margin:0;background:#fff;color:#334155;font-weight:700;line-height:1;cursor:help}}.help-tooltip{{display:none;position:absolute;z-index:1;left:calc(100% + .45rem);top:-.5rem;width:min(21rem,70vw);padding:.55rem;border-radius:.35rem;background:#17212b;color:#fff;font-weight:400;font-size:.875rem;line-height:1.35;text-align:left;box-shadow:0 .2rem .7rem #0004}}.help:hover .help-tooltip,.help:focus .help-tooltip{{display:block}}.reset-setting{{white-space:nowrap}}@media(max-width:42rem){{.setting-row{{grid-template-columns:1fr auto}}.setting-row input,.setting-row select{{grid-column:1/-1}}.help-tooltip{{left:0;top:calc(100% + .35rem)}}}}
+body{{font:16px system-ui,sans-serif;margin:2rem;max-width:58rem;color:#17212b;background:#f8fafc}}h1{{margin-bottom:.2rem}}.server-heading{{display:flex;align-items:center;gap:1rem;flex-wrap:wrap}}section{{background:#fff;border:1px solid #d9e1ea;border-radius:.5rem;padding:1rem;margin:1rem 0}}button{{padding:.55rem .8rem;margin:.2rem}}#message{{min-height:1.5rem}}ul{{padding-left:1.3rem}}fieldset{{border:0;border-top:1px solid #d9e1ea;margin:1rem 0;padding:1rem 0}}legend{{font-weight:650}}.setting-row{{display:grid;grid-template-columns:minmax(12rem,1fr) auto minmax(12rem,2fr) auto;gap:.5rem;align-items:center;margin:.55rem 0}}input,select{{font:inherit;padding:.35rem}}#settings-diff{{white-space:pre-wrap}}.notice{{color:#8a4b00}}.help{{position:relative;border:1px solid #64748b;border-radius:50%;width:1.35rem;height:1.35rem;padding:0;margin:0;background:#fff;color:#334155;font-weight:700;line-height:1;cursor:help}}.help-tooltip{{display:none;position:absolute;z-index:1;left:calc(100% + .45rem);top:-.5rem;width:min(21rem,70vw);padding:.55rem;border-radius:.35rem;background:#17212b;color:#fff;font-weight:400;font-size:.875rem;line-height:1.35;text-align:left;box-shadow:0 .2rem .7rem #0004}}.help:hover .help-tooltip,.help:focus .help-tooltip{{display:block}}.reset-setting{{white-space:nowrap}}@media(max-width:42rem){{.setting-row{{grid-template-columns:1fr auto}}.setting-row input,.setting-row select{{grid-column:1/-1}}.help-tooltip{{left:0;top:calc(100% + .35rem)}}}}
 </style></head><body><h1>Palworld Caretaker</h1><p>受認證的管理介面；請只透過受信任的本機、LAN 或 VPN 網路使用。</p>
-<section id=\"onboarding\" hidden><h2>首次開服精靈</h2><p>伺服器密碼可留白，供公開社群伺服器使用；系統不會隨機生成或顯示密碼。未設定面板密碼時，本機 loopback 面板可直接使用。</p><form id=\"onboarding-form\"><p><label>伺服器名稱 <input name=\"server_name\" maxlength=\"80\" required></label></p><p><label>伺服器密碼（可留白） <input name=\"server_password\" type=\"password\"></label></p><p><label>自動備份排程 <select name=\"backup_schedule\" id=\"wizard-backup-schedule\"><option value=\"daily\">每天指定時間</option><option value=\"every-2h\">每 2 小時</option><option value=\"every-4h\">每 4 小時</option><option value=\"every-6h\">每 6 小時</option><option value=\"every-12h\">每 12 小時</option><option value=\"off\">關閉自動備份</option></select></label> <label id=\"wizard-daily-time\">每天時間 <input name=\"backup_daily_time\" type=\"time\" value=\"04:30\"></label></p><p><label>備份保留數 <input name=\"backup_retention_count\" type=\"number\" min=\"1\" max=\"1000\" value=\"14\" required></label></p><p><label>面板範圍 <select name=\"bind_mode\" id=\"wizard-bind\"><option value=\"local\">本機 (127.0.0.1)</option><option value=\"lan\">家中區網 (0.0.0.0)</option></select></label></p><p id=\"wizard-lan\" hidden><label>家中區網面板網址 <input name=\"lan_origin\" placeholder=\"http://192.168.1.20:8765\"></label><br><span class=\"notice\">僅限可信任 LAN/VPN，勿公開到網際網路。</span></p><button type=\"submit\">完成首次設定</button></form></section>
-<section><h2>伺服器狀態</h2><div id=\"status\">讀取中…</div></section>
+<section id=\"onboarding\" hidden><h2>首次開服精靈</h2><p>伺服器密碼可留白，供公開社群伺服器使用；系統不會隨機生成密碼。未設定面板密碼時，本機 loopback 面板可直接使用。</p><form id=\"onboarding-form\"><p><label>伺服器名稱 <input name=\"server_name\" maxlength=\"80\" required></label></p><p><label>伺服器密碼（可留白） <input name=\"server_password\" type=\"password\"></label></p><p><label>自動備份排程 <select name=\"backup_schedule\" id=\"wizard-backup-schedule\"><option value=\"daily\">每天指定時間</option><option value=\"custom\">自訂間隔</option><option value=\"off\">關閉自動備份</option></select></label> <label id=\"wizard-interval\" hidden>每 <input id=\"wizard-interval-count\" type=\"number\" min=\"1\" max=\"365\" value=\"2\"> <select id=\"wizard-interval-unit\"><option value=\"h\">小時</option><option value=\"d\">天</option></select></label> <label id=\"wizard-daily-time\">每天時間 <input name=\"backup_daily_time\" type=\"time\" value=\"04:30\"></label></p><p><label>備份保留數 <input name=\"backup_retention_count\" type=\"number\" min=\"1\" max=\"1000\" value=\"14\" required></label></p><p><label>面板範圍 <select name=\"bind_mode\" id=\"wizard-bind\"><option value=\"local\">本機 (127.0.0.1)</option><option value=\"lan\">家中區網 (0.0.0.0)</option></select></label></p><p id=\"wizard-lan\" hidden><label>家中區網面板網址 <input name=\"lan_origin\" placeholder=\"http://192.168.1.20:8765\"></label><br><span class=\"notice\">僅限可信任 LAN/VPN，勿公開到網際網路。</span></p><button type=\"submit\">完成首次設定</button></form></section>
+<section><header class=\"server-heading\"><h2>伺服器狀態</h2><div><button data-action=\"start\">啟動</button><button data-action=\"stop\">關閉</button><button data-action=\"restart\">重啟</button></div></header><div id=\"status\">讀取中…</div><p>遊戲連接埠：<span id=\"game-port\">讀取中…</span>（UDP）</p><p>伺服器密碼：<input id=\"game-password\" type=\"password\" value=\"••••••••\" readonly aria-label=\"伺服器密碼\"><button id=\"toggle-game-password\">顯示密碼</button><button id=\"copy-game-password\">複製密碼</button></p><p>透過 Hamachi 連線時，請在遊戲輸入主機的 Hamachi IPv4 位址與上述連接埠。本機面板位址不限制遊戲連線。</p><p id=\"message\" role=\"status\"></p></section>
 <section><h2>線上玩家</h2><ul id=\"players\"></ul></section>
 <section><h2>遊戲內公告</h2><form id=\"announce-form\"><label><span>公告內容</span><input id=\"announce-message\" name=\"message\" maxlength=\"1024\" required></label><button type=\"submit\">發送公告</button></form></section>
-<section><h2>備份快照</h2><p id=\"backup-summary\">讀取中…</p><p><label>排程 <select id=\"backup-schedule\"><option value=\"daily\">每天指定時間</option><option value=\"every-2h\">每 2 小時</option><option value=\"every-4h\">每 4 小時</option><option value=\"every-6h\">每 6 小時</option><option value=\"every-12h\">每 12 小時</option><option value=\"off\">關閉自動備份</option></select></label> <label id=\"backup-daily-time\">每天時間 <input id=\"backup-daily-time-input\" type=\"time\" value=\"04:30\"></label> <label>保留數 <input id=\"backup-retention-count\" type=\"number\" min=\"1\" max=\"1000\" value=\"14\"></label></p><p class=\"notice\">變更會隨「世界設定」的儲存按鈕一併套用。</p><ul id=\"backups\"></ul><button data-action=\"backup\">立即安全備份</button><button id=\"copy-backup-folder\">查看備份資料夾</button><p id=\"backup-folder\"></p><p>還原會先停止伺服器並保留本機 safety backup。</p><select id=\"restore-snapshot\"></select><button id=\"restore\">從快照還原</button></section>
+<section><h2>備份快照</h2><p id=\"backup-summary\">讀取中…</p><p><label>排程 <select id=\"backup-schedule\"><option value=\"daily\">每天指定時間</option><option value=\"custom\">自訂間隔</option><option value=\"off\">關閉自動備份</option></select></label> <label id=\"backup-interval\" hidden>每 <input id=\"backup-interval-count\" type=\"number\" min=\"1\" max=\"365\" value=\"2\"> <select id=\"backup-interval-unit\"><option value=\"h\">小時</option><option value=\"d\">天</option></select></label> <label id=\"backup-daily-time\">每天時間 <input id=\"backup-daily-time-input\" type=\"time\" value=\"04:30\"></label> <label>保留數 <input id=\"backup-retention-count\" type=\"number\" min=\"1\" max=\"1000\" value=\"14\"></label></p><p class=\"notice\">可直接儲存備份排程；每 N 天於主機本地午夜執行。</p><button id=\"save-backup\">儲存備份排程</button><ul id=\"backups\"></ul><button data-action=\"backup\">立即備份</button><button id=\"copy-backup-folder\">查看備份資料夾</button><p id=\"backup-folder\"></p><p>還原會先停止伺服器並保留還原前備份。</p><select id=\"restore-snapshot\"></select><button id=\"restore\">從快照還原</button></section>
 <section><h2>SaveGames 匯出</h2><p>會先要求伺服器存檔，再下載目前使用中的 SaveGames 壓縮檔。</p><button id=\"savegames-download\">下載 SaveGames</button></section>
-<section><h2>安全操作</h2><button data-action=\"start\">啟動</button><button data-action=\"stop\">安全關閉</button><button data-action=\"restart\">安全重啟</button><p id=\"message\" role=\"status\"></p></section>
-<section><h2>SteamCMD 維護</h2><div id=\"maintenance\">讀取中…</div><button id=\"maintenance-trigger\">執行備份與更新</button></section>
+
+<section><h2>自動更新</h2><p><label><input id=\"update-enabled\" type=\"checkbox\">啟用自動更新</label> <label>每天檢查時間 <input id=\"update-time\" type=\"time\" value=\"05:00\"></label></p><p>依主機本地時間檢查並套用更新；執行前備份，完成後恢復原本的啟動狀態。</p><button id=\"save-update\">儲存更新排程</button><div id=\"maintenance\">讀取中…</div><button id=\"maintenance-trigger\">執行備份與更新</button></section>
 <section><h2>最近操作紀錄</h2><ul id=\"audit\"></ul></section>
 <section><h2>世界設定</h2><p id=\"restart-notice\" class=\"notice\" hidden>伺服器正在運行；儲存後必須重新啟動才會生效。</p><form id=\"settings-form\"><details open><summary>常用參數</summary><div id=\"common-settings\">讀取中…</div></details><details><summary>全部參數</summary><div id=\"settings-fields\">讀取中…</div></details><button type=\"button\" id=\"preview-settings\">預覽變更</button><button type=\"submit\">儲存設定</button></form><output id=\"settings-diff\" aria-live=\"polite\"></output></section>
 <section><h2>Discord 4 步嚮導</h2><ol><li>建立 Bot</li><li>填 Token</li><li>一鍵邀群</li><li>填頻道 ID</li></ol><form id=\"discord-form\"><label>Bot Token <input name=\"token\" type=\"password\" required></label><p><label>Application ID <input name=\"application_id\" inputmode=\"numeric\" pattern=\"[0-9]+\" required></label><button type=\"button\" id=\"discord-invite\">一鍵邀群</button></p><label>頻道 ID <input name=\"channel_id\" inputmode=\"numeric\" pattern=\"[0-9]+\" required></label><button type=\"submit\">儲存</button></form><p>完整 guild／角色設定請看 GitHub 文件。</p></section>
@@ -935,30 +977,40 @@ const authenticatedFetch=(path,options={{}})=>{{const headers=new Headers(option
 const request=async(path,options={{}})=>{{const r=await authenticatedFetch(path,options);const d=await r.json();if(!r.ok)throw Error(d.error||'操作失敗');return d;}};
 const text=(v)=>v===null?'未知':String(v);
 async function refresh(){{const [status,players,backups,maintenance,audit]=await Promise.allSettled([request('/api/status'),request('/api/players'),request('/api/backups'),request('/api/maintenance/status'),request('/api/audit/logs?limit=10')]);
-if(status.status==='fulfilled'){{const s=status.value;document.querySelector('#status').textContent=`服務：${{s.service}}；REST：${{s.api_reachable?'可連線':'無法連線'}}；玩家：${{s.players===null?'未知':s.players.join('、')||'無'}}；CPU：${{text(s.metrics.cpu)}}；記憶體：${{text(s.metrics.memory)}}`;}}else{{document.querySelector('#status').textContent='服務離線 / 尚未啟動';}}
+if(status.status==='fulfilled'){{const s=status.value;document.querySelector('#game-port').textContent=s.game_port;document.querySelector('#status').textContent=`服務：${{s.service}}；REST：${{s.api_reachable?'可連線':'無法連線'}}；玩家：${{s.players===null?'未知':s.players.join('、')||'無'}}；CPU：${{text(s.metrics.cpu)}}；記憶體：${{text(s.metrics.memory)}}`;}}else{{document.querySelector('#status').textContent='服務離線 / 尚未啟動';}}
 const playerList=document.querySelector('#players');if(players.status==='fulfilled'){{const p=players.value;playerList.replaceChildren(...p.players.map(player=>{{const li=document.createElement('li'),label=document.createElement('span');label.textContent=player.name+(player.user_id?` (${{player.user_id}})`: '（沒有可用 ID）');li.append(label);if(player.user_id)for(const action of ['kick','ban']){{const button=document.createElement('button');button.textContent=action==='kick'?'踢出':'封鎖';button.addEventListener('click',async()=>{{if(!confirm(`確定要${{button.textContent}} ${{player.name}}？`))return;const reason=prompt('原因（可留空）：')??'';try{{const data=await request('/api/players/'+action,{{method:'POST',headers:{{'Content-Type':'application/json','X-Palworld-CSRF':csrf}},body:JSON.stringify({{userid:player.user_id,message:reason}})}});document.querySelector('#message').textContent=data.message;await refresh();}}catch(e){{document.querySelector('#message').textContent=e.message;}}}});li.append(button);}}return li;}}));if(!p.players.length)playerList.textContent='目前沒有在線玩家。';}}else{{playerList.replaceChildren();playerList.textContent='伺服器未連線（離線）';}}
 if(backups.status==='fulfilled'){{const b=backups.value;document.querySelector('#backup-summary').textContent=`總共 ${{b.total_count}} 份備份，佔用 ${{b.total_size}}`;document.querySelector('#backup-folder').textContent='備份資料夾：'+b.backup_folder;const list=document.querySelector('#backups');list.replaceChildren(...b.snapshots.map(x=>{{const li=document.createElement('li');li.textContent=`${{x.display_time||'時間未知'}} — ${{x.size}}`;return li;}}));if(!b.snapshots.length)list.textContent='目前沒有可用快照。';const select=document.querySelector('#restore-snapshot');const selected=select.value;select.replaceChildren(...b.snapshots.map(x=>{{const option=document.createElement('option');option.value=x.name;option.textContent=x.name;return option;}}));select.value=selected;}}else{{document.querySelector('#backup-summary').textContent='備份資料暫時無法取得。';}}
 if(maintenance.status==='fulfilled'){{const m=maintenance.value;document.querySelector('#maintenance').textContent=`服務：${{m.service}}；階段：${{m.phase||'尚無紀錄'}}；最新：${{m.latest_log_summary||'尚無紀錄'}}`;}}else{{document.querySelector('#maintenance').textContent='維護資料暫時無法取得。';}}
 const auditList=document.querySelector('#audit');if(audit.status==='fulfilled'){{const a=audit.value;auditList.replaceChildren(...a.entries.map(x=>{{const li=document.createElement('li');li.textContent=`${{x.timestamp}} — ${{x.source}} — ${{x.action}} — ${{x.status}}`;return li;}}));if(!a.entries.length)auditList.textContent='尚無操作紀錄。';}}else{{auditList.replaceChildren();auditList.textContent='操作紀錄暫時無法取得。';}}}}
-document.querySelectorAll('button[data-action]').forEach(button=>button.addEventListener('click',async()=>{{const action=button.dataset.action;if((action==='stop'||action==='restart')&&!confirm('確定要執行安全 '+action+'？'))return;button.disabled=true;try{{const data=await request('/api/'+action,{{method:'POST',headers:{{'Content-Type':'application/json','X-Palworld-CSRF':csrf}},body:'{{}}'}});document.querySelector('#message').textContent=data.message;await refresh();}}catch(e){{document.querySelector('#message').textContent=e.message;}}finally{{button.disabled=false;}}}}));refresh();setInterval(refresh,10000);
-document.querySelector('#restore').addEventListener('click',async()=>{{const snapshot=document.querySelector('#restore-snapshot').value;if(!snapshot||!confirm('確定要從 '+snapshot+' 還原？伺服器會停止。'))return;try{{const data=await request('/api/backups/restore',{{method:'POST',headers:{{'Content-Type':'application/json','X-Palworld-CSRF':csrf}},body:JSON.stringify({{snapshot}})}});document.querySelector('#message').textContent=data.message+' Safety backup: '+data.safety_backup;await refresh();}}catch(e){{document.querySelector('#message').textContent=e.message;}}}});
+document.querySelectorAll('button[data-action]').forEach(button=>button.addEventListener('click',async()=>{{const action=button.dataset.action;if((action==='stop'||action==='restart')&&!confirm('確定要'+(action==='stop'?'關閉':'重啟')+'伺服器？'))return;button.disabled=true;try{{const data=await request('/api/'+action,{{method:'POST',headers:{{'Content-Type':'application/json','X-Palworld-CSRF':csrf}},body:'{{}}'}});document.querySelector('#message').textContent=data.message;await refresh();}}catch(e){{document.querySelector('#message').textContent=e.message;}}finally{{button.disabled=false;}}}}));refresh();setInterval(refresh,10000);
+document.querySelector('#restore').addEventListener('click',async()=>{{const snapshot=document.querySelector('#restore-snapshot').value;if(!snapshot||!confirm('確定要從 '+snapshot+' 還原？伺服器會停止。'))return;try{{const data=await request('/api/backups/restore',{{method:'POST',headers:{{'Content-Type':'application/json','X-Palworld-CSRF':csrf}},body:JSON.stringify({{snapshot}})}});document.querySelector('#message').textContent=data.message+' 還原前備份：'+data.safety_backup;await refresh();}}catch(e){{document.querySelector('#message').textContent=e.message;}}}});
 document.querySelector('#maintenance-trigger').addEventListener('click',async()=>{{try{{const data=await request('/api/maintenance/trigger',{{method:'POST',headers:{{'Content-Type':'application/json','X-Palworld-CSRF':csrf}},body:'{{}}'}});document.querySelector('#message').textContent=data.message;await refresh();}}catch(e){{document.querySelector('#message').textContent=e.message;}}}});
 document.querySelector('#announce-form').addEventListener('submit',async event=>{{event.preventDefault();const input=document.querySelector('#announce-message');if(!input.reportValidity())return;try{{const data=await request('/api/announce',{{method:'POST',headers:{{'Content-Type':'application/json','X-Palworld-CSRF':csrf}},body:JSON.stringify({{message:input.value}})}});document.querySelector('#message').textContent=data.message;input.value='';await refresh();}}catch(e){{document.querySelector('#message').textContent=e.message;}}}});
 document.querySelector('#savegames-download').addEventListener('click',async()=>{{const button=document.querySelector('#savegames-download');button.disabled=true;try{{const response=await authenticatedFetch('/api/savegames/download',{{method:'POST',headers:{{'Content-Type':'application/json','X-Palworld-CSRF':csrf}},body:'{{}}'}});if(!response.ok){{const data=await response.json();throw Error(data.error||'匯出失敗');}}const blob=await response.blob(),url=URL.createObjectURL(blob),link=document.createElement('a');link.href=url;link.download='palworld-savegames.zip';link.click();URL.revokeObjectURL(url);document.querySelector('#message').textContent='SaveGames 匯出完成。';await refresh();}}catch(e){{document.querySelector('#message').textContent=e.message;}}finally{{button.disabled=false;}}}});
+const setIntervalControls=(prefix,value)=>{{const match=value.match(/^every-([0-9]+)([hd])$/);if(match){{document.querySelector('#'+prefix+'-interval-count').value=match[1];document.querySelector('#'+prefix+'-interval-unit').value=match[2];}}}};
+const readSchedule=(prefix,select,time)=>select.value==='daily'?'daily-'+time.value:select.value==='custom'?'every-'+document.querySelector('#'+prefix+'-interval-count').value+document.querySelector('#'+prefix+'-interval-unit').value:select.value;
 const settingsForm=document.querySelector('#settings-form'),backupSchedule=document.querySelector('#backup-schedule'),backupDailyTime=document.querySelector('#backup-daily-time'),backupDailyInput=document.querySelector('#backup-daily-time-input'),backupRetention=document.querySelector('#backup-retention-count');
-const setBackupScheduleControls=value=>{{const daily=value.match(/^(?:daily-)?([0-2][0-9]:[0-5][0-9])$/);backupSchedule.value=daily?'daily':value;backupDailyInput.value=daily?daily[1]:'04:30';backupDailyTime.hidden=backupSchedule.value!=='daily';}};
-const syncBackupFields=()=>{{const scheduleField=document.querySelector('#setting-BACKUP_TIME'),retentionField=document.querySelector('#setting-BACKUP_RETENTION_COUNT');if(scheduleField){{scheduleField.value=backupSchedule.value==='daily'?'daily-'+backupDailyInput.value:backupSchedule.value;scheduleField.dispatchEvent(new Event('input',{{bubbles:true}}));}}if(retentionField){{retentionField.value=backupRetention.value;retentionField.dispatchEvent(new Event('input',{{bubbles:true}}));}}backupDailyTime.hidden=backupSchedule.value!=='daily';}};
-backupSchedule.addEventListener('change',syncBackupFields);backupDailyInput.addEventListener('input',syncBackupFields);backupRetention.addEventListener('input',syncBackupFields);
+const setBackupScheduleControls=value=>{{const daily=value.match(/^(?:daily-)?([0-2][0-9]:[0-5][0-9])$/);backupSchedule.value=daily?'daily':value.startsWith('every-')?'custom':value;setIntervalControls('backup',value);backupDailyInput.value=daily?daily[1]:'04:30';backupDailyTime.hidden=backupSchedule.value!=='daily';document.querySelector('#backup-interval').hidden=backupSchedule.value!=='custom';}};
+const syncBackupFields=()=>{{const scheduleField=document.querySelector('#setting-BACKUP_TIME'),retentionField=document.querySelector('#setting-BACKUP_RETENTION_COUNT');if(scheduleField){{scheduleField.value=readSchedule('backup',backupSchedule,backupDailyInput);scheduleField.dispatchEvent(new Event('input',{{bubbles:true}}));}}if(retentionField){{retentionField.value=backupRetention.value;retentionField.dispatchEvent(new Event('input',{{bubbles:true}}));}}backupDailyTime.hidden=backupSchedule.value!=='daily';document.querySelector('#backup-interval').hidden=backupSchedule.value!=='custom';}};
+for(const id of ['backup-interval-count','backup-interval-unit'])document.getElementById(id).addEventListener('input',syncBackupFields);backupSchedule.addEventListener('change',syncBackupFields);backupDailyInput.addEventListener('input',syncBackupFields);backupRetention.addEventListener('input',syncBackupFields);
 const settingsValues=()=>Object.fromEntries(new FormData(settingsForm).entries());
 const showDiff=data=>{{const changes=data.changes||[];document.querySelector('#settings-diff').textContent=changes.length?changes.map(x=>`${{x.category}} — ${{x.label}}: ${{x.old}} → ${{x.new}}`).join('\\n'):'沒有變更。';document.querySelector('#restart-notice').hidden=!data.restart_required;}};
-async function loadSettings(){{try{{const data=await request('/api/settings');const root=document.querySelector('#settings-fields');root.replaceChildren();for(const category of data.categories){{const fieldset=document.createElement('fieldset'),legend=document.createElement('legend');legend.textContent=category.name;fieldset.append(legend);for(const field of category.fields){{const row=document.createElement('div'),label=document.createElement('label'),help=document.createElement('button'),tooltip=document.createElement('span'),input=document.createElement(field.kind==='choice'||field.kind==='boolean'?'select':'input'),reset=document.createElement('button'),inputId='setting-'+field.key;row.className='setting-row';label.htmlFor=inputId;label.textContent=field.label;help.type='button';help.className='help';help.setAttribute('aria-label',field.label+' 的說明');help.setAttribute('aria-describedby','help-'+field.key);help.textContent='?';tooltip.id='help-'+field.key;tooltip.className='help-tooltip';tooltip.setAttribute('role','tooltip');tooltip.textContent=field.description;help.append(tooltip);input.id=inputId;input.name=field.key;input.required=true;input.setAttribute('aria-describedby',tooltip.id);if(field.kind==='boolean'){{for(const optionValue of ['true','false']){{const option=document.createElement('option');option.value=optionValue;option.textContent=optionValue==='true'?'Enabled':'Disabled';input.append(option);}}}}else if(field.kind==='integer'||field.kind==='number'){{input.type='number';input.step=field.kind==='integer'?'1':'0.1';if(field.minimum!==null)input.min=field.minimum;if(field.maximum!==null)input.max=field.maximum;}}else input.type='text';if(field.kind==='choice')for(const optionValue of field.choices){{const option=document.createElement('option');option.value=optionValue;option.textContent=optionValue;input.append(option);}}input.value=field.value;reset.type='button';reset.className='reset-setting';reset.textContent='重置';reset.title='重置為預設值：'+field.default;reset.setAttribute('aria-label',field.label+' 重置為預設值 '+field.default);reset.addEventListener('click',()=>{{input.value=field.default;input.dispatchEvent(new Event('input',{{bubbles:true}}));input.focus();}});row.append(label,help,input,reset);fieldset.append(row);}}root.append(fieldset);}}const scheduleField=document.querySelector('#setting-BACKUP_TIME'),retentionField=document.querySelector('#setting-BACKUP_RETENTION_COUNT');if(scheduleField)setBackupScheduleControls(scheduleField.value);if(retentionField)backupRetention.value=retentionField.value;showDiff({{changes:[],restart_required:data.restart_required}});}}catch(e){{document.querySelector('#settings-fields').textContent=e.message;}}}}
+async function loadSettings(){{try{{const data=await request('/api/settings');const root=document.querySelector('#settings-fields');root.replaceChildren();for(const category of data.categories){{const fieldset=document.createElement('fieldset'),legend=document.createElement('legend');legend.textContent=category.name;fieldset.append(legend);for(const field of category.fields){{const row=document.createElement('div'),label=document.createElement('label'),help=document.createElement('button'),tooltip=document.createElement('span'),input=document.createElement(field.kind==='choice'||field.kind==='boolean'?'select':'input'),reset=document.createElement('button'),inputId='setting-'+field.key;row.className='setting-row';label.htmlFor=inputId;label.textContent=field.label;help.type='button';help.className='help';help.setAttribute('aria-label',field.label+' 的說明');help.setAttribute('aria-describedby','help-'+field.key);help.textContent='?';tooltip.id='help-'+field.key;tooltip.className='help-tooltip';tooltip.setAttribute('role','tooltip');tooltip.textContent=field.description;help.append(tooltip);input.id=inputId;input.name=field.key;input.required=true;input.setAttribute('aria-describedby',tooltip.id);if(field.kind==='boolean'){{for(const optionValue of ['true','false']){{const option=document.createElement('option');option.value=optionValue;option.textContent=optionValue==='true'?'Enabled':'Disabled';input.append(option);}}}}else if(field.kind==='integer'||field.kind==='number'){{input.type='number';input.step=field.kind==='integer'?'1':'0.1';if(field.minimum!==null)input.min=field.minimum;if(field.maximum!==null)input.max=field.maximum;}}else input.type='text';if(field.kind==='choice')for(const optionValue of field.choices){{const option=document.createElement('option');option.value=optionValue;option.textContent=optionValue;input.append(option);}}input.value=field.value;reset.type='button';reset.className='reset-setting';reset.textContent='重置';reset.title='重置為預設值：'+field.default;reset.setAttribute('aria-label',field.label+' 重置為預設值 '+field.default);reset.addEventListener('click',()=>{{input.value=field.default;input.dispatchEvent(new Event('input',{{bubbles:true}}));input.focus();}});row.append(label,help,input,reset);fieldset.append(row);}}root.append(fieldset);}}const scheduleField=document.querySelector('#setting-BACKUP_TIME'),retentionField=document.querySelector('#setting-BACKUP_RETENTION_COUNT');if(scheduleField)setBackupScheduleControls(scheduleField.value);if(retentionField)backupRetention.value=retentionField.value;const updateField=document.querySelector('#setting-UPDATE_TIME');if(updateField){{document.querySelector('#update-enabled').checked=updateField.value!=='off';document.querySelector('#update-time').value=updateField.value.startsWith('daily-')?updateField.value.slice(6):'05:00';}}showDiff({{changes:[],restart_required:data.restart_required}});}}catch(e){{document.querySelector('#settings-fields').textContent=e.message;}}}}
 const settingsRequest=path=>request(path,{{method:'POST',headers:{{'Content-Type':'application/json','X-Palworld-CSRF':csrf}},body:JSON.stringify({{values:settingsValues()}})}});
 document.querySelector('#preview-settings').addEventListener('click',async()=>{{if(!settingsForm.reportValidity())return;try{{showDiff(await settingsRequest('/api/settings/preview'));}}catch(e){{document.querySelector('#settings-diff').textContent=e.message;}}}});
 settingsForm.addEventListener('submit',async event=>{{event.preventDefault();if(!settingsForm.reportValidity())return;try{{const preview=await settingsRequest('/api/settings/preview');showDiff(preview);if(preview.changes.length&&!confirm('套用以上變更？'))return;const saved=await settingsRequest('/api/settings');showDiff(saved);document.querySelector('#message').textContent=saved.message+(saved.backup?' Backup: '+saved.backup:'');}}catch(e){{document.querySelector('#settings-diff').textContent=e.message;}}}});async function loadCommon(){{const data=await request('/api/settings'),all=data.categories.flatMap(category=>category.fields),keys=data.common_keys,root=document.querySelector('#common-settings');root.replaceChildren();for(const key of keys){{const field=all.find(item=>item.key===key),full=document.querySelector('#setting-'+key);if(!field||!full)continue;const row=document.createElement('p'),label=document.createElement('label'),input=full.cloneNode(true);input.removeAttribute('name');input.id='common-'+key;label.htmlFor=input.id;label.textContent=field.label+' ';input.addEventListener('input',()=>{{full.value=input.value;full.dispatchEvent(new Event('input',{{bubbles:true}}));}});label.append(input);row.append(label);root.append(row);}}const password=document.createElement('p');password.textContent='伺服器密碼：請於首次開服精靈手動設定。';root.append(password);}}loadSettings().then(loadCommon).catch(()=>{{}});
 document.querySelector('#copy-backup-folder').addEventListener('click',async()=>{{const path=document.querySelector('#backup-folder').textContent.replace('備份資料夾：','');try{{await navigator.clipboard.writeText(path);document.querySelector('#message').textContent='備份資料夾位置已複製。';}}catch(_e){{document.querySelector('#message').textContent=path;}}}});
-const wizard=document.querySelector('#onboarding'),wizardForm=document.querySelector('#onboarding-form'),wizardBind=document.querySelector('#wizard-bind'),wizardBackupSchedule=document.querySelector('#wizard-backup-schedule'),wizardDailyTime=document.querySelector('#wizard-daily-time');wizardBind.addEventListener('change',()=>{{document.querySelector('#wizard-lan').hidden=wizardBind.value!=='lan';}});wizardBackupSchedule.addEventListener('change',()=>{{wizardDailyTime.hidden=wizardBackupSchedule.value!=='daily';}});
-async function loadOnboarding(){{try{{const data=await request('/api/onboarding'),schedule=data.backup_schedule||data.backup_time;wizard.hidden=!data.required;const daily=schedule.match(/^(?:daily-)?([0-2][0-9]:[0-5][0-9])$/);wizardBackupSchedule.value=daily?'daily':schedule;wizardForm.backup_daily_time.value=daily?daily[1]:'04:30';wizardDailyTime.hidden=wizardBackupSchedule.value!=='daily';wizardForm.backup_retention_count.value=data.backup_retention_count;wizardBind.value=data.bind_mode;wizardBind.dispatchEvent(new Event('change'));}}catch(e){{document.querySelector('#message').textContent=e.message;}}}}loadOnboarding();
-wizardForm.addEventListener('submit',async event=>{{event.preventDefault();if(!wizardForm.reportValidity())return;try{{const password=wizardForm.server_password.value,payload=Object.fromEntries(new FormData(wizardForm).entries());payload.backup_time=payload.backup_schedule==='daily'?'daily-'+payload.backup_daily_time:payload.backup_schedule;const data=await request('/api/onboarding',{{method:'POST',headers:{{'Content-Type':'application/json','X-Palworld-CSRF':csrf}},body:JSON.stringify(payload)}});wizardPassword=data.auth.use_server_password?password:null;wizardUsername=data.auth.username;document.querySelector('#message').textContent=data.message;wizard.hidden=true;await refresh();await loadSettings();await loadCommon();}}catch(e){{document.querySelector('#message').textContent=e.message;}}}});
+async function saveSchedule(values){{try{{const data=await request('/api/settings',{{method:'POST',headers:{{'Content-Type':'application/json','X-Palworld-CSRF':csrf}},body:JSON.stringify({{values}})}});document.querySelector('#message').textContent=data.message;}}catch(e){{document.querySelector('#message').textContent=e.message;}}}}
+document.querySelector('#save-backup').addEventListener('click',()=>{{if(!backupRetention.reportValidity()||!document.querySelector('#backup-interval-count').reportValidity())return;syncBackupFields();saveSchedule({{BACKUP_TIME:readSchedule('backup',backupSchedule,backupDailyInput),BACKUP_RETENTION_COUNT:backupRetention.value}});}});
+const syncUpdate=()=>{{const field=document.querySelector('#setting-UPDATE_TIME');if(field)field.value=document.querySelector('#update-enabled').checked?'daily-'+document.querySelector('#update-time').value:'off';}};
+for(const id of ['update-enabled','update-time'])document.getElementById(id).addEventListener('input',syncUpdate);
+document.querySelector('#save-update').addEventListener('click',()=>{{syncUpdate();saveSchedule({{UPDATE_TIME:document.querySelector('#setting-UPDATE_TIME').value}});}});
+const gamePassword=document.querySelector('#game-password'),togglePassword=document.querySelector('#toggle-game-password');
+togglePassword.addEventListener('click',async()=>{{if(gamePassword.type==='text'){{gamePassword.type='password';gamePassword.value='••••••••';togglePassword.textContent='顯示密碼';return;}}try{{const data=await request('/api/connection/password');gamePassword.value=data.password;gamePassword.type='text';togglePassword.textContent='隱藏密碼';}}catch(e){{document.querySelector('#message').textContent=e.message;}}}});
+document.querySelector('#copy-game-password').addEventListener('click',async()=>{{try{{const data=await request('/api/connection/password');await navigator.clipboard.writeText(data.password);document.querySelector('#message').textContent='密碼已複製。';}}catch(e){{document.querySelector('#message').textContent='無法複製密碼，請使用顯示密碼。';}}}});
+const wizard=document.querySelector('#onboarding'),wizardForm=document.querySelector('#onboarding-form'),wizardBind=document.querySelector('#wizard-bind'),wizardBackupSchedule=document.querySelector('#wizard-backup-schedule'),wizardDailyTime=document.querySelector('#wizard-daily-time');wizardBind.addEventListener('change',()=>{{document.querySelector('#wizard-lan').hidden=wizardBind.value!=='lan';}});wizardBackupSchedule.addEventListener('change',()=>{{wizardDailyTime.hidden=wizardBackupSchedule.value!=='daily';document.querySelector('#wizard-interval').hidden=wizardBackupSchedule.value!=='custom';}});
+async function loadOnboarding(){{try{{const data=await request('/api/onboarding'),schedule=data.backup_schedule||data.backup_time;wizard.hidden=!data.required;const daily=schedule.match(/^(?:daily-)?([0-2][0-9]:[0-5][0-9])$/);wizardBackupSchedule.value=daily?'daily':schedule.startsWith('every-')?'custom':schedule;setIntervalControls('wizard',schedule);wizardForm.backup_daily_time.value=daily?daily[1]:'04:30';wizardDailyTime.hidden=wizardBackupSchedule.value!=='daily';document.querySelector('#wizard-interval').hidden=wizardBackupSchedule.value!=='custom';wizardForm.backup_retention_count.value=data.backup_retention_count;wizardBind.value=data.bind_mode;wizardBind.dispatchEvent(new Event('change'));}}catch(e){{document.querySelector('#message').textContent=e.message;}}}}loadOnboarding();
+wizardForm.addEventListener('submit',async event=>{{event.preventDefault();if(!wizardForm.reportValidity())return;try{{const password=wizardForm.server_password.value,payload=Object.fromEntries(new FormData(wizardForm).entries());payload.backup_time=readSchedule('wizard',wizardBackupSchedule,wizardForm.backup_daily_time);const data=await request('/api/onboarding',{{method:'POST',headers:{{'Content-Type':'application/json','X-Palworld-CSRF':csrf}},body:JSON.stringify(payload)}});wizardPassword=data.auth.use_server_password?password:null;wizardUsername=data.auth.username;document.querySelector('#message').textContent=data.message;wizard.hidden=true;await refresh();await loadSettings();await loadCommon();}}catch(e){{document.querySelector('#message').textContent=e.message;}}}});
 const discordForm=document.querySelector('#discord-form');document.querySelector('#discord-invite').addEventListener('click',()=>{{const id=discordForm.application_id.value;if(!/^[0-9]+$/.test(id)){{document.querySelector('#message').textContent='請先填入數字 Application ID。';return;}}window.open('https://discord.com/oauth2/authorize?client_id='+encodeURIComponent(id)+'&scope=bot%20applications.commands&permissions=3072','_blank','noopener');}});discordForm.addEventListener('submit',async event=>{{event.preventDefault();if(!discordForm.reportValidity())return;try{{const data=await request('/api/discord/setup',{{method:'POST',headers:{{'Content-Type':'application/json','X-Palworld-CSRF':csrf}},body:JSON.stringify(Object.fromEntries(new FormData(discordForm).entries()))}});document.querySelector('#message').textContent=data.message;discordForm.token.value='';}}catch(e){{document.querySelector('#message').textContent=e.message;}}}});
 const networkForm=document.querySelector('#advanced-network-form'),advancedBind=document.querySelector('#advanced-bind');advancedBind.addEventListener('change',()=>{{document.querySelector('#advanced-lan').hidden=advancedBind.value!=='lan';}});networkForm.addEventListener('submit',async event=>{{event.preventDefault();try{{const data=await request('/api/advanced/network',{{method:'POST',headers:{{'Content-Type':'application/json','X-Palworld-CSRF':csrf}},body:JSON.stringify(Object.fromEntries(new FormData(networkForm).entries()))}});document.querySelector('#message').textContent=data.message;}}catch(e){{document.querySelector('#message').textContent=e.message;}}}});
 </script></body></html>""".encode("utf-8")
@@ -1073,6 +1125,9 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send(HTTPStatus.OK, _page(self.server.csrf_token), "text/html; charset=utf-8")
             elif request.path == "/api/status" and not request.query:
                 self._json(HTTPStatus.OK, self.server.dependencies.status_payload())
+            elif request.path == "/api/connection/password" and not request.query:
+                current = load_config(self.server.dependencies.config.directory)
+                self._json(HTTPStatus.OK, {"password": current.values.get("SERVER_PASSWORD", "")})
             elif request.path == "/api/backups" and not request.query:
                 self._json(HTTPStatus.OK, self.server.dependencies.backups_payload())
             elif request.path == "/api/players" and not request.query:
@@ -1395,6 +1450,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--bind", help="IPv4 address to listen on (overrides PALWORLD_WEB_BIND_IP)")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     args = parser.parse_args(argv)
+    scheduler_stop = threading.Event()
     try:
         config = load_config(args.config_dir)
         # ``load_config`` owns all configuration-layer precedence.  The CLI is
@@ -1402,6 +1458,9 @@ def main(argv: list[str] | None = None) -> int:
         # a later protected layer such as secrets.env.
         bind = args.bind if args.bind is not None else config.values["PALWORLD_WEB_BIND_IP"]
         server = create_server(WebDependencies.create(config), host=bind, port=args.port)
+        if os.name == "nt":
+            from .scheduling import run_windows_schedules
+            threading.Thread(target=run_windows_schedules, args=(server.dependencies, scheduler_stop), daemon=True).start()
     except (OSError, RuntimeError, ValueError) as exc:
         parser.error(str(exc))
     try:
@@ -1409,6 +1468,7 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         pass
     finally:
+        scheduler_stop.set()
         server.server_close()
     return 0
 

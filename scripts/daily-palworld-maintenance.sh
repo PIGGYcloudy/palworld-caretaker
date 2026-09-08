@@ -16,25 +16,12 @@ MANAGER="$SCRIPT_HOME/palworld_manager.py"
 [[ -r "$MANAGER" ]] || { printf 'ERROR: configuration manager is missing\n' >&2; exit 1; }
 python3 "$MANAGER" --config-dir "$CONFIG_DIR" || exit $?
 if [[ "$RUN_MODE" == scheduled ]]; then
-  if [[ "$(python3 "$MANAGER" --config-dir "$CONFIG_DIR" --get PALWORLD_BACKUP_SCHEDULE_ENABLED)" != true ]]; then
-    printf '[%s] Scheduled backup is disabled by PALWORLD_BACKUP_SCHEDULE_ENABLED.\n' "$(date --iso-8601=seconds)"
-    exit 0
-  fi
-  BACKUP_SCHEDULE="$(python3 "$MANAGER" --config-dir "$CONFIG_DIR" --get BACKUP_TIME)"
-  # The timer wakes once per minute so edits take effect without a privileged
-  # daemon-reload. Only its explicit scheduled unit is gated: Web/Discord
-  # starts remain manual requests.
-  case "$BACKUP_SCHEDULE" in
+  scheduled_action="$(PYTHONPATH="$SCRIPT_HOME:$SCRIPT_HOME/../src${PYTHONPATH:+:$PYTHONPATH}" python3 -m palworld_caretaker.scheduling "$CONFIG_DIR")"
+  case "$scheduled_action" in
+    update) ;;
+    backup) exec "$SCRIPT_HOME/backup-palworld.sh" ;;
     off) exit 0 ;;
-    daily-*) [[ "$(date +%H:%M)" == "${BACKUP_SCHEDULE#daily-}" ]] || exit 0 ;;
-    [0-2][0-9]:[0-5][0-9]) [[ "$(date +%H:%M)" == "$BACKUP_SCHEDULE" ]] || exit 0 ;;
-    every-2h|every-4h|every-6h|every-12h)
-      interval="${BACKUP_SCHEDULE#every-}"; interval="${interval%h}"
-      [[ "$(date +%M)" == 00 ]] || exit 0
-      hour="$(date +%H)"
-      (( 10#$hour % interval == 0 )) || exit 0
-      ;;
-    *) printf 'ERROR: invalid BACKUP_TIME schedule: %s\n' "$BACKUP_SCHEDULE" >&2; exit 1 ;;
+    *) exit 1 ;;
   esac
 fi
 STATE_ROOT="$(python3 "$MANAGER" --config-dir "$CONFIG_DIR" --get PALWORLD_MANAGER_STATE_DIR)"
@@ -134,7 +121,7 @@ else
   log 'Palworld was already stopped; it will remain stopped after maintenance.'
 fi
 
-write_state 'backup' '正在建立安全備份。'
+write_state 'backup' '正在建立備份。'
 log 'Creating backup.'
 "$BACKUP_SCRIPT"
 

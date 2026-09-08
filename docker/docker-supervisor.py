@@ -92,7 +92,8 @@ class Supervisor:
     def backup_once(self) -> None:
         """Save first, then publish an atomic filesystem snapshot."""
         api = PalworldRESTClient(self.config)
-        api.save()
+        if self.game is not None and self.game.poll() is None:
+            api.save()
         BackupManager(
             save_root=SERVER_DIR / "Pal/Saved/SaveGames",
             config_root=SERVER_DIR / "Pal/Saved/Config",
@@ -295,34 +296,26 @@ class Supervisor:
 
     def backup_loop(self) -> None:
         """Run daily or interval backups without relying on cron in a container."""
-        last_run = ""
+        from palworld_caretaker.scheduling import schedule_slot
+        last_run = {}
         while not STOPPING.wait(15):
-            if self.config.get("PALWORLD_BACKUP_SCHEDULE_ENABLED", "true") != "true":
-                continue
-            now = time.localtime()
-            schedule = self.config.get("BACKUP_TIME", "daily-04:30")
-            clock = time.strftime("%H:%M", now)
-            if schedule.startswith("daily-"):
-                due, slot = clock == schedule[6:], time.strftime("%Y-%m-%d", now)
-            elif re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", schedule):
-                due, slot = clock == schedule, time.strftime("%Y-%m-%d", now)
-            elif schedule in {"every-2h", "every-4h", "every-6h", "every-12h"}:
-                interval = int(schedule[6:-1])
-                due = now.tm_min == 0 and now.tm_hour % interval == 0
-                slot = time.strftime("%Y-%m-%d-%H", now)
-            elif schedule == "off":
-                continue
-            else:
-                print(f"docker supervisor: invalid backup schedule: {schedule}", file=sys.stderr)
-                continue
-            if not due or last_run == slot:
-                continue
             try:
-                with self.operation_lock:
-                    self.backup_once()
-                last_run = slot
+                self.config = load_config(CONFIG_DIR)
+                for key, action in (("UPDATE_TIME", "update"), ("BACKUP_TIME", "backup")):
+                    if key == "BACKUP_TIME" and self.config.get("PALWORLD_BACKUP_SCHEDULE_ENABLED", "true") != "true":
+                        continue
+                    schedule = self.config.get(key, "off")
+                    slot = schedule_slot(schedule)
+                    identity = (schedule, slot)
+                    if slot is None or last_run.get(key) == identity:
+                        continue
+                    last_run[key] = identity
+                    self.control(action)
+                    if action == "update":
+                        backup = self.config.get("BACKUP_TIME", "off")
+                        last_run["BACKUP_TIME"] = (backup, schedule_slot(backup))
             except (ApiError, OSError, RuntimeError, ValueError) as exc:
-                print(f"docker supervisor: scheduled backup failed: {exc}", file=sys.stderr)
+                print(f"docker supervisor: scheduled operation failed: {exc}", file=sys.stderr)
 
     def idle_loop(self) -> None:
         """Container-native idle watcher using REST, never systemctl."""

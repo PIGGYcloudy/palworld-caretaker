@@ -3,6 +3,7 @@ param(
     [string]$ConfigDir = (Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) 'config'),
     [string]$ServiceName = 'PalServer',
     [switch]$NoServiceControl,
+    [switch]$LockHeld,
     # A Windows Task Scheduler trigger may invoke this every minute. The
     # schedule gate then uses the same BACKUP_TIME syntax as Linux.
     [switch]$Scheduled
@@ -11,7 +12,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'Caretaker.Common.psm1') -Force
 
-$lock = Enter-CaretakerOperationLock
+$lock = if ($LockHeld) { $null } else { Enter-CaretakerOperationLock }
 $staging = $null
 $wasRunning = $false
 try {
@@ -27,7 +28,7 @@ try {
             '^off$' { $false; break }
             '^daily-(?<time>(?:[01][0-9]|2[0-3]):[0-5][0-9])$' { $now.ToString('HH:mm') -eq $Matches.time; break }
             '^(?<time>(?:[01][0-9]|2[0-3]):[0-5][0-9])$' { $now.ToString('HH:mm') -eq $Matches.time; break }
-            '^every-(?<hours>2|4|6|12)h$' { $interval = [int]$Matches['hours']; $now.Minute -eq 0 -and ($now.Hour % $interval -eq 0); break }
+            '^every-(?<amount>[1-9][0-9]{0,2})(?<unit>[hd])$' { $interval = [int]$Matches['amount']; if ($interval -gt 365) { throw 'Interval must be 1-365' }; if ($Matches['unit'] -eq 'd') { $interval *= 24 }; $hours = [long][Math]::Floor(($now.Date - [datetime]'1970-01-01').TotalHours) + $now.Hour; $now.Minute -eq 0 -and ($hours % $interval -eq 0); break }
             default { throw 'BACKUP_TIME must be daily-HH:MM, every-2h, every-4h, every-6h, every-12h, or off.' }
         }
         if (-not $due) { return }

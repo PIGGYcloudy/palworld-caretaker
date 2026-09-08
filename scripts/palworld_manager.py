@@ -141,7 +141,7 @@ DEFAULT_CONFIG: dict[str, str] = {
     "PALWORLD_WEB_ALLOWED_HOSTS": "",
     "PALWORLD_SAVEGAMES_EXPORT_MAX_BYTES": str(8 * 1024 ** 3),
     "BACKUP_RETENTION_COUNT": "14",
-    "BACKUP_TIME": "daily-04:30",
+    "BACKUP_TIME": "daily-04:30", "UPDATE_TIME": "off",
     "PALWORLD_BACKUP_SCHEDULE_ENABLED": "true",
     "PALWORLD_ONBOARDING_COMPLETED": "false",
     "SERVER_PASSWORD": "",
@@ -174,7 +174,7 @@ EDITABLE_SETTING_KEYS = frozenset({
     "EQUIPMENT_DURABILITY_DAMAGE_RATE", "DEATH_PENALTY", "BUILD_OBJECT_HP_RATE",
     "BUILD_OBJECT_DAMAGE_RATE", "BUILD_OBJECT_DETERIORATION_DAMAGE_RATE",
     "AUTO_RESET_WORKER_PAL_WHEN_SERVER_RESTART", "PALWORLD_IDLE_SHUTDOWN_ENABLED",
-    "PALWORLD_IDLE_TIMEOUT_MINUTES", "BACKUP_RETENTION_COUNT", "BACKUP_TIME",
+    "PALWORLD_IDLE_TIMEOUT_MINUTES", "BACKUP_RETENTION_COUNT", "BACKUP_TIME", "UPDATE_TIME",
     "PALWORLD_WEB_BIND_IP", "PALWORLD_WEB_ALLOWED_ORIGINS", "PALWORLD_WEB_ALLOWED_HOSTS",
     "PALWORLD_BACKUP_SCHEDULE_ENABLED", "PALWORLD_ONBOARDING_COMPLETED",
     "DISCORD_PALWORLD_ALLOWED_CHANNEL_IDS",
@@ -411,11 +411,12 @@ def validate_config(config: dict[str, str]) -> dict[str, Path | None]:
         raise ConfigError("DEATH_PENALTY must be one of: None, Item, ItemAndEquipment, All")
     if config.get("PALWORLD_REST_API_HOST", "") != "127.0.0.1":
         raise ConfigError("PALWORLD_REST_API_HOST must be 127.0.0.1")
-    backup_schedule = config.get("BACKUP_TIME", "")
-    if not (backup_schedule == "off" or backup_schedule in {"every-2h", "every-4h", "every-6h", "every-12h"}
-            or re.fullmatch(r"daily-(?:[01][0-9]|2[0-3]):[0-5][0-9]", backup_schedule)
-            or re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", backup_schedule)):
-        raise ConfigError("BACKUP_TIME must be daily-HH:MM, every-2h, every-4h, every-6h, every-12h, or off")
+    for key in ("BACKUP_TIME", "UPDATE_TIME"):
+        schedule = config.get(key, "off")
+        if not (schedule == "off"
+                or re.fullmatch(r"every-([1-9]|[1-9][0-9]|[12][0-9]{2}|3[0-5][0-9]|36[0-5])[hd]", schedule)
+                or re.fullmatch(r"(?:daily-)?(?:[01][0-9]|2[0-3]):[0-5][0-9]", schedule)):
+            raise ConfigError(f"{key} must be daily-HH:MM, every-Nh, every-Nd (N: 1–365), or off")
     for key in ("PALWORLD_SERVICE_USER", "PALWORLD_MANAGER_USER"):
         if not _SAFE_ACCOUNT_RE.fullmatch(config.get(key, "")):
             raise ConfigError(f"{key} is not a valid system account name")

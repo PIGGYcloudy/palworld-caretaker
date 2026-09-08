@@ -229,7 +229,7 @@ class WebUITests(unittest.TestCase):
         status, raw, _headers = self.request("/api/settings")
         self.assertEqual(status, 200)
         fields = [field for category in json.loads(raw)["categories"] for field in category["fields"]]
-        self.assertEqual(len(fields), 40)
+        self.assertEqual(len(fields), 41)
         self.assertEqual({field["key"] for field in fields}, {
             key for key, spec in SETTING_SPECS.items() if not spec.secret
         })

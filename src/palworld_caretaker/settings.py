@@ -281,6 +281,7 @@ _SPECS = (
     SettingSpec("PALWORLD_IDLE_TIMEOUT_MINUTES", "Idle shutdown timeout (minutes)", "Caretaker", "server", "integer", "10", 1, 1440),
     SettingSpec("BACKUP_RETENTION_COUNT", "Backup retention count", "Caretaker", "caretaker", "integer", "14", 1, 1000),
     SettingSpec("BACKUP_TIME", "Backup schedule", "Caretaker", "caretaker", "string", "daily-04:30"),
+    SettingSpec("UPDATE_TIME", "自動更新檢查排程", "Caretaker", "caretaker", "string", "off"),
 )
 
 _DESCRIPTIONS = {
@@ -323,7 +324,8 @@ _DESCRIPTIONS = {
     "PALWORLD_IDLE_SHUTDOWN_ENABLED": "Automatically stop the server after it has been empty for the configured period.",
     "PALWORLD_IDLE_TIMEOUT_MINUTES": "Minutes with no players before the idle shutdown watcher stops the server.",
     "BACKUP_RETENTION_COUNT": "Number of completed backups to retain; older backups are pruned safely.",
-    "BACKUP_TIME": "Schedule: daily-HH:MM, every-2h, every-4h, every-6h, every-12h, or off. Legacy HH:MM values remain supported.",
+    "BACKUP_TIME": "每天指定時間，或每 1–365 小時／天執行一次；off 關閉。",
+    "UPDATE_TIME": "自動更新檢查時間：daily-HH:MM、every-Nh、every-Nd 或 off。更新前備份，完成後恢復原本的啟動狀態。",
 }
 if set(_DESCRIPTIONS) != {spec.key for spec in _SPECS}:  # pragma: no cover - schema authoring guard
     raise AssertionError("every editable setting requires a description")
@@ -332,7 +334,6 @@ _SPECS = tuple(replace(spec, description=_DESCRIPTIONS[spec.key]) for spec in _S
 SETTING_SPECS: dict[str, SettingSpec] = {spec.key: spec for spec in _SPECS}
 EDITABLE_DEFAULTS: dict[str, str] = {spec.key: spec.default for spec in _SPECS}
 _TIME = re.compile(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]\Z")
-_BACKUP_INTERVALS = frozenset({"every-2h", "every-4h", "every-6h", "every-12h"})
 
 
 def normalize_backup_schedule(value: object, *, key: str = "BACKUP_TIME") -> str:
@@ -344,14 +345,14 @@ def normalize_backup_schedule(value: object, *, key: str = "BACKUP_TIME") -> str
     """
     if not isinstance(value, str):
         raise ConfigError(f"{key} must be a backup schedule string")
-    if value in {"off", *_BACKUP_INTERVALS}:
+    if value == "off" or re.fullmatch(r"every-([1-9]|[1-9][0-9]|[12][0-9]{2}|3[0-5][0-9]|36[0-5])[hd]", value):
         return value
     if value.startswith("daily-") and _TIME.fullmatch(value[6:]):
         return value
     if _TIME.fullmatch(value):
         return f"daily-{value}"
     raise ConfigError(
-        f"{key} must be daily-HH:MM, every-2h, every-4h, every-6h, every-12h, or off"
+        f"{key} must be daily-HH:MM, every-Nh, every-Nd (N: 1–365), or off"
     )
 _INI_RESERVED = frozenset(",()\"'")
 
@@ -395,7 +396,7 @@ def _string(value: object, spec: SettingSpec) -> str:
             raise ConfigError(f"{spec.key} must not be empty")
         if any(character in value for character in _INI_RESERVED):
             raise ConfigError(f"{spec.key} contains an INI-reserved character")
-    if spec.key == "BACKUP_TIME":
+    if spec.key in {"BACKUP_TIME", "UPDATE_TIME"}:
         return normalize_backup_schedule(value, key=spec.key)
     return value
 
