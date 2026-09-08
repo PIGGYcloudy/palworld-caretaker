@@ -18,6 +18,8 @@ from .config import load_config
 
 
 def prepare_config(repository: Path):
+    import re
+
     directory = repository / "config"
     directory.mkdir(exist_ok=True)
     for name in ("caretaker.env", "server.env", "secrets.env"):
@@ -34,12 +36,17 @@ def prepare_config(repository: Path):
         text = secret_file.read_text(encoding="utf-8")
         text = text.replace(config.values["ADMIN_PASSWORD"], secrets.token_hex(24))
         secret_file.write_text(text, encoding="utf-8")
+    # Only choose the per-user location when no path was explicitly supplied.
+    sources = "\n".join(p.read_text(encoding="utf-8-sig") for p in directory.glob("*.env"))
+    # A Windows launcher always opens the loopback URL.  Make that local-only
+    # path passwordless by default, including installations whose generated
+    # ADMIN_PASSWORD predates this setting.  An explicit true/false setting or
+    # a dedicated web password is still respected by the web server.
+    if not re.search(r"(?m)^\s*PALWORLD_WEB_LOCAL_PASSWORDLESS\s*=", sources):
         with base.open("a", encoding="utf-8", newline="\n") as output:
             output.write("\nPALWORLD_WEB_LOCAL_PASSWORDLESS=true\n")
         config = load_config(directory)
-    # Only choose the per-user location when no path was explicitly supplied.
-    sources = "\n".join(p.read_text(encoding="utf-8-sig") for p in directory.glob("*.env"))
-    import re
+        sources = "\n".join(p.read_text(encoding="utf-8-sig") for p in directory.glob("*.env"))
     if not re.search(r"(?m)^\s*PALWORLD_INSTALL_ROOT\s*=", sources):
         root = repository / "data"
         with base.open("a", encoding="utf-8", newline="\n") as output:
