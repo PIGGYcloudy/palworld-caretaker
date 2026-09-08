@@ -28,18 +28,15 @@ from palworld_caretaker.web import WebDependencies, WebUIError
 
 
 class PortablePathTests(unittest.TestCase):
-    def test_double_click_launcher_checks_python_starts_service_and_opens_panel(self):
-        launchers = list(Path(__file__).parents[1].glob("*.bat"))
-        self.assertGreaterEqual(len(launchers), 1)
-        for path in launchers:
-            launcher = path.read_text(encoding="utf-8")
-            self.assertIn("for %%F in (caretaker.env server.env secrets.env)", launcher)
-            self.assertIn('copy /Y "%CONFIG_DIR%\\%%F.example" "%CONFIG_DIR%\\%%F"', launcher)
-            self.assertIn("import palworld_caretaker", launcher)
-            self.assertIn("-m pip install -e", launcher)
-            self.assertIn("palworld-service.ps1", launcher)
-            self.assertIn("/healthz", launcher)
-            self.assertIn("http://127.0.0.1:%PORT%/", launcher)
+    def test_double_click_launchers_use_checkout_python_module(self):
+        for name in ("start-caretaker.bat", "啟動伺服器與管理面板.bat"):
+            launcher = (Path(__file__).parents[1] / name).read_text(encoding="utf-8")
+            self.assertIn('set "PYTHONPATH=%~dp0src"', launcher)
+            self.assertIn("DisableDelayedExpansion", launcher)
+            self.assertIn("py -3 -m palworld_caretaker.windows_launcher", launcher)
+            self.assertIn("python -m palworld_caretaker.windows_launcher", launcher)
+            self.assertIn("if errorlevel 1 (", launcher)
+            self.assertIn("exit /b 1", launcher)
 
     def test_windows_renderer_covers_all_world_schema_settings(self):
         from palworld_caretaker.settings import SETTING_SPECS
@@ -59,13 +56,6 @@ class PortablePathTests(unittest.TestCase):
         self.assertIn("[System.IO.File]::WriteAllText", backup)
         self.assertIn("[System.Text.UTF8Encoding]::new($false)", backup)
         self.assertNotIn("utf8NoBOM", backup)
-
-    def test_launchers_quote_elevated_script_and_config_paths(self):
-        for name in ("start-caretaker.bat", "啟動伺服器與管理面板.bat"):
-            script = (Path(__file__).parents[1] / name).read_text()
-            self.assertIn("DisableDelayedExpansion", script)
-            for variable in ("CARETAKER_SERVICE_SCRIPT", "CARETAKER_SERVICE_CONFIG_DIR"):
-                self.assertIn(f"([string][char]34+$env:{variable}+[char]34)", script)
 
     def test_native_path_normalizes_current_platform_separators(self):
         value = native_path("alpha/beta" if os.name == "nt" else "alpha/beta")
@@ -264,6 +254,12 @@ class WindowsPowerShellIntegrationTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="palworld windows space-")
         self.base = Path(self.temporary.name)
+        # Each test owns its lock; never use the machine's live server lock.
+        self.lock_environment = patch.dict(os.environ, {
+            "PALWORLD_OPERATION_LOCK_FILE": str(self.base / "operation.lock"),
+        })
+        self.lock_environment.start()
+        self.addCleanup(self.lock_environment.stop)
         self.repository = Path(__file__).parents[1]
         self.install = self.base / "install"
         self.server = self.install / "server"
@@ -297,7 +293,7 @@ class WindowsPowerShellIntegrationTests(unittest.TestCase):
             env.update(environment)
         return subprocess.run(
             ["pwsh", "-NoProfile", "-File", str(self.repository / "scripts" / "windows" / script), *arguments],
-            text=True, capture_output=True, check=False, timeout=30, env=env,
+            text=True, encoding="utf-8", capture_output=True, check=False, timeout=30, env=env,
         )
 
     def run_ps_command(self, command, *, environment=None):
@@ -306,7 +302,7 @@ class WindowsPowerShellIntegrationTests(unittest.TestCase):
             env.update(environment)
         return subprocess.run(
             ["pwsh", "-NoProfile", "-Command", command],
-            text=True, capture_output=True, check=False, timeout=30, env=env,
+            text=True, encoding="utf-8", capture_output=True, check=False, timeout=30, env=env,
         )
 
     def test_backup_restore_render_and_service_dry_run(self):
@@ -325,29 +321,6 @@ class WindowsPowerShellIntegrationTests(unittest.TestCase):
         lifecycle = self.run_ps("palworld-service.ps1", "-Action", "restart", "-ServiceName", "ignored", "-WhatIf")
         self.assertEqual(lifecycle.returncode, 0, lifecycle.stderr)
         self.assertIn("WHATIF restart ignored", lifecycle.stdout)
-
-    def test_launcher_passes_quoted_paths_to_start_process(self):
-        for name in ("start-caretaker.bat", "啟動伺服器與管理面板.bat"):
-            launcher = (self.repository / name).read_text()
-            line = next(line for line in launcher.splitlines() if "$p=Start-Process" in line)
-            command = line.split('-Command "', 1)[1][:-1]
-            script_path = str(self.base / "server tools's" / "palworld-service.ps1")
-            config_path = str(self.base / "config with spaces")
-            mock = """function Start-Process {
-                param($FilePath, $ArgumentList, $Verb, [switch]$Wait, [switch]$PassThru)
-                [Console]::WriteLine((ConvertTo-Json -InputObject @($ArgumentList) -Compress))
-                return @{ExitCode=0}
-            }
-            """
-            result = self.run_ps_command(mock + command, environment={
-                "CARETAKER_SERVICE_SCRIPT": script_path,
-                "CARETAKER_SERVICE_CONFIG_DIR": config_path,
-            })
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(json.loads(result.stdout), [
-                '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', f'"{script_path}"',
-                '-Action', 'start', '-ConfigDir', f'"{config_path}"',
-            ])
 
     def test_render_merges_world_settings_and_preserves_other_sections(self):
         ini = self.settings_dir / "PalWorldSettings.ini"
