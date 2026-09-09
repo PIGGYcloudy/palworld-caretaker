@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
+import hashlib
 import logging
 import math
 import os
@@ -24,10 +26,12 @@ from discord.ext import tasks
 from palworld_caretaker import (
     ApiError, AuditLog, BackupEngine, CaretakerConfig, RESTClient, RestCommandChannel,
     ServerDiagnostics, ServerLifecycle, ServiceState, SnapshotError,
-    SystemMetrics, SystemdServiceController, collect_system_metrics, load_config,
+    SteamCMD, SystemMetrics, SystemdServiceController, WorldError, WorldManager,
+    collect_system_metrics, load_config,
 )
 from palworld_caretaker.container import SupervisorControlClient, container_mode
-from palworld_caretaker.service import ContainerCommandChannel, ContainerServiceController
+from palworld_caretaker.service import (ContainerCommandChannel, ContainerServiceController,
+                                        WindowsServiceController)
 
 
 CONFIG_SOURCE = os.environ.get("PALWORLD_CONFIG", "/srv/palworld/config")
@@ -305,13 +309,27 @@ class BotDependencies:
     metrics_collector: Callable[[], SystemMetrics] | None = None
     memory_alert_tracker: MemoryAlertTracker | None = None
     supervisor: SupervisorControlClient | None = None
+    world_name: str = "default"
 
     @classmethod
-    def create(cls, config: CaretakerConfig) -> "BotDependencies":
+    def create(cls, config: CaretakerConfig, world_name: str = "default") -> "BotDependencies":
         api = RESTClient(config)
         supervisor = SupervisorControlClient() if container_mode() else None
+        service = (
+            ContainerServiceController(supervisor) if supervisor else
+            WindowsServiceController(
+                script_path=config.scripts_root / "windows" / "palworld-service.ps1",
+                config_dir=config.directory or config.config_root,
+                server_executable=config.server_root / "PalServer.exe",
+                service_name="PalServer" if world_name == "default" else
+                             "PalServer-" + hashlib.sha256(world_name.encode("utf-8")).hexdigest()[:12],
+                api=api,
+            ) if os.name == "nt" else
+            SystemdServiceController("palworld.service" if world_name == "default" else
+                                     "palworld@" + hashlib.sha256(world_name.encode("utf-8")).hexdigest()[:12] + ".service")
+        )
         lifecycle = ServerLifecycle(
-            ContainerServiceController(supervisor) if supervisor else SystemdServiceController(),
+            service,
             ContainerCommandChannel(supervisor) if supervisor else RestCommandChannel(api), api=api,
         )
         dependencies = cls(
@@ -322,7 +340,7 @@ class BotDependencies:
                 backup_root=config.backup_root, local_backup_root=config.local_backup_root,
                 retention_count=config.backup_retention, backup_mount=config.backup_mount,
                 require_mount=config.require_backup_mount,
-            ), OperationCoordinator(), supervisor=supervisor,
+            ), OperationCoordinator(), supervisor=supervisor, world_name=world_name,
         )
         dependencies.memory_alert_tracker = MemoryAlertTracker(
             config.memory_alert_percent, config.memory_alert_cooldown_seconds,
@@ -335,6 +353,14 @@ class BotDependencies:
             return self.metrics_collector()
         return collect_system_metrics(self.config.server_root / "Pal/Saved")
 
+    @property
+    def idle_state_path(self) -> Path:
+        return STATE if self.world_name == "default" else self.config.state_root / "idle-state.json"
+
+    @property
+    def maintenance_state_path(self) -> Path:
+        return MAINTENANCE_STATE if self.world_name == "default" else self.config.state_root / "maintenance-state.json"
+
     def systemd_start(self, unit: str, *, wait: bool = True) -> subprocess.CompletedProcess[str]:
         """Only a fixed, sudoers-approved unit name is passed to systemd."""
         if self.supervisor is not None:
@@ -343,16 +369,58 @@ class BotDependencies:
                 raise RuntimeError("unsupported container operation")
             self.supervisor.request(action)
             return subprocess.CompletedProcess(["container-supervisor", action], 0, "", "")
+        if self.world_name != "default":
+            return self._direct_maintenance(update=unit == "palworld-maintenance.service")
         return self.runner(
             ["sudo", "-n", "/usr/bin/systemctl", "start", unit, "--wait" if wait else "--no-block"],
             capture_output=True, text=True, timeout=35 * 60 if wait else 15, check=False,
         )
+
+    def _direct_maintenance(self, *, update: bool) -> subprocess.CompletedProcess[str]:
+        """Back up/update a non-default instance without a fixed global service unit."""
+        state_path = self.maintenance_state_path
+        run_id = str(time.time_ns())
+        was_running = self.lifecycle.status().service == ServiceState.ACTIVE
+        try:
+            if was_running:
+                self.api.save()
+                self.graceful_stop()
+                deadline = time.monotonic() + int(self.config.values.get("PALWORLD_SHUTDOWN_WAIT_SECONDS", "30")) + 120
+                while time.monotonic() < deadline:
+                    if self.lifecycle.status().service in {ServiceState.INACTIVE, ServiceState.FAILED}:
+                        break
+                    time.sleep(1)
+                else:
+                    raise RuntimeError("world did not stop in time")
+            self.backups.create_snapshot()
+            if update:
+                executable = self.config.install_root / "steamcmd" / ("steamcmd.exe" if os.name == "nt" else "steamcmd.sh")
+                SteamCMD(executable, runner=self.runner).update(self.config.server_root)
+            if was_running:
+                self.lifecycle.start()
+            write_state(state_path, {"run_id": run_id, "phase": "completed",
+                                     "message": "世界更新完成。" if update else "世界備份完成。",
+                                     "updated_at": datetime.now(timezone.utc).isoformat()})
+            return subprocess.CompletedProcess(["caretaker", "maintenance", self.world_name], 0, "", "")
+        except Exception as exc:
+            write_state(state_path, {"run_id": run_id, "phase": "failed", "message": "世界維護失敗。",
+                                     "updated_at": datetime.now(timezone.utc).isoformat()})
+            try:
+                if was_running and self.lifecycle.status().service != ServiceState.ACTIVE:
+                    self.lifecycle.start()
+            except Exception:
+                pass
+            return subprocess.CompletedProcess(["caretaker", "maintenance", self.world_name], 1, "", str(exc))
 
     def graceful_stop(self) -> subprocess.CompletedProcess[str]:
         """Delegate save + shutdown to the root script holding the global lock."""
         if self.supervisor is not None:
             self.supervisor.request("stop")
             return subprocess.CompletedProcess(["container-supervisor", "stop"], 0, "", "")
+        if self.world_name != "default" or os.name == "nt":
+            wait = int(self.config.values.get("PALWORLD_SHUTDOWN_WAIT_SECONDS", "30"))
+            self.lifecycle.graceful_stop(wait, "Server shutdown requested from Discord.")
+            return subprocess.CompletedProcess(["caretaker", "stop", self.world_name], 0, "", "")
         return self.runner(
             ["sudo", "-n", str(self.config.scripts_root / "graceful-stop-palworld.sh")],
             capture_output=True, text=True, timeout=8 * 60, check=False,
@@ -370,6 +438,9 @@ class BotDependencies:
                 return "active" if self.supervisor.request("status").get("maintenance") else "inactive"
             except RuntimeError:
                 return None
+        if self.world_name != "default":
+            phase = read_state(self.maintenance_state_path).get("phase")
+            return "active" if phase in {"starting", "stopping", "backup", "updating", "restarting"} else "inactive"
         try:
             result = self.runner(
                 ["sudo", "-n", "/usr/bin/systemctl", "is-active", "palworld-maintenance.service"],
@@ -400,22 +471,46 @@ class BotDependencies:
         if self.supervisor is not None:
             self.supervisor.request("start")
             return subprocess.CompletedProcess(["container-supervisor", "start"], 0, "", "")
+        if self.world_name != "default" or os.name == "nt":
+            try:
+                self.lifecycle.start()
+                return subprocess.CompletedProcess(["caretaker", "start", self.world_name], 0, "", "")
+            except RuntimeError as exc:
+                return subprocess.CompletedProcess(["caretaker", "start", self.world_name], 1, "", str(exc))
         return self.runner(
             ["sudo", "-n", "/usr/local/sbin/palworld-control", "start"],
             capture_output=True, text=True, timeout=130, check=False,
         )
 
 
+class _BotWorldDependencies:
+    """Resolve the selected world independently for each Discord interaction task."""
+
+    def __init__(self, manager: WorldManager[BotDependencies]):
+        self.manager = manager
+        self._selected: ContextVar[str | None] = ContextVar("discord_world", default=None)
+
+    def select(self, name: str | None) -> str:
+        world = self.manager.world(name)
+        self._selected.set(world.name)
+        return world.name
+
+    def __getattr__(self, name: str):
+        return getattr(self.manager.dependencies(self._selected.get()), name)
+
+
 class PalGroup(app_commands.Group):
-    def __init__(self, dependencies: BotDependencies):
+    def __init__(self, dependencies: BotDependencies | WorldManager[BotDependencies]):
         super().__init__(name="pal", description="幻獸帕魯伺服器控制")
-        self.dependencies = dependencies
-        values = dependencies.config.values
-        self.guild_ids = ids(dependencies.config, "DISCORD_PALWORLD_ALLOWED_GUILD_IDS")
+        self.world_manager = dependencies if isinstance(dependencies, WorldManager) else None
+        base = dependencies.dependencies() if self.world_manager is not None else dependencies
+        self.dependencies = _BotWorldDependencies(dependencies) if self.world_manager is not None else base
+        values = base.config.values
+        self.guild_ids = ids(base.config, "DISCORD_PALWORLD_ALLOWED_GUILD_IDS")
         self.channels_all = values.get("DISCORD_PALWORLD_ALLOWED_CHANNEL_IDS", "").strip() == "*"
-        self.channel_ids = ids(dependencies.config, "DISCORD_PALWORLD_ALLOWED_CHANNEL_IDS", allow_wildcard=True)
-        self.role_ids = ids(dependencies.config, "DISCORD_PALWORLD_ALLOWED_ROLE_IDS")
-        self.admin_ids = ids(dependencies.config, "DISCORD_PALWORLD_ADMIN_ROLE_IDS")
+        self.channel_ids = ids(base.config, "DISCORD_PALWORLD_ALLOWED_CHANNEL_IDS", allow_wildcard=True)
+        self.role_ids = ids(base.config, "DISCORD_PALWORLD_ALLOWED_ROLE_IDS")
+        self.admin_ids = ids(base.config, "DISCORD_PALWORLD_ADMIN_ROLE_IDS")
 
     def permitted(self, interaction: discord.Interaction, *, admin: bool = False) -> bool:
         """Apply every boundary independently; an empty list always denies.
@@ -443,6 +538,43 @@ class PalGroup(app_commands.Group):
 
     async def deny(self, interaction: discord.Interaction) -> None:
         await interaction.response.send_message("你沒有權限在這裡使用此指令。", ephemeral=True)
+
+    async def select_world(self, interaction: discord.Interaction, world: str | None) -> str | None:
+        """Select an explicit world or the persisted default before command work starts."""
+        if self.world_manager is None:
+            if world not in {None, "", "default"}:
+                await interaction.response.send_message(f"找不到世界：{world}", ephemeral=True)
+                return None
+            return "default"
+        try:
+            assert isinstance(self.dependencies, _BotWorldDependencies)
+            return self.dependencies.select(world.strip() if isinstance(world, str) and world.strip() else None)
+        except WorldError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+            return None
+
+    @app_commands.command(name="worlds", description="查看所有世界名稱與預設世界")
+    async def worlds(self, interaction: discord.Interaction):
+        if not self.permitted(interaction): return await self.deny(interaction)
+        if self.world_manager is None:
+            return await interaction.response.send_message("世界：`default`（預設）", ephemeral=True)
+        rows = [f"`{name}`" + ("（預設）" if name == self.world_manager.default_world else "")
+                for name in self.world_manager.names()]
+        await interaction.response.send_message("世界列表：\n" + "\n".join(rows), ephemeral=True)
+
+    @app_commands.command(name="set-default", description="設定省略 world 參數時使用的預設世界（管理員）")
+    @app_commands.describe(world="要設為預設的世界名稱")
+    async def set_default_world(self, interaction: discord.Interaction, world: str):
+        if not self.permitted(interaction, admin=True): return await self.deny(interaction)
+        if self.world_manager is None:
+            if world != "default":
+                return await interaction.response.send_message(f"找不到世界：{world}", ephemeral=True)
+        else:
+            try:
+                self.world_manager.set_default(world.strip())
+            except WorldError as exc:
+                return await interaction.response.send_message(str(exc), ephemeral=True)
+        await interaction.response.send_message(f"預設世界已設為 `{world}`。", ephemeral=True)
 
     async def announce(self, message: str) -> bool:
         try:
@@ -491,9 +623,10 @@ class PalGroup(app_commands.Group):
             await interaction.followup.send("玩家操作失敗；請確認玩家名稱或 ID 與伺服器狀態。", ephemeral=True)
 
     @app_commands.command(name="announce", description="發送遊戲內公告（管理員）")
-    @app_commands.describe(message="公告內容")
-    async def announce_command(self, interaction: discord.Interaction, message: str):
+    @app_commands.describe(message="公告內容", world="世界名稱；省略時使用預設世界")
+    async def announce_command(self, interaction: discord.Interaction, message: str, world: str | None = None):
         if not self.permitted(interaction, admin=True): return await self.deny(interaction)
+        if await self.select_world(interaction, world) is None: return
         await interaction.response.defer(thinking=True)
         try:
             async with self.dependencies.coordinator.hold(interaction.user.id, "announce"):
@@ -510,15 +643,17 @@ class PalGroup(app_commands.Group):
             await interaction.followup.send("公告未送出；請確認伺服器 REST API 狀態。", ephemeral=True)
 
     @app_commands.command(name="kick", description="踢出在線玩家（管理員）")
-    @app_commands.describe(player_name_or_id="玩家名稱或 user/Steam ID", reason="可選原因")
-    async def kick(self, interaction: discord.Interaction, player_name_or_id: str, reason: str = ""):
+    @app_commands.describe(player_name_or_id="玩家名稱或 user/Steam ID", reason="可選原因", world="世界名稱；省略時使用預設世界")
+    async def kick(self, interaction: discord.Interaction, player_name_or_id: str, reason: str = "", world: str | None = None):
         if not self.permitted(interaction, admin=True): return await self.deny(interaction)
+        if await self.select_world(interaction, world) is None: return
         await self._moderate_player(interaction, "kick", player_name_or_id, reason)
 
     @app_commands.command(name="ban", description="封鎖玩家（管理員）")
-    @app_commands.describe(player_name_or_id="玩家名稱或 user/Steam ID", reason="可選原因")
-    async def ban(self, interaction: discord.Interaction, player_name_or_id: str, reason: str = ""):
+    @app_commands.describe(player_name_or_id="玩家名稱或 user/Steam ID", reason="可選原因", world="世界名稱；省略時使用預設世界")
+    async def ban(self, interaction: discord.Interaction, player_name_or_id: str, reason: str = "", world: str | None = None):
         if not self.permitted(interaction, admin=True): return await self.deny(interaction)
+        if await self.select_world(interaction, world) is None: return
         await self._moderate_player(interaction, "ban", player_name_or_id, reason)
 
     async def operation_error(self, interaction: discord.Interaction, exc: RuntimeError) -> None:
@@ -570,8 +705,10 @@ class PalGroup(app_commands.Group):
             )
 
     @app_commands.command(name="start", description="啟動幻獸帕魯伺服器")
-    async def start(self, interaction: discord.Interaction):
+    @app_commands.describe(world="世界名稱；省略時使用預設世界")
+    async def start(self, interaction: discord.Interaction, world: str | None = None):
         if not self.permitted(interaction): return await self.deny(interaction)
+        if await self.select_world(interaction, world) is None: return
         await interaction.response.defer(thinking=True)
         try:
             async with self.dependencies.coordinator.hold(interaction.user.id, "start"):
@@ -600,27 +737,35 @@ class PalGroup(app_commands.Group):
             await self.operation_error(interaction, exc)
 
     @app_commands.command(name="status", description="查看幻獸帕魯伺服器狀態")
-    @app_commands.describe(section="all：總覽；resources：主機資源；game：遊戲服務；players：在線玩家")
+    @app_commands.describe(section="all：總覽；resources：主機資源；game：遊戲服務；players：在線玩家",
+                           world="世界名稱；省略時使用預設世界")
     @app_commands.choices(section=[
         app_commands.Choice(name="all（完整總覽）", value="all"),
         app_commands.Choice(name="resources（主機資源）", value="resources"),
         app_commands.Choice(name="game（遊戲服務）", value="game"),
         app_commands.Choice(name="players（在線玩家）", value="players"),
     ])
-    async def status(self, interaction: discord.Interaction, section: str = "all"):
+    async def status(self, interaction: discord.Interaction, section: str = "all", world: str | None = None):
         if not self.permitted(interaction): return await self.deny(interaction)
+        selected = await self.select_world(interaction, world)
+        if selected is None: return
         # The app-command choices constrain this in Discord.  Retain a
         # fail-safe guard for direct calls and test harnesses.
         if section not in {"all", "resources", "game", "players"}:
             return await interaction.response.send_message("未知的狀態區段。", ephemeral=True)
         status = await asyncio.to_thread(self.dependencies.lifecycle.status)
         metrics = None if section == "players" else await asyncio.to_thread(self.dependencies.system_metrics)
-        embed = status_embed(section, status, metrics, self.dependencies.config.values, read_state(STATE))
+        idle_state = read_state(self.dependencies.idle_state_path)
+        embed = status_embed(section, status, metrics, self.dependencies.config.values, idle_state)
+        if self.world_manager is not None:
+            embed.title = f"{selected}｜{embed.title}"
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="players", description="查看目前在線玩家")
-    async def players(self, interaction: discord.Interaction):
+    @app_commands.describe(world="世界名稱；省略時使用預設世界")
+    async def players(self, interaction: discord.Interaction, world: str | None = None):
         if not self.permitted(interaction): return await self.deny(interaction)
+        if await self.select_world(interaction, world) is None: return
         status = await asyncio.to_thread(self.dependencies.lifecycle.status)
         if not status.running: return await interaction.response.send_message("幻獸帕魯伺服器目前未啟動。")
         if status.players is None: return await interaction.response.send_message("伺服器正在執行，但玩家狀態目前未知。")
@@ -628,9 +773,10 @@ class PalGroup(app_commands.Group):
         await interaction.response.send_message(text)
 
     @app_commands.command(name="stop", description="安全存檔並停止伺服器（管理員）")
-    @app_commands.describe(confirm="必須勾選確認")
-    async def stop(self, interaction: discord.Interaction, confirm: bool):
+    @app_commands.describe(confirm="必須勾選確認", world="世界名稱；省略時使用預設世界")
+    async def stop(self, interaction: discord.Interaction, confirm: bool, world: str | None = None):
         if not self.permitted(interaction, admin=True): return await self.deny(interaction)
+        if await self.select_world(interaction, world) is None: return
         if not confirm: return await interaction.response.send_message("請將 confirm 設為 true 才會關服。", ephemeral=True)
         await interaction.response.defer(thinking=True)
         try:
@@ -655,8 +801,10 @@ class PalGroup(app_commands.Group):
             await interaction.followup.send("存檔或關服失敗；已取消後續動作，請管理員查看紀錄。")
 
     @app_commands.command(name="backup", description="建立一次原子化安全備份（管理員）")
-    async def backup(self, interaction: discord.Interaction):
+    @app_commands.describe(world="世界名稱；省略時使用預設世界")
+    async def backup(self, interaction: discord.Interaction, world: str | None = None):
         if not self.permitted(interaction, admin=True): return await self.deny(interaction)
+        if await self.select_world(interaction, world) is None: return
         await interaction.response.defer(thinking=True)
         try:
             async with self.dependencies.coordinator.hold(interaction.user.id, "backup"):
@@ -680,8 +828,10 @@ class PalGroup(app_commands.Group):
             await interaction.followup.send("備份失敗或快照驗證失敗；請管理員查看服務紀錄。")
 
     @app_commands.command(name="backups", description="列出最近的備份快照")
-    async def backups(self, interaction: discord.Interaction):
+    @app_commands.describe(world="世界名稱；省略時使用預設世界")
+    async def backups(self, interaction: discord.Interaction, world: str | None = None):
         if not self.permitted(interaction): return await self.deny(interaction)
+        if await self.select_world(interaction, world) is None: return
         try:
             snapshots = await asyncio.to_thread(self.dependencies.backups.list_snapshots)
             if not snapshots: return await interaction.response.send_message("目前沒有可用的備份快照。", ephemeral=True)
@@ -691,11 +841,14 @@ class PalGroup(app_commands.Group):
             await interaction.response.send_message("無法安全讀取備份快照清單。", ephemeral=True)
 
     @app_commands.command(name="diagnose", description="快速查看伺服器健康診斷（管理員）")
-    async def diagnose(self, interaction: discord.Interaction):
+    @app_commands.describe(world="世界名稱；省略時使用預設世界")
+    async def diagnose(self, interaction: discord.Interaction, world: str | None = None):
         if not self.permitted(interaction, admin=True): return await self.deny(interaction)
+        selected = await self.select_world(interaction, world)
+        if selected is None: return
         diagnostic = await asyncio.to_thread(self.dependencies.diagnostics.collect)
         status = diagnostic.status
-        embed = discord.Embed(title="幻獸帕魯伺服器診斷", color=discord.Color.green() if status.api_reachable else discord.Color.orange())
+        embed = discord.Embed(title=f"{selected}｜幻獸帕魯伺服器診斷", color=discord.Color.green() if status.api_reachable else discord.Color.orange())
         embed.add_field(name="服務狀態", value=status.service.value, inline=True)
         embed.add_field(name="REST API", value="可連線" if status.api_reachable else "無法連線", inline=True)
         embed.add_field(name="在線玩家", value="未知" if status.players is None else str(len(status.players)), inline=True)
@@ -704,15 +857,17 @@ class PalGroup(app_commands.Group):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="update", description="備份並更新幻獸帕魯伺服器（管理員）")
-    @app_commands.describe(confirm="必須勾選確認")
-    async def update(self, interaction: discord.Interaction, confirm: bool):
+    @app_commands.describe(confirm="必須勾選確認", world="世界名稱；省略時使用預設世界")
+    async def update(self, interaction: discord.Interaction, confirm: bool, world: str | None = None):
         if not self.permitted(interaction, admin=True): return await self.deny(interaction)
+        if await self.select_world(interaction, world) is None: return
         if not confirm: return await interaction.response.send_message("請將 confirm 設為 true 才會開始備份與更新。", ephemeral=True)
         await interaction.response.defer(thinking=True)
         try:
             async with self.dependencies.coordinator.hold(interaction.user.id, "update"):
                 if await self.maintenance_guard(interaction): return
-                previous_run_id = read_state(MAINTENANCE_STATE).get("run_id")
+                maintenance_state = self.dependencies.maintenance_state_path
+                previous_run_id = read_state(maintenance_state).get("run_id")
                 countdown_result = await self.maintenance_countdown(interaction)
                 result = await asyncio.to_thread(self.dependencies.systemd_start, "palworld-maintenance.service", wait=False)
                 if result.returncode:
@@ -725,7 +880,7 @@ class PalGroup(app_commands.Group):
                 last_phase, received_run_state = "", False
                 deadline = time.monotonic() + 15 * 60
                 while True:
-                    state = read_state(MAINTENANCE_STATE)
+                    state = read_state(maintenance_state)
                     current_run_id = state.get("run_id")
                     embed, phase = maintenance_embed(state)
                     received_run_state = received_run_state or (
@@ -793,13 +948,15 @@ def maintenance_countdown_note(result: str) -> str | None:
 
 
 class Client(discord.Client):
-    def __init__(self, dependencies: BotDependencies):
+    def __init__(self, dependencies: BotDependencies,
+                 world_manager: WorldManager[BotDependencies] | None = None):
         intents = discord.Intents.none(); intents.guilds = True
         super().__init__(intents=intents)
         self.tree, self.dependencies = app_commands.CommandTree(self), dependencies
+        self.world_manager = world_manager
 
     async def setup_hook(self):
-        self.tree.add_command(PalGroup(self.dependencies))
+        self.tree.add_command(PalGroup(self.world_manager or self.dependencies))
         await self.tree.sync()
         self.memory_alert_loop.start()
 
@@ -878,7 +1035,8 @@ def main() -> None:
     config = config_from(CONFIG_SOURCE)
     token = config.values.get("DISCORD_BOT_TOKEN", "")
     if not token: raise RuntimeError("DISCORD_BOT_TOKEN is required")
-    Client(BotDependencies.create(config)).run(token, log_handler=None)
+    worlds = WorldManager(config, BotDependencies.create)
+    Client(worlds.dependencies(), worlds).run(token, log_handler=None)
 
 
 if __name__ == "__main__":

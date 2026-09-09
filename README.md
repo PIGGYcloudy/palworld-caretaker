@@ -228,6 +228,9 @@ timeout、認證失敗、連線錯誤、非 200、JSON 無法解析、缺少 `pl
 
 ## Discord 指令
 
+所有會讀取或操作伺服器的指令都可加上 `world:<世界名稱>`；省略時會使用目前的預設世界。
+使用 `/pal worlds` 查看世界名稱，並由管理員使用 `/pal set-default world:<世界名稱>` 變更預設世界。
+
 - `/pal start`：鎖定後啟動服務，等待 REST API ready；已在線時不重複啟動。
 - `/pal status [all|resources|game|players]`：Discord 會以 slash choices 提供區段，
   預設 `all`，並以 ephemeral rich embed 回覆。`all` 顯示服務、REST、玩家、idle
