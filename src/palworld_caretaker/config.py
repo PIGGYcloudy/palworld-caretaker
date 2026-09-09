@@ -53,7 +53,7 @@ DEFAULTS: dict[str, str] = {
     "PALWORLD_SERVICE_USER": "palworld", "PALWORLD_MANAGER_USER": "palworld-manager",
     "MAX_PLAYERS": "10", "BASE_CAMP_MAX_NUM_IN_GUILD": "10",
     "SERVER_NAME": "Palworld Dedicated Server", "SERVER_DESCRIPTION": "Private Palworld Dedicated Server",
-    "PUBLIC_PORT": "8211", "PALWORLD_REST_API_HOST": "127.0.0.1",
+    "PUBLIC_PORT": "8211", "QUERY_PORT": "27015", "PALWORLD_REST_API_HOST": "127.0.0.1",
     "PALWORLD_REST_API_PORT": "8212", "PALWORLD_REST_API_USERNAME": "admin",
     "PALWORLD_API_TIMEOUT_SECONDS": "5", "PALWORLD_IDLE_SHUTDOWN_ENABLED": "true",
     "PALWORLD_IDLE_TIMEOUT_MINUTES": "10", "PALWORLD_PLAYER_CHECK_INTERVAL_SECONDS": "60",
@@ -303,13 +303,16 @@ def _validate_core(values: Mapping[str, str]) -> None:
     if _bool(values, "PALWORLD_BACKUP_REQUIRE_MOUNT") and (mount is None or backup == mount or not _below(backup, mount)):
         raise ConfigError("PALWORLD_BACKUP_DIR must be below PALWORLD_BACKUP_MOUNT when mount checking is enabled")
     for key, low, high in (("MAX_PLAYERS", 1, 32), ("BASE_CAMP_MAX_NUM_IN_GUILD", 1, 10),
-                           ("PUBLIC_PORT", 1, 65535), ("PALWORLD_REST_API_PORT", 1, 65535),
+                           ("PUBLIC_PORT", 1, 65535), ("QUERY_PORT", 1, 65535),
+                           ("PALWORLD_REST_API_PORT", 1, 65535),
                            ("PALWORLD_API_TIMEOUT_SECONDS", 1, 30), ("BACKUP_RETENTION_COUNT", 1, 1000),
                            ("PALWORLD_MEMORY_ALERT_PERCENT", 10, 99), ("PALWORLD_MEMORY_ALERT_COOLDOWN_SECONDS", 60, 86400),
                            ("PALWORLD_SAVEGAMES_EXPORT_MAX_BYTES", 1, 64 * 1024 ** 3)):
         _integer(values, key, low, high)
-    if _integer(values, "PUBLIC_PORT", 1, 65535) == _integer(values, "PALWORLD_REST_API_PORT", 1, 65535):
-        raise ConfigError("PUBLIC_PORT and PALWORLD_REST_API_PORT must be different")
+    ports = [_integer(values, key, 1, 65535) for key in
+             ("PUBLIC_PORT", "QUERY_PORT", "PALWORLD_REST_API_PORT")]
+    if len(set(ports)) != len(ports):
+        raise ConfigError("PUBLIC_PORT, QUERY_PORT and PALWORLD_REST_API_PORT must be different")
     if values.get("PALWORLD_REST_API_HOST") != "127.0.0.1":
         raise ConfigError("PALWORLD_REST_API_HOST must be 127.0.0.1")
     normalize_web_bind_ip(values.get("PALWORLD_WEB_BIND_IP", ""))

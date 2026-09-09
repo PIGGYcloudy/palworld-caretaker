@@ -16,6 +16,7 @@ from .service import (
 from .settings import CaretakerOptions, SettingSpec, WorldSettings
 from .steamcmd import SteamCMD, SteamCMDError
 from .web import WebDependencies, WebServer, create_server
+from .worlds import World, WorldError, WorldManager
 
 __version__ = "0.9.0"
 
@@ -23,5 +24,5 @@ __all__ = [
     "__version__", "ActionResult", "ApiError", "AuditLog", "BackupEngine", "BackupManager", "BackupResult", "CaretakerConfig", "CaretakerOptions", "ConfigError",
     "ConfigSchema", "ContainerCommandChannel", "ContainerServiceController", "Metrics", "PalworldRESTClient", "Player", "RESTClient", "RestCommandChannel", "RestoreResult", "ServerDiagnostic",
     "ServerDiagnostics", "ServerLifecycle", "ServerStatus", "ServiceState", "SettingSpec", "SnapshotError", "SteamCMD", "SteamCMDError", "SystemMetrics", "SystemdServiceController", "WorldSettings",
-    "WebDependencies", "WebServer", "collect_system_metrics", "create_server", "load_config", "load_env", "sanitize",
+    "WebDependencies", "WebServer", "World", "WorldError", "WorldManager", "collect_system_metrics", "create_server", "load_config", "load_env", "sanitize",
 ]

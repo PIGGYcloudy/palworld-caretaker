@@ -27,6 +27,7 @@ import subprocess
 import tempfile
 import time
 import threading
+from contextvars import ContextVar
 from typing import Any, Callable, Mapping
 from urllib.parse import parse_qs, urlsplit
 
@@ -46,6 +47,7 @@ from .settings import (
 )
 from .settings_store import SettingsStore
 from .storage_locations import locations_payload
+from .worlds import WorldError, WorldManager
 
 
 DEFAULT_PORT = 8765
@@ -168,6 +170,25 @@ class SettingsValidationError(WebUIError):
     pass
 
 
+class _WorldDependencies:
+    """Route dependency access to the world selected in the current request thread."""
+
+    def __init__(self, manager: WorldManager["WebDependencies"]):
+        self.manager = manager
+        self._selected: ContextVar[str | None] = ContextVar("selected_world", default=None)
+
+    @property
+    def config(self) -> CaretakerConfig:
+        return self.manager.dependencies(self._selected.get()).config
+
+    def select(self, name: str | None) -> None:
+        self.manager.world(name)
+        self._selected.set(name)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.manager.dependencies(self._selected.get()), name)
+
+
 def format_bytes(value: int) -> str:
     """Format an untrusted size without returning a negative or arbitrary value."""
     amount = float(max(0, value))
@@ -239,9 +260,10 @@ class WebDependencies:
     audit: AuditLog | None = None
     supervisor: SupervisorControlClient | None = None
     native_maintenance: bool = False
+    world_name: str = "default"
 
     @classmethod
-    def create(cls, config: CaretakerConfig) -> "WebDependencies":
+    def create(cls, config: CaretakerConfig, world_name: str = "default") -> "WebDependencies":
         api = RESTClient(config)
         supervisor = SupervisorControlClient() if container_mode() else None
         service = (
@@ -250,9 +272,12 @@ class WebDependencies:
                 script_path=config.scripts_root / "windows" / "palworld-service.ps1",
                 config_dir=config.directory or config.config_root,
                 server_executable=config.server_root / "PalServer.exe",
+                service_name="PalServer" if world_name == "default" else
+                             "PalServer-" + hashlib.sha256(world_name.encode("utf-8")).hexdigest()[:12],
                 api=api,
             ) if os.name == "nt" else
-            SystemdServiceController()
+            SystemdServiceController("palworld.service" if world_name == "default" else
+                                     "palworld@" + hashlib.sha256(world_name.encode("utf-8")).hexdigest()[:12] + ".service")
         )
         lifecycle = ServerLifecycle(
             service,
@@ -273,6 +298,7 @@ class WebDependencies:
                 manager_user=config.values["PALWORLD_MANAGER_USER"]
             ),
             supervisor=supervisor,
+            world_name=world_name,
         )
 
     def maintenance_running(self) -> bool:
@@ -964,7 +990,8 @@ def _page(token: str) -> bytes:
 <html lang=\"zh-Hant\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">
 <title>Palworld Caretaker</title><style nonce={token}>
 :root{{color-scheme:dark;--ink:#edf5ee;--muted:#a9b9ae;--panel:#10231c;--panel-soft:#142b22;--line:#2c493c;--accent:#75dc87;--accent-deep:#399b56;--gold:#f2be61;--danger:#f08282;--shadow:0 18px 46px #02090666}}*{{box-sizing:border-box}}html{{scroll-behavior:smooth}}body{{font:16px 'Noto Sans TC','DM Sans',system-ui,sans-serif;margin:0;min-width:320px;color:var(--ink);background:radial-gradient(circle at 12% -8%,#2e674a 0,transparent 28rem),radial-gradient(circle at 100% 0,#263d30 0,transparent 27rem),#08130f;line-height:1.55}}.app-shell{{width:min(1160px,calc(100% - 2.5rem));margin:auto;padding:1.5rem 0 4rem}}.topbar{{display:flex;justify-content:space-between;align-items:center;gap:1.5rem;padding:1rem 0 1.7rem;border-bottom:1px solid #ffffff18}}.brand{{display:flex;align-items:center;gap:.8rem}}.brand-mark{{display:grid;place-items:center;width:2.7rem;height:2.7rem;border-radius:.85rem;background:linear-gradient(145deg,var(--accent),#2e8250);color:#092013;font-size:1.35rem;box-shadow:0 .5rem 1.5rem #0c4c2c66}}h1,h2{{font-family:'DM Sans','Noto Sans TC',sans-serif;letter-spacing:-.025em}}h1{{font-size:1.25rem;margin:0}}h2{{font-size:1.15rem;margin:0 0 .85rem}}.eyebrow{{margin:0;color:var(--muted);font-size:.82rem}}.topbar nav{{display:flex;gap:.35rem;flex-wrap:wrap;justify-content:flex-end}}.topbar a{{color:var(--muted);text-decoration:none;font-size:.88rem;padding:.4rem .6rem;border-radius:.45rem}}.topbar a:hover{{color:var(--ink);background:#ffffff10}}main{{padding-top:1.35rem}}section{{background:linear-gradient(135deg,#173026e8,#10221ae8);border:1px solid var(--line);border-radius:1rem;padding:1.25rem;margin:0;box-shadow:var(--shadow)}}.dashboard-grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1rem;margin:1rem 0}}.panel-wide{{grid-column:span 2}}.status-card{{position:relative;overflow:hidden;border-color:#49745b;background:linear-gradient(115deg,#1b3c2d,#10231b 72%)}}.status-card:after{{content:'';position:absolute;width:18rem;height:18rem;right:-8rem;top:-13rem;border:2rem solid #75dc8715;border-radius:50%;pointer-events:none}}.server-heading{{display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap}}.server-heading h2:before{{content:'●';font-size:.7rem;color:var(--accent);margin-right:.5rem;vertical-align:middle}}#status{{position:relative;z-index:1;padding:.85rem 1rem;border-radius:.7rem;background:#06140df0;border:1px solid #ffffff14;font-weight:500}}.connection-note{{color:var(--muted);font-size:.9rem}}button{{appearance:none;border:1px solid #4b715a;background:#214934;color:var(--ink);font:inherit;font-weight:600;border-radius:.55rem;padding:.55rem .85rem;margin:.2rem;cursor:pointer;transition:transform .16s ease,background .16s ease,border-color .16s ease}}button:hover:not(:disabled){{transform:translateY(-1px);background:#2a5b40;border-color:#70ae83}}button:focus-visible,input:focus-visible,select:focus-visible,a:focus-visible,summary:focus-visible{{outline:3px solid #f2be61aa;outline-offset:2px}}button:disabled{{cursor:wait;opacity:.6}}button[data-action='start'],button[type='submit'],#save-backup,#save-update{{background:linear-gradient(135deg,#57bd70,#2f8c4b);border-color:#78d98c;color:#07150c}}button[data-action='stop'],#restore,#maintenance-trigger{{background:#552b31;border-color:#a45c65}}button[data-action='restart']{{background:#60461e;border-color:#ad8645}}#message{{min-height:1.5rem;margin:.8rem 0 0;color:#bfeec8;font-weight:600}}input,select{{max-width:100%;font:inherit;color:var(--ink);background:#091710;border:1px solid #486857;border-radius:.45rem;padding:.48rem .58rem}}input[type='checkbox']{{accent-color:var(--accent);transform:scale(1.1)}}label{{display:inline-flex;align-items:center;gap:.45rem;flex-wrap:wrap}}#announce-form{{display:flex;gap:.5rem;align-items:end;flex-wrap:wrap}}#announce-form label{{display:grid;gap:.35rem;flex:1 1 16rem}}#announce-form input{{width:100%}}ul{{padding-left:1.25rem;margin:.5rem 0}}li{{margin:.35rem 0}}#backups,#audit,#players{{max-height:13rem;overflow:auto;padding-right:.45rem}}#backup-folder{{color:var(--muted);font-size:.82rem;overflow-wrap:anywhere}}.notice{{color:#ffd386;background:#5c421b55;border-left:3px solid var(--gold);padding:.45rem .65rem;border-radius:0 .4rem .4rem 0}}fieldset{{border:0;border-top:1px solid var(--line);margin:1rem 0;padding:1rem 0}}legend{{font-weight:700;color:#d2f0d9}}.setting-row{{display:grid;grid-template-columns:minmax(12rem,1fr) auto minmax(12rem,2fr) auto;gap:.5rem;align-items:center;margin:.55rem 0}}details{{border:1px solid var(--line);border-radius:.7rem;padding:.2rem .85rem;margin:.7rem 0;background:#0a1912a6}}summary{{cursor:pointer;font-weight:700;padding:.6rem 0}}#settings-diff{{display:block;white-space:pre-wrap;margin-top:.8rem;padding:.7rem;background:#07130d;border-radius:.5rem;color:var(--muted)}}.help{{position:relative;border:1px solid #789786;border-radius:50%;width:1.35rem;height:1.35rem;padding:0;margin:0;background:transparent;color:#d7eadb;font-weight:700;line-height:1;cursor:help}}.help-tooltip{{display:none;position:absolute;z-index:2;left:calc(100% + .45rem);top:-.5rem;width:min(21rem,70vw);padding:.55rem;border-radius:.35rem;background:#020806;color:#fff;font-weight:400;font-size:.875rem;line-height:1.35;text-align:left;box-shadow:0 .2rem .7rem #0008}}.help:hover .help-tooltip,.help:focus .help-tooltip{{display:block}}.reset-setting{{white-space:nowrap;background:transparent;color:var(--muted)}}.onboarding{{margin-bottom:1rem;border-color:#ad8645;background:linear-gradient(120deg,#463419,#1b2d20)}}.onboarding form,.advanced-panel form{{display:grid;gap:.7rem}}.muted{{color:var(--muted)}}@media(max-width:720px){{.app-shell{{width:min(100% - 1.25rem,1160px);padding-top:.5rem}}.topbar{{align-items:flex-start;flex-direction:column;gap:.8rem;padding-bottom:1rem}}.topbar nav{{justify-content:flex-start}}.dashboard-grid{{grid-template-columns:1fr}}.panel-wide{{grid-column:auto}}section{{padding:1rem}}.setting-row{{grid-template-columns:1fr auto}}.setting-row input,.setting-row select{{grid-column:1/-1}}.help-tooltip{{left:0;top:calc(100% + .35rem)}}}}
-</style></head><body><div class=\"app-shell\"><header class=\"topbar\"><div class=\"brand\"><div class=\"brand-mark\" aria-hidden=\"true\">◆</div><div><h1>Palworld Caretaker</h1><p class=\"eyebrow\">你的伺服器控制台</p></div></div><nav aria-label=\"頁面導覽\"><a href=\"#overview\">總覽</a><a href=\"#storage\">儲存位置</a><a href=\"#operations\">維護</a><a href=\"#world-settings\">世界設定</a><a href=\"#integrations\">整合</a></nav></header><main><p class=\"eyebrow muted\">受認證的管理介面；請只透過受信任的本機、LAN 或 VPN 網路使用。</p>
+</style><style nonce={token}>.world-panel{{margin:.9rem 0 1rem}}.world-heading{{display:flex;justify-content:space-between;align-items:center;gap:1rem}}.world-list{{display:grid;grid-template-columns:repeat(auto-fit,minmax(16rem,1fr));gap:.7rem;margin-top:.8rem}}.world-card{{border:1px solid var(--line);border-radius:.7rem;padding:.8rem;background:#091710}}.world-card.selected{{border-color:var(--accent);box-shadow:0 0 0 2px #75dc8733}}.world-card h3{{margin:0 0 .35rem}}.world-card p{{margin:.25rem 0;color:var(--muted);font-size:.88rem}}</style></head><body><div class=\"app-shell\"><header class=\"topbar\"><div class=\"brand\"><div class=\"brand-mark\" aria-hidden=\"true\">◆</div><div><h1>Palworld Caretaker</h1><p class=\"eyebrow\">你的伺服器控制台</p></div></div><nav aria-label=\"頁面導覽\"><a href=\"#worlds\">世界</a><a href=\"#overview\">總覽</a><a href=\"#storage\">儲存位置</a><a href=\"#operations\">維護</a><a href=\"#world-settings\">世界設定</a><a href=\"#integrations\">整合</a></nav></header><main><p class=\"eyebrow muted\">目前選擇：<strong id=\"selected-world\">讀取中…</strong></p>
+<section id=\"worlds\" class=\"world-panel\"><header class=\"world-heading\"><div><h2>世界列表</h2><p class=\"muted\">選擇世界後，下方會顯示該世界的設定、玩家與快照。</p></div><button id=\"create-world\">＋ 新建世界</button></header><div id=\"world-list\" class=\"world-list\">讀取中…</div></section>
 <section id=\"onboarding\" class=\"onboarding\" hidden><h2>首次開服精靈</h2><p>伺服器密碼可留白，供公開社群伺服器使用；系統不會隨機生成密碼。未設定面板密碼時，本機 loopback 面板可直接使用。</p><form id=\"onboarding-form\"><p><label>伺服器名稱 <input name=\"server_name\" maxlength=\"80\" required></label></p><p><label>伺服器密碼（可留白） <input name=\"server_password\" type=\"password\"></label></p><p><label>自動備份排程 <select name=\"backup_schedule\" id=\"wizard-backup-schedule\"><option value=\"daily\">每天指定時間</option><option value=\"custom\">自訂間隔</option><option value=\"off\">關閉自動備份</option></select></label> <label id=\"wizard-interval\" hidden>每 <input id=\"wizard-interval-count\" type=\"number\" min=\"1\" max=\"365\" value=\"2\"> <select id=\"wizard-interval-unit\"><option value=\"h\">小時</option><option value=\"d\">天</option></select></label> <label id=\"wizard-daily-time\">每天時間 <input name=\"backup_daily_time\" type=\"time\" value=\"04:30\"></label></p><p><label>備份保留數 <input name=\"backup_retention_count\" type=\"number\" min=\"1\" max=\"1000\" value=\"14\" required></label></p><p><label>面板範圍 <select name=\"bind_mode\" id=\"wizard-bind\"><option value=\"local\">本機 (127.0.0.1)</option><option value=\"lan\">家中區網 (0.0.0.0)</option></select></label></p><p id=\"wizard-lan\" hidden><label>家中區網面板網址 <input name=\"lan_origin\" placeholder=\"http://192.168.1.20:8765\"></label><br><span class=\"notice\">僅限可信任 LAN/VPN，勿公開到網際網路。</span></p><button type=\"submit\">完成首次設定</button></form></section>
 <section id=\"overview\" class=\"status-card\"><header class=\"server-heading\"><h2>伺服器狀態</h2><div><button data-action=\"start\">啟動</button><button data-action=\"stop\">關閉</button><button data-action=\"restart\">重啟</button></div></header><div id=\"status\">讀取中…</div><p>遊戲連接埠：<span id=\"game-port\">讀取中…</span>（UDP）</p><p>伺服器密碼：<input id=\"game-password\" type=\"password\" value=\"••••••••\" readonly aria-label=\"伺服器密碼\"><button id=\"toggle-game-password\">顯示密碼</button><button id=\"copy-game-password\">複製密碼</button></p><p class=\"connection-note\">透過 Hamachi 連線時，請在遊戲輸入主機的 Hamachi IPv4 位址與上述連接埠。本機面板位址不限制遊戲連線。</p><p id=\"message\" role=\"status\"></p></section>
 <section id=\"storage\" class=\"panel-wide\"><h2>儲存位置</h2><p class=\"muted\">使用既有設定的位置；此處僅供查看與複製。</p><div id=\"storage-locations\">讀取中…</div></section>
@@ -973,9 +1000,13 @@ def _page(token: str) -> bytes:
 <section><h2>SaveGames 匯出</h2><p class=\"muted\">會先要求伺服器存檔，再下載目前使用中的 SaveGames 壓縮檔。</p><button id=\"savegames-download\">下載 SaveGames</button></section><section><h2>自動更新</h2><p><label><input id=\"update-enabled\" type=\"checkbox\">啟用自動更新</label> <label>每天檢查時間 <input id=\"update-time\" type=\"time\" value=\"05:00\"></label></p><p class=\"muted\">依主機本地時間檢查並套用更新；執行前備份，完成後恢復原本的啟動狀態。</p><button id=\"save-update\">儲存更新排程</button><div id=\"maintenance\">讀取中…</div><button id=\"maintenance-trigger\">執行備份與更新</button></section><section class=\"panel-wide\"><h2>最近操作紀錄</h2><ul id=\"audit\"></ul></section></div>
 <section id=\"world-settings\"><h2>世界設定</h2><p id=\"restart-notice\" class=\"notice\" hidden>伺服器正在運行；儲存後必須重新啟動才會生效。</p><form id=\"settings-form\"><details open><summary>常用參數</summary><div id=\"common-settings\">讀取中…</div></details><details><summary>全部參數</summary><div id=\"settings-fields\">讀取中…</div></details><button type=\"button\" id=\"preview-settings\">預覽變更</button><button type=\"submit\">儲存設定</button></form><output id=\"settings-diff\" aria-live=\"polite\"></output></section>
 <div id=\"integrations\" class=\"dashboard-grid\"><section><h2>Discord 4 步嚮導</h2><ol><li>建立 Bot</li><li>填 Token</li><li>一鍵邀群</li><li>填頻道 ID</li></ol><form id=\"discord-form\"><label>Bot Token <input name=\"token\" type=\"password\" required></label><p><label>Application ID <input name=\"application_id\" inputmode=\"numeric\" pattern=\"[0-9]+\" required></label><button type=\"button\" id=\"discord-invite\">一鍵邀群</button></p><label>頻道 ID <input name=\"channel_id\" inputmode=\"numeric\" pattern=\"[0-9]+\" required></label><button type=\"submit\">儲存</button></form><p class=\"muted\">完整 guild／角色設定請看 GitHub 文件。</p></section><section class=\"advanced-panel\"><details><summary>進階設定</summary><p>預設為本機模式。家中區網 (0.0.0.0) 僅限可信任 LAN/VPN，勿公開到網際網路。</p><form id=\"advanced-network-form\"><label>面板範圍 <select name=\"bind_mode\" id=\"advanced-bind\"><option value=\"local\">本機 (127.0.0.1)</option><option value=\"lan\">家中區網 (0.0.0.0)</option></select></label><p id=\"advanced-lan\" hidden><label>家中區網面板網址 <input name=\"lan_origin\" placeholder=\"http://192.168.1.20:8765\"></label></p><button type=\"submit\">儲存網路設定</button></form></details></section></div></main></div>
-<script nonce={token}>const csrf={escaped_token};let wizardPassword=null;let wizardUsername='';
-const authenticatedFetch=(path,options={{}})=>{{const headers=new Headers(options.headers||{{}});if(wizardPassword!==null&&!headers.has('Authorization')){{const bytes=new TextEncoder().encode(wizardUsername+':'+wizardPassword);headers.set('Authorization','Basic '+btoa(Array.from(bytes,byte=>String.fromCharCode(byte)).join('')));}}return fetch(path,{{...options,headers}});}};
+<script nonce={token}>const csrf={escaped_token};let wizardPassword=null;let wizardUsername='';let selectedWorld=null;
+const authenticatedFetch=(path,options={{}})=>{{const headers=new Headers(options.headers||{{}});if(selectedWorld&&path.startsWith('/api/')&&!headers.has('X-Palworld-World'))headers.set('X-Palworld-World',selectedWorld);if(wizardPassword!==null&&!headers.has('Authorization')){{const bytes=new TextEncoder().encode(wizardUsername+':'+wizardPassword);headers.set('Authorization','Basic '+btoa(Array.from(bytes,byte=>String.fromCharCode(byte)).join('')));}}return fetch(path,{{...options,headers}});}};
 const request=async(path,options={{}})=>{{const r=await authenticatedFetch(path,options);const d=await r.json();if(!r.ok)throw Error(d.error||'操作失敗');return d;}};
+async function worldAction(name,action){{if((action==='stop'||action==='restart')&&!confirm(`確定要${{action==='stop'?'關閉':'重啟'}}世界 ${{name}}？`))return;try{{const data=await request('/api/'+action,{{method:'POST',headers:{{'Content-Type':'application/json','X-Palworld-CSRF':csrf,'X-Palworld-World':name}},body:'{{}}'}});document.querySelector('#message').textContent=data.message;await loadWorlds();if(name===selectedWorld)await refresh();}}catch(e){{document.querySelector('#message').textContent=e.message;}}}}
+async function selectWorld(name){{selectedWorld=name;document.querySelector('#selected-world').textContent=name;await loadWorlds();await Promise.all([refresh(),loadSettings().then(loadCommon),loadOnboarding()]);}}
+async function loadWorlds(){{try{{const data=await request('/api/worlds');if(!selectedWorld)selectedWorld=data.default_world;document.querySelector('#selected-world').textContent=selectedWorld;const root=document.querySelector('#world-list');root.replaceChildren(...data.worlds.map(world=>{{const card=document.createElement('article');card.className='world-card'+(world.name===selectedWorld?' selected':'');const title=document.createElement('h3');title.textContent=world.name+(world.default?'（預設）':'');const status=document.createElement('p');status.textContent=`狀態：${{world.service||'unknown'}}｜遊戲埠：${{world.public_port}}`;const select=document.createElement('button');select.textContent=world.name===selectedWorld?'已選擇':'選擇';select.disabled=world.name===selectedWorld;select.addEventListener('click',()=>selectWorld(world.name));const defaults=document.createElement('button');defaults.textContent='設為預設';defaults.disabled=world.default;defaults.addEventListener('click',async()=>{{try{{const result=await request('/api/worlds/default',{{method:'POST',headers:{{'Content-Type':'application/json','X-Palworld-CSRF':csrf}},body:JSON.stringify({{name:world.name}})}});document.querySelector('#message').textContent=result.message;await loadWorlds();}}catch(e){{document.querySelector('#message').textContent=e.message;}}}});card.append(title,status,select,defaults);for(const action of ['start','stop','restart']){{const button=document.createElement('button');button.textContent={{start:'啟動',stop:'關閉',restart:'重啟'}}[action];button.addEventListener('click',()=>worldAction(world.name,action));card.append(button);}}return card;}}));}}catch(e){{document.querySelector('#world-list').textContent=e.message;}}}}
+document.querySelector('#create-world').addEventListener('click',async()=>{{const name=prompt('新世界名稱：');if(!name)return;const button=document.querySelector('#create-world');button.disabled=true;try{{const data=await request('/api/worlds',{{method:'POST',headers:{{'Content-Type':'application/json','X-Palworld-CSRF':csrf}},body:JSON.stringify({{name}})}});document.querySelector('#message').textContent=data.message;await selectWorld(data.world.name);}}catch(e){{document.querySelector('#message').textContent=e.message;}}finally{{button.disabled=false;}}}});loadWorlds();
 const text=(v)=>v===null?'未知':String(v);
 const storageList=document.querySelector('#storage-locations');
 const locationButton=(label,handler)=>{{const button=document.createElement('button');button.type='button';button.textContent=label;button.addEventListener('click',handler);return button;}};
@@ -1124,12 +1155,19 @@ class _Handler(BaseHTTPRequestHandler):
         if self._auth_required():
             return
         request = urlsplit(self.path)
+        try:
+            self.server.select_world(self.headers.get("X-Palworld-World"))
+        except WorldError as exc:
+            self._error(HTTPStatus.NOT_FOUND, str(exc))
+            return
         if request.fragment:
             self._error(HTTPStatus.NOT_FOUND, "Not found.")
             return
         try:
             if request.path == "/" and not request.query:
                 self._send(HTTPStatus.OK, _page(self.server.csrf_token), "text/html; charset=utf-8")
+            elif request.path == "/api/worlds" and not request.query:
+                self._json(HTTPStatus.OK, self.server.worlds_payload())
             elif request.path == "/api/status" and not request.query:
                 self._json(HTTPStatus.OK, self.server.dependencies.status_payload())
             elif request.path == "/api/connection/password" and not request.query:
@@ -1212,6 +1250,33 @@ class _Handler(BaseHTTPRequestHandler):
         payload = self._mutation_payload()
         if request.query or request.fragment or payload is None:
             self._error(HTTPStatus.FORBIDDEN, "Request rejected.")
+            return
+        if request.path == "/api/worlds":
+            try:
+                name = payload.get("name")
+                if not isinstance(name, str):
+                    raise WorldError("請輸入世界名稱")
+                world = self.server.create_world(name)
+                self._json(HTTPStatus.CREATED, {"message": f"世界 {world.name} 已建立。", "world": world.payload()})
+            except WorldError as exc:
+                self._error(HTTPStatus.BAD_REQUEST, str(exc))
+            except (OSError, RuntimeError):
+                self._error(HTTPStatus.SERVICE_UNAVAILABLE, "建立世界失敗。")
+            return
+        if request.path == "/api/worlds/default":
+            try:
+                name = payload.get("name")
+                if not isinstance(name, str):
+                    raise WorldError("請選擇世界")
+                self.server.set_default_world(name)
+                self._json(HTTPStatus.OK, {"message": f"預設世界已設為 {name}。", "default_world": name})
+            except WorldError as exc:
+                self._error(HTTPStatus.BAD_REQUEST, str(exc))
+            return
+        try:
+            self.server.select_world(self.headers.get("X-Palworld-World"))
+        except WorldError as exc:
+            self._error(HTTPStatus.NOT_FOUND, str(exc))
             return
         if request.path == "/api/settings/preview":
             try:
@@ -1385,7 +1450,8 @@ class WebServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, address: tuple[str, int], dependencies: WebDependencies):
+    def __init__(self, address: tuple[str, int], dependencies: WebDependencies,
+                 world_manager: WorldManager[WebDependencies] | None = None):
         host, port = address
         try:
             host = normalize_web_bind_ip(host)
@@ -1397,7 +1463,9 @@ class WebServer(ThreadingHTTPServer):
         # the private export naming convention at process start is from a
         # previous crash or forced termination and is removed before serving.
         dependencies.scavenge_export_archives()
-        self.dependencies = dependencies
+        self.base_dependencies = dependencies
+        self.world_manager = world_manager
+        self.dependencies = _WorldDependencies(world_manager) if world_manager is not None else dependencies
         self.csrf_token = secrets.token_urlsafe(32)
         self.auth_username = dependencies.config.values["PALWORLD_WEB_UI_USERNAME"]
         self.auth_password = _web_auth_password(dependencies.config)
@@ -1445,9 +1513,47 @@ class WebServer(ThreadingHTTPServer):
         self.trusted_origins = tuple(sorted(origins))
         self.trusted_hosts = tuple(sorted(hosts))
 
+    def select_world(self, name: str | None) -> None:
+        if self.world_manager is None:
+            return
+        assert isinstance(self.dependencies, _WorldDependencies)
+        self.dependencies.select(name)
 
-def create_server(dependencies: WebDependencies, *, host: str | None = None, port: int = DEFAULT_PORT) -> WebServer:
-    return WebServer((dependencies.config.values["PALWORLD_WEB_BIND_IP"] if host is None else host, port), dependencies)
+    def worlds_payload(self) -> dict[str, object]:
+        if self.world_manager is None:
+            status = self.base_dependencies.status_payload()
+            return {"default_world": "default", "worlds": [{
+                "name": "default", "default": True,
+                "public_port": status["game_port"], "service": status["service"],
+                "api_reachable": status["api_reachable"],
+            }]}
+        payload = self.world_manager.list_payload()
+        worlds = payload["worlds"]
+        assert isinstance(worlds, list)
+        for world in worlds:
+            assert isinstance(world, dict)
+            try:
+                status = self.world_manager.dependencies(str(world["name"])).status_payload()
+                world.update(service=status["service"], api_reachable=status["api_reachable"])
+            except (OSError, RuntimeError):
+                world.update(service="unknown", api_reachable=False)
+        return payload
+
+    def create_world(self, name: str):
+        if self.world_manager is None:
+            raise WorldError("此面板未啟用多世界管理")
+        return self.world_manager.create(name)
+
+    def set_default_world(self, name: str) -> None:
+        if self.world_manager is None:
+            raise WorldError("此面板未啟用多世界管理")
+        self.world_manager.set_default(name)
+
+
+def create_server(dependencies: WebDependencies, *, host: str | None = None, port: int = DEFAULT_PORT,
+                  world_manager: WorldManager[WebDependencies] | None = None) -> WebServer:
+    return WebServer((dependencies.config.values["PALWORLD_WEB_BIND_IP"] if host is None else host, port),
+                     dependencies, world_manager)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1466,7 +1572,14 @@ def main(argv: list[str] | None = None) -> int:
         # the sole bind override, so a service process environment cannot mask
         # a later protected layer such as secrets.env.
         bind = args.bind if args.bind is not None else config.values["PALWORLD_WEB_BIND_IP"]
-        server = create_server(WebDependencies.create(config), host=bind, port=args.port)
+        try:
+            worlds: WorldManager[WebDependencies] | None = WorldManager(config, WebDependencies.create)
+        except (AttributeError, WorldError):
+            # Preserve embedders which intentionally construct an in-memory
+            # configuration without a persistent configuration directory.
+            worlds = None
+        dependencies = worlds.dependencies() if worlds is not None else WebDependencies.create(config)
+        server = create_server(dependencies, host=bind, port=args.port, world_manager=worlds)
         if os.name == "nt":
             from .scheduling import run_windows_schedules
             threading.Thread(target=run_windows_schedules, args=(server.dependencies, scheduler_stop), daemon=True).start()

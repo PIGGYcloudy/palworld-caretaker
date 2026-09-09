@@ -31,7 +31,10 @@ try {
         Assert-RealFile $executable 'Palworld server executable'
         & (Join-Path $PSScriptRoot 'render-settings.ps1') -ConfigDir $ConfigDir
         if (-not $?) { throw 'Could not render game settings.' }
-        Start-Process -FilePath $executable -WorkingDirectory $paths.Server -WindowStyle Hidden | Out-Null
+        $publicPort = Get-ConfigValue $config 'PUBLIC_PORT' '8211'
+        $queryPort = Get-ConfigValue $config 'QUERY_PORT' '27015'
+        Start-Process -FilePath $executable -WorkingDirectory $paths.Server -WindowStyle Hidden `
+            -ArgumentList @("-port=$publicPort", "-publicport=$publicPort", "-queryport=$queryPort") | Out-Null
         'STARTED'
         exit 0
     }

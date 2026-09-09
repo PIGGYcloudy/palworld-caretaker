@@ -115,7 +115,7 @@ DEFAULT_CONFIG: dict[str, str] = {
     "AUTO_RESET_WORKER_PAL_WHEN_SERVER_RESTART": "false",
     "SERVER_NAME": "Palworld Dedicated Server",
     "SERVER_DESCRIPTION": "Private Palworld Dedicated Server",
-    "PUBLIC_PORT": "8211",
+    "PUBLIC_PORT": "8211", "QUERY_PORT": "27015",
     "PALWORLD_REST_API_HOST": "127.0.0.1",
     "PALWORLD_REST_API_PORT": "8212",
     "PALWORLD_REST_API_USERNAME": "admin",
