@@ -276,7 +276,7 @@ class ManagerTests(unittest.TestCase):
     def test_config_rejects_malformed_web_authorities(self):
         for key, value, message in (
             ("PALWORLD_WEB_PUBLIC_ORIGIN", "https://bad.example/path", "HTTP\\(S\\) origins"),
-            ("PALWORLD_WEB_ALLOWED_HOSTS", "bad host", "host\[:port\]"),
+            ("PALWORLD_WEB_ALLOWED_HOSTS", "bad host", r"host\[:port\]"),
         ):
             with self.subTest(key=key, value=value):
                 config = dict(DEFAULT_CONFIG)

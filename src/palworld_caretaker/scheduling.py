@@ -47,13 +47,24 @@ def run_windows_schedules(dependencies, stop):
             dependencies.record_audit("scheduler", "failed")
 
 
+def scheduled_action(values, now: datetime | None = None) -> str:
+    """Return the systemd timer's action for this minute.
+
+    ``disabled`` is reported only when a disabled backup schedule would have
+    fired, so the minute timer does not log on every tick.
+    """
+    if schedule_slot(values.get("UPDATE_TIME", "off"), now) is not None:
+        return "update"
+    if schedule_slot(values.get("BACKUP_TIME", "off"), now) is None:
+        return "off"
+    if values.get("PALWORLD_BACKUP_SCHEDULE_ENABLED") == "false":
+        return "disabled"
+    return "backup"
+
+
 if __name__ == "__main__":
     import sys
     from .config import load_config
-    values = load_config(sys.argv[1]).values
-    if schedule_slot(values.get("UPDATE_TIME", "off")) is not None:
-        print("update")
-    elif values.get("PALWORLD_BACKUP_SCHEDULE_ENABLED") != "false" and schedule_slot(values.get("BACKUP_TIME", "off")) is not None:
-        print("backup")
-    else:
-        print("off")
+    # The shell passes its own clock so the timer and its log share one source.
+    now = datetime.strptime(sys.argv[2], "%Y-%m-%dT%H:%M") if len(sys.argv) > 2 else None
+    print(scheduled_action(load_config(sys.argv[1]).values, now))

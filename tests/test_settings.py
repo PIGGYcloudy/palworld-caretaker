@@ -140,7 +140,7 @@ class SettingsSchemaTests(unittest.TestCase):
         for key, value, message in (
             ("PALWORLD_WEB_PUBLIC_ORIGIN", "https://bad.example/path", "HTTP\\(S\\) origins"),
             ("PALWORLD_WEB_ALLOWED_ORIGINS", "https://bad.example/path", "HTTP\\(S\\) origins"),
-            ("PALWORLD_WEB_ALLOWED_HOSTS", "bad host", "host\[:port\]"),
+            ("PALWORLD_WEB_ALLOWED_HOSTS", "bad host", r"host\[:port\]"),
         ):
             with self.subTest(key=key, value=value):
                 values = next(self.values())
