@@ -59,7 +59,7 @@ class FakeAPI:
         return (Player("Alice", "steam-alice", "alice", ping=42, location="Forest"),)
 
     def metrics(self):
-        return Metrics({"cpu_usage": 34.5, "memory_usage": 123456})
+        return Metrics({"cpu_usage": 34.5, "memory_usage": 123456, "serverfps": 59, "uptime": 3600, "days": 12, "maxplayernum": 32})
 
 
 class FakeLifecycle:
@@ -253,7 +253,9 @@ class WebUITests(unittest.TestCase):
         payload = json.loads(raw)
         self.assertEqual(status, 200)
         self.assertEqual(payload["players"], ["Alice"])
-        self.assertEqual(payload["metrics"], {"cpu": 34.5, "memory": 123456})
+        self.assertEqual(payload["metrics"], {
+            "cpu": 34.5, "memory": 123456, "fps": 59, "uptime": 3600, "days": 12, "max_players": 32,
+        })
         self.assertNotIn("admin-secret-never-rendered", raw.decode())
 
         status, raw, _headers = self.request("/api/backups")

@@ -659,11 +659,21 @@ class WebDependencies:
         status = diagnostic.status
         cpu: int | float | None = None
         memory: int | float | None = None
+        # The official v1 /metrics reports FPS, uptime and in-game days rather
+        # than CPU/memory; keep both so the panel shows whatever is available.
+        fps: int | float | None = None
+        uptime: int | float | None = None
+        days: int | float | None = None
+        max_players: int | float | None = None
         if status.api_reachable:
             try:
                 values = self.api.metrics().values
                 cpu = _metric(values, ("cpu_usage", "cpuusage", "cpu", "server_cpu_usage"))
                 memory = _metric(values, ("memory_usage", "memoryusage", "memory", "used_memory"))
+                fps = _metric(values, ("serverfps",))
+                uptime = _metric(values, ("uptime",))
+                days = _metric(values, ("days",))
+                max_players = _metric(values, ("maxplayernum",))
             except ApiError:
                 pass
         return {
@@ -672,7 +682,10 @@ class WebDependencies:
             "running": status.running,
             "api_reachable": status.api_reachable,
             "players": list(status.players) if status.players is not None else None,
-            "metrics": {"cpu": cpu, "memory": memory},
+            "metrics": {
+                "cpu": cpu, "memory": memory, "fps": fps, "uptime": uptime,
+                "days": days, "max_players": max_players,
+            },
             "detail": redact_secrets(diagnostic.detail, self.config),
         }
 
