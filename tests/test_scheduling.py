@@ -44,7 +44,8 @@ class SchedulingTests(unittest.TestCase):
             self.assertIsNone(schedule_slot(schedule, due[0] + timedelta(minutes=1)))
 
     def test_windows_worker_deduplicates_update_and_backup(self):
-        dependencies = Mock()
+        dependencies = Mock(spec=WebDependencies)
+        dependencies.config = Mock()
         stop = Mock()
         stop.wait.side_effect = [False, False, True]
         values = {'UPDATE_TIME': 'daily-04:30', 'BACKUP_TIME': 'daily-04:30'}
@@ -52,7 +53,21 @@ class SchedulingTests(unittest.TestCase):
              patch('palworld_caretaker.scheduling.schedule_slot', return_value='today'):
             run_windows_schedules(dependencies, stop)
         dependencies.trigger_maintenance.assert_called_once()
-        dependencies.action.assert_not_called()
+        dependencies.perform.assert_not_called()
+
+    def test_windows_worker_runs_due_backup_through_web_dependencies(self):
+        # A spec'd mock catches calls to methods WebDependencies lacks; a bare
+        # Mock hid ``action()``, which killed the scheduler thread.
+        dependencies = Mock(spec=WebDependencies)
+        dependencies.config = Mock()
+        stop = Mock()
+        stop.wait.side_effect = [False, True]
+        values = {'UPDATE_TIME': 'off', 'BACKUP_TIME': 'daily-04:30'}
+        with patch('palworld_caretaker.config.load_config', return_value=SimpleNamespace(values=values)), \
+             patch('palworld_caretaker.scheduling.schedule_slot', side_effect=lambda s: None if s == 'off' else 'today'):
+            run_windows_schedules(dependencies, stop)
+        dependencies.perform.assert_called_once_with('backup')
+        dependencies.trigger_maintenance.assert_not_called()
 
     def native_dependencies(self, state=ServiceState.ACTIVE, returncode=0):
         config = SimpleNamespace(scripts_root=Path('/scripts'), directory=Path('/config'),

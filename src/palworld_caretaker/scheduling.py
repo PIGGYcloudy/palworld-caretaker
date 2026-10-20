@@ -26,7 +26,7 @@ def run_windows_schedules(dependencies, stop):
         try:
             values = load_config(dependencies.config.directory).values
             for key, action in (("UPDATE_TIME", dependencies.trigger_maintenance),
-                                ("BACKUP_TIME", lambda: dependencies.action("backup"))):
+                                ("BACKUP_TIME", lambda: dependencies.perform("backup"))):
                 schedule = values.get(key, "off")
                 if key == "BACKUP_TIME" and values.get("PALWORLD_BACKUP_SCHEDULE_ENABLED") == "false":
                     continue
