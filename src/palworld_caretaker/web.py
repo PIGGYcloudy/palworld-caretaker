@@ -29,7 +29,7 @@ import time
 import threading
 from contextvars import ContextVar
 from typing import Any, Callable, Mapping
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from .audit import AuditLog, sanitize
 from .backup import BackupEngine
@@ -232,6 +232,15 @@ def redact_secrets(text: str, config: CaretakerConfig) -> str:
         if secret:
             text = text.replace(secret, "***")
     return text
+
+
+def _world_header(value: str | None) -> str | None:
+    """Decode the browser's percent-encoded world name.
+
+    HTTP header values must be Latin-1, so the panel sends
+    ``encodeURIComponent(name)``; plain ASCII names decode to themselves.
+    """
+    return unquote(value, errors="replace") if value else value
 
 
 def _metric(values: Mapping[str, Any], names: tuple[str, ...]) -> int | float | None:
@@ -1105,7 +1114,7 @@ class _Handler(BaseHTTPRequestHandler):
             return
         request = urlsplit(self.path)
         try:
-            self.server.select_world(self.headers.get("X-Palworld-World"))
+            self.server.select_world(_world_header(self.headers.get("X-Palworld-World")))
         except WorldError as exc:
             self._error(HTTPStatus.NOT_FOUND, str(exc))
             return
@@ -1223,7 +1232,7 @@ class _Handler(BaseHTTPRequestHandler):
                 self._error(HTTPStatus.BAD_REQUEST, str(exc))
             return
         try:
-            self.server.select_world(self.headers.get("X-Palworld-World"))
+            self.server.select_world(_world_header(self.headers.get("X-Palworld-World")))
         except WorldError as exc:
             self._error(HTTPStatus.NOT_FOUND, str(exc))
             return
@@ -1491,6 +1500,11 @@ class WebServer(ThreadingHTTPServer):
     def create_world(self, name: str):
         if self.world_manager is None:
             raise WorldError("此面板未啟用多世界管理")
+        if os.name != "nt":
+            # systemd units, sudoers and the privileged scripts, like the
+            # Docker supervisor, only drive the default world's server, so
+            # an extra world's start/backup would act on the default one.
+            raise WorldError("目前只有 Windows 版支援建立多個世界；Linux 與 Docker 部署請使用單一世界。")
         return self.world_manager.create(name)
 
     def set_default_world(self, name: str) -> None:
@@ -1523,9 +1537,11 @@ def main(argv: list[str] | None = None) -> int:
         bind = args.bind if args.bind is not None else config.values["PALWORLD_WEB_BIND_IP"]
         try:
             worlds: WorldManager[WebDependencies] | None = WorldManager(config, WebDependencies.create)
-        except (AttributeError, WorldError):
+        except (AttributeError, WorldError, OSError):
             # Preserve embedders which intentionally construct an in-memory
             # configuration without a persistent configuration directory.
+            # The systemd unit's config root is read-only, so a missing
+            # worlds.json cannot be created there; run as a single world.
             worlds = None
         dependencies = worlds.dependencies() if worlds is not None else WebDependencies.create(config)
         server = create_server(dependencies, host=bind, port=args.port, world_manager=worlds)
