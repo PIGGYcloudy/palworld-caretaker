@@ -239,6 +239,13 @@ class WebUITests(unittest.TestCase):
         self.assertIn("儲存位置".encode(), page)
         self.assertIn(b"/api/locations", page)
         self.assertNotIn("好友連線".encode(), page)
+        # Toggled controls (backup interval, wizard fields) are labels with a
+        # display rule, so ``hidden`` must win over it explicitly.
+        self.assertIn(b"[hidden]{display:none!important}", page)
+        # Action feedback is a fixed toast so it is visible wherever the
+        # user clicked, and the restore picker never preselects a snapshot.
+        self.assertIn(b'id="message" class="toast"', page)
+        self.assertIn("選擇要還原的快照".encode(), page)
 
         status, raw, _headers = self.request("/api/settings")
         self.assertEqual(status, 200)
@@ -523,6 +530,8 @@ global.fetch=async(path,options)=>{calls.push({path,...options});return {ok:true
 (async()=>{
   await request('/api/status');
   assert.equal(calls.at(-1).headers.has('Authorization'),false);
+  assert.equal(tr('Backup completed.'),'備份完成。');
+  assert.equal(tr('未知訊息'),'未知訊息');
   const password='密碼🔐:é';
   let data={auth:{use_server_password:true,username:'管理員'}};
   HANDOFF
