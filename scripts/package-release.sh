@@ -35,7 +35,9 @@ REPOSITORY="$(git -C "$(dirname -- "${BASH_SOURCE[0]}")/.." rev-parse --show-top
 git -C "$REPOSITORY" rev-parse --verify "${SOURCE_REF}^{commit}" >/dev/null || die "Git ref does not resolve to a commit: $SOURCE_REF"
 git -C "$REPOSITORY" diff --quiet -- || die 'tracked working-tree changes exist; commit or stash them before packaging'
 git -C "$REPOSITORY" diff --cached --quiet -- || die 'staged changes exist; commit them before packaging'
-git -C "$REPOSITORY" show "$SOURCE_REF:CHANGELOG.md" | grep -Fq "## [$VERSION]" || die "CHANGELOG.md does not contain release $VERSION"
+# grep -q would exit at the first match and SIGPIPE git under pipefail once
+# the release heading is no longer near the top of the changelog.
+git -C "$REPOSITORY" show "$SOURCE_REF:CHANGELOG.md" | grep -F "## [$VERSION]" >/dev/null || die "CHANGELOG.md does not contain release $VERSION"
 
 [[ "$OUTPUT_DIR_SPECIFIED" -eq 0 || -z "$OUTPUT_FILE" ]] || die '--output and --output-dir cannot be used together'
 if [[ -n "$OUTPUT_FILE" ]]; then
