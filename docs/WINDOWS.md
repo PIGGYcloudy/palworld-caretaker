@@ -95,7 +95,9 @@ pwsh -NoProfile -File "$Repository\scripts\windows\backup-palworld.ps1" `
   -ConfigDir $ConfigDir
 
 # For a Task Scheduler trigger that runs every minute, add -Scheduled. The
-# script gates itself using BACKUP_TIME (daily-HH:MM, every-Nh, or off).
+# script gates itself using BACKUP_TIME (daily-HH:MM, every-Nh, every-Nd, or
+# off). The web panel already runs this schedule while it is open, so only
+# add this task when the panel is not kept running, or each slot backs up twice.
 pwsh -NoProfile -File "$Repository\scripts\windows\backup-palworld.ps1" `
   -ConfigDir $ConfigDir -Scheduled
 

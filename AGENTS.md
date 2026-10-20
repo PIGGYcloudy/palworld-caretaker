@@ -79,5 +79,15 @@ shellcheck install-palworld.sh upgrade-palworld-manager.sh scripts/*.sh \
 
 ## 目前已知的待決事項
 
-- 面板內的 Hamachi 說明是固定文案；若要支援其他連線方式需另行設計。
+- **多世界只在 Windows 啟用。** Linux systemd 的 unit、sudoers 與特權腳本、以及 Docker
+  supervisor 都只控制預設世界，所以 `WebServer.create_world` 在非 Windows 上會拒絕。
+  要在 Linux／Docker 開放多世界，需要 `palworld@.service`、sudoers 項目，以及讓
+  backup／restore／maintenance 腳本接受世界參數。
+- `worlds.py` 建立世界時，會把基礎設定（含 `ADMIN_PASSWORD`、`DISCORD_BOT_TOKEN`
+  等 secrets）寫進該世界的 `caretaker.env`，應改成寫入權限受限的 `secrets.env`。
+- `worlds.json` 由 Web 面板與 Discord Bot 各自載入一次後整份覆寫，沒有跨行程鎖；
+  兩邊同時修改時，後寫入的一方會蓋掉另一方。
+- Discord 對非預設世界的 `/pal backup`／`/pal update`（`_direct_maintenance`）沒有取得
+  operation lock，也沒有寫入「進行中」狀態。
+- 面板內的 Hamachi 說明是固定文案。
 - 伺服器端錯誤訊息仍是英文（前端已對照翻譯）；若改成直接回傳中文，需同步更新相關測試。

@@ -6,7 +6,7 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ### 新功能（0.9.0 之後已合併）
 
-- 多世界管理：Web 面板可建立、切換、設定預設世界，並分別啟動／關閉／重啟；Discord 指令可指定世界。
+- 多世界管理（Windows 原生模式）：Web 面板可建立、切換、設定預設世界，並分別啟動／關閉／重啟；Discord 指令可指定世界。
 - 備份排程支援每天指定時間或每 N 小時／天，並可選擇開啟每日自動更新（更新前備份、完成後恢復原本狀態）。
 - Web 面板顯示並可複製伺服器、存檔與備份的實際路徑。
 - Windows 本機面板預設免密碼（僅 loopback）；雙擊啟動器會自動準備可用的原生伺服器。
@@ -21,6 +21,12 @@ This project follows [Semantic Versioning](https://semver.org/).
 ### 修正
 
 - systemd 排程備份停用時，只在原本該執行的時間記錄一次「Scheduled backup is disabled」，不再每分鐘靜默略過或洗版。
+- Docker：supervisor 讀取設定時呼叫不存在的參數，容器一啟動就讓 PID 1 崩潰，排程備份／更新也無法執行；已修正。
+- Windows：管理面板的排程備份呼叫不存在的方法，第一次觸發就讓排程執行緒停止；已修正。
+- Linux：升級後設定根目錄為唯讀時，Web 面板與 Discord Bot 因無法建立 `worlds.json` 而無法啟動；現在改以單一世界運作。
+- Linux／Docker：建立額外世界會操作到預設世界的服務（或在 Docker 中把伺服器目錄複製進自己），現在改為明確拒絕，並在面板顯示原因。
+- 中文等非 Latin-1 世界名稱選取後，面板所有請求都會失敗；請求標頭改以 URL 編碼傳送。
+- 發佈打包腳本在 CHANGELOG 較長時可能因 `grep -q` 提早結束觸發 SIGPIPE 而誤判失敗；已修正。
 - 修正 0.9.0 之後 main 分支 CI 持續失敗的 3 項測試，並清除 Python 3.12+ 的無效跳脫字元警告。
 - 新增 `AGENTS.md`，記錄給 AI 代理與貢獻者的開發守則與測試陷阱。
 

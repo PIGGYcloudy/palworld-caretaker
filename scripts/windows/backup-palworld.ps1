@@ -29,7 +29,7 @@ try {
             '^daily-(?<time>(?:[01][0-9]|2[0-3]):[0-5][0-9])$' { $now.ToString('HH:mm') -eq $Matches.time; break }
             '^(?<time>(?:[01][0-9]|2[0-3]):[0-5][0-9])$' { $now.ToString('HH:mm') -eq $Matches.time; break }
             '^every-(?<amount>[1-9][0-9]{0,2})(?<unit>[hd])$' { $interval = [int]$Matches['amount']; if ($interval -gt 365) { throw 'Interval must be 1-365' }; if ($Matches['unit'] -eq 'd') { $interval *= 24 }; $hours = [long][Math]::Floor(($now.Date - [datetime]'1970-01-01').TotalHours) + $now.Hour; $now.Minute -eq 0 -and ($hours % $interval -eq 0); break }
-            default { throw 'BACKUP_TIME must be daily-HH:MM, every-2h, every-4h, every-6h, every-12h, or off.' }
+            default { throw 'BACKUP_TIME must be daily-HH:MM, every-Nh, every-Nd (N: 1-365), or off.' }
         }
         if (-not $due) { return }
     }
