@@ -755,7 +755,7 @@ global.fetch=async(path,options)=>{calls.push({path,...options});return {ok:true
             "PALWORLD_WEB_PUBLIC_ORIGIN": "",
             "PALWORLD_WEB_ALLOWED_HOSTS": "attacker.invalid/path",
         }):
-            with self.assertRaisesRegex(ValueError, "host\[:port\]"):
+            with self.assertRaisesRegex(ValueError, r"host\[:port\]"):
                 create_server(self.fixture.dependencies, host="0.0.0.0", port=0)
 
     def test_global_file_lock_rejects_a_web_mutation_before_state_check(self):
