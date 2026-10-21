@@ -246,6 +246,10 @@ class WebUITests(unittest.TestCase):
         # user clicked, and the restore picker never preselects a snapshot.
         self.assertIn(b'id="message" class="toast"', page)
         self.assertIn("選擇要還原的快照".encode(), page)
+        # Follow the system appearance, and disable lifecycle actions that
+        # do not apply to the current state instead of failing after a click.
+        self.assertIn(b"@media(prefers-color-scheme:dark)", page)
+        self.assertIn(b"const syncHeroActions=", page)
 
         status, raw, _headers = self.request("/api/settings")
         self.assertEqual(status, 200)

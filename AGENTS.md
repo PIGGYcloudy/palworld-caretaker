@@ -62,6 +62,9 @@ shellcheck install-palworld.sh upgrade-palworld-manager.sh scripts/*.sh \
 - **Web 面板**：資料只用 `textContent` 插入，不用 `innerHTML`；CSP 只允許帶 nonce 的
   inline script/style，不能載入外部 CDN 或字型。所有 mutation API 需要 CSRF header。
   REST API（8212）只能 loopback，不要提供任何把它公開的選項。
+- **面板視覺依循 Apple HIG**：顏色一律用 `:root` 的 token（淺色／深色兩組），不要寫死色碼；
+  每個區塊只放一個主要（實心）按鈕，其餘用淡色或文字按鈕；破壞性操作用 danger 樣式並先確認；
+  觸控裝置的控制項最小高度由 `--control` 控制（44pt）。
 - **面板 UI 文案用繁體中文。** 伺服器回傳的英文訊息由 `web_page.py` 的 `messageText`
   對照表在瀏覽器翻譯；新增 API 訊息時請一起加對照，或直接回傳中文。
 - 測試會檢查面板 JS 的某些字串（例如 `loadSettings().then(loadCommon)`、
