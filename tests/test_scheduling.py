@@ -8,7 +8,7 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 from unittest.mock import Mock, patch
 
 from palworld_caretaker.errors import ConfigError
-from palworld_caretaker.scheduling import schedule_slot, run_windows_schedules
+from palworld_caretaker.scheduling import schedule_slot, scheduled_action, run_windows_schedules
 from palworld_caretaker.service import ServiceState
 from palworld_caretaker.web import WebDependencies, WebUIError
 
@@ -24,6 +24,16 @@ class SchedulingTests(unittest.TestCase):
             with self.assertRaises(ConfigError):
                 schedule_slot(value, now)
 
+    def test_systemd_timer_action_prefers_update_and_reports_disabled_slots(self):
+        due, idle = datetime(2026, 9, 8, 4, 30), datetime(2026, 9, 8, 4, 31)
+        values = {"BACKUP_TIME": "daily-04:30", "UPDATE_TIME": "off"}
+        self.assertEqual(scheduled_action(values, due), "backup")
+        self.assertEqual(scheduled_action(values, idle), "off")
+        self.assertEqual(scheduled_action({**values, "UPDATE_TIME": "daily-04:30"}, due), "update")
+        disabled = {**values, "PALWORLD_BACKUP_SCHEDULE_ENABLED": "false"}
+        self.assertEqual(scheduled_action(disabled, due), "disabled")
+        self.assertEqual(scheduled_action(disabled, idle), "off")
+
     def test_intervals_do_not_reset_at_midnight(self):
         start = datetime(2026, 9, 1)
         for schedule, hours in (('every-7h', 7), ('every-48h', 48), ('every-3d', 72)):
@@ -34,7 +44,8 @@ class SchedulingTests(unittest.TestCase):
             self.assertIsNone(schedule_slot(schedule, due[0] + timedelta(minutes=1)))
 
     def test_windows_worker_deduplicates_update_and_backup(self):
-        dependencies = Mock()
+        dependencies = Mock(spec=WebDependencies)
+        dependencies.config = Mock()
         stop = Mock()
         stop.wait.side_effect = [False, False, True]
         values = {'UPDATE_TIME': 'daily-04:30', 'BACKUP_TIME': 'daily-04:30'}
@@ -42,7 +53,21 @@ class SchedulingTests(unittest.TestCase):
              patch('palworld_caretaker.scheduling.schedule_slot', return_value='today'):
             run_windows_schedules(dependencies, stop)
         dependencies.trigger_maintenance.assert_called_once()
-        dependencies.action.assert_not_called()
+        dependencies.perform.assert_not_called()
+
+    def test_windows_worker_runs_due_backup_through_web_dependencies(self):
+        # A spec'd mock catches calls to methods WebDependencies lacks; a bare
+        # Mock hid ``action()``, which killed the scheduler thread.
+        dependencies = Mock(spec=WebDependencies)
+        dependencies.config = Mock()
+        stop = Mock()
+        stop.wait.side_effect = [False, True]
+        values = {'UPDATE_TIME': 'off', 'BACKUP_TIME': 'daily-04:30'}
+        with patch('palworld_caretaker.config.load_config', return_value=SimpleNamespace(values=values)), \
+             patch('palworld_caretaker.scheduling.schedule_slot', side_effect=lambda s: None if s == 'off' else 'today'):
+            run_windows_schedules(dependencies, stop)
+        dependencies.perform.assert_called_once_with('backup')
+        dependencies.trigger_maintenance.assert_not_called()
 
     def native_dependencies(self, state=ServiceState.ACTIVE, returncode=0):
         config = SimpleNamespace(scripts_root=Path('/scripts'), directory=Path('/config'),

@@ -59,7 +59,7 @@ class FakeAPI:
         return (Player("Alice", "steam-alice", "alice", ping=42, location="Forest"),)
 
     def metrics(self):
-        return Metrics({"cpu_usage": 34.5, "memory_usage": 123456})
+        return Metrics({"cpu_usage": 34.5, "memory_usage": 123456, "serverfps": 59, "uptime": 3600, "days": 12, "maxplayernum": 32})
 
 
 class FakeLifecycle:
@@ -239,6 +239,17 @@ class WebUITests(unittest.TestCase):
         self.assertIn("儲存位置".encode(), page)
         self.assertIn(b"/api/locations", page)
         self.assertNotIn("好友連線".encode(), page)
+        # Toggled controls (backup interval, wizard fields) are labels with a
+        # display rule, so ``hidden`` must win over it explicitly.
+        self.assertIn(b"[hidden]{display:none!important}", page)
+        # Action feedback is a fixed toast so it is visible wherever the
+        # user clicked, and the restore picker never preselects a snapshot.
+        self.assertIn(b'id="message" class="toast"', page)
+        self.assertIn("選擇要還原的快照".encode(), page)
+        # Follow the system appearance, and disable lifecycle actions that
+        # do not apply to the current state instead of failing after a click.
+        self.assertIn(b"@media(prefers-color-scheme:dark)", page)
+        self.assertIn(b"const syncHeroActions=", page)
 
         status, raw, _headers = self.request("/api/settings")
         self.assertEqual(status, 200)
@@ -253,7 +264,9 @@ class WebUITests(unittest.TestCase):
         payload = json.loads(raw)
         self.assertEqual(status, 200)
         self.assertEqual(payload["players"], ["Alice"])
-        self.assertEqual(payload["metrics"], {"cpu": 34.5, "memory": 123456})
+        self.assertEqual(payload["metrics"], {
+            "cpu": 34.5, "memory": 123456, "fps": 59, "uptime": 3600, "days": 12, "max_players": 32,
+        })
         self.assertNotIn("admin-secret-never-rendered", raw.decode())
 
         status, raw, _headers = self.request("/api/backups")
@@ -521,6 +534,8 @@ global.fetch=async(path,options)=>{calls.push({path,...options});return {ok:true
 (async()=>{
   await request('/api/status');
   assert.equal(calls.at(-1).headers.has('Authorization'),false);
+  assert.equal(tr('Backup completed.'),'備份完成。');
+  assert.equal(tr('未知訊息'),'未知訊息');
   const password='密碼🔐:é';
   let data={auth:{use_server_password:true,username:'管理員'}};
   HANDOFF
@@ -755,7 +770,7 @@ global.fetch=async(path,options)=>{calls.push({path,...options});return {ok:true
             "PALWORLD_WEB_PUBLIC_ORIGIN": "",
             "PALWORLD_WEB_ALLOWED_HOSTS": "attacker.invalid/path",
         }):
-            with self.assertRaisesRegex(ValueError, "host\[:port\]"):
+            with self.assertRaisesRegex(ValueError, r"host\[:port\]"):
                 create_server(self.fixture.dependencies, host="0.0.0.0", port=0)
 
     def test_global_file_lock_rejects_a_web_mutation_before_state_check(self):

@@ -16,11 +16,12 @@ MANAGER="$SCRIPT_HOME/palworld_manager.py"
 [[ -r "$MANAGER" ]] || { printf 'ERROR: configuration manager is missing\n' >&2; exit 1; }
 python3 "$MANAGER" --config-dir "$CONFIG_DIR" || exit $?
 if [[ "$RUN_MODE" == scheduled ]]; then
-  scheduled_action="$(PYTHONPATH="$SCRIPT_HOME:$SCRIPT_HOME/../src${PYTHONPATH:+:$PYTHONPATH}" python3 -m palworld_caretaker.scheduling "$CONFIG_DIR")"
+  scheduled_action="$(PYTHONPATH="$SCRIPT_HOME:$SCRIPT_HOME/../src${PYTHONPATH:+:$PYTHONPATH}" python3 -m palworld_caretaker.scheduling "$CONFIG_DIR" "$(date +%Y-%m-%dT%H:%M)")"
   case "$scheduled_action" in
     update) ;;
     backup) exec "$SCRIPT_HOME/backup-palworld.sh" ;;
     off) exit 0 ;;
+    disabled) printf 'Scheduled backup is disabled; skipping this run.\n'; exit 0 ;;
     *) exit 1 ;;
   esac
 fi

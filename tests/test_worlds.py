@@ -75,3 +75,23 @@ class WorldManagerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WebWorldBoundaryTests(unittest.TestCase):
+    def test_world_header_round_trips_non_latin1_names(self):
+        from urllib.parse import quote
+        from palworld_caretaker.web import _world_header
+        # Browsers cannot put CJK text in a header, so the panel percent-encodes it.
+        self.assertEqual(_world_header(quote("第二世界", safe="")), "第二世界")
+        self.assertEqual(_world_header("default"), "default")
+        self.assertIsNone(_world_header(None))
+
+    @unittest.skipIf(__import__("os").name == "nt", "Windows supports additional worlds")
+    def test_extra_worlds_are_rejected_where_services_only_drive_the_default(self):
+        from unittest.mock import Mock
+        from palworld_caretaker.web import WebServer
+        server = object.__new__(WebServer)
+        server.world_manager = Mock()
+        with self.assertRaisesRegex(WorldError, "Windows"):
+            server.create_world("朋友世界")
+        server.world_manager.create.assert_not_called()

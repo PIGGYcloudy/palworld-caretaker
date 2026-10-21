@@ -85,7 +85,7 @@ class Supervisor:
             "--port", os.environ.get("PALWORLD_WEB_PORT", "8765"),
         ], cwd=APP_DIR)
         self.children.append(web)
-        token = self.config.get("DISCORD_BOT_TOKEN", "")
+        token = self.config.values.get("DISCORD_BOT_TOKEN", "")
         if token and not token.startswith("CHANGE_ME_") and enabled("PALWORLD_DISCORD_ENABLED", True):
             self.children.append(subprocess.Popen([str(APP_DIR / "scripts/palworld-discord-bot.py")], cwd=APP_DIR))
 
@@ -141,7 +141,7 @@ class Supervisor:
         if game is None or game.poll() is not None:
             self.game = None
             return
-        wait = int(self.config.get("PALWORLD_SHUTDOWN_WAIT_SECONDS", "30"))
+        wait = int(self.config.values.get("PALWORLD_SHUTDOWN_WAIT_SECONDS", "30"))
         try:
             api = PalworldRESTClient(self.config)
             api.save()
@@ -302,9 +302,9 @@ class Supervisor:
             try:
                 self.config = load_config(CONFIG_DIR)
                 for key, action in (("UPDATE_TIME", "update"), ("BACKUP_TIME", "backup")):
-                    if key == "BACKUP_TIME" and self.config.get("PALWORLD_BACKUP_SCHEDULE_ENABLED", "true") != "true":
+                    if key == "BACKUP_TIME" and self.config.values.get("PALWORLD_BACKUP_SCHEDULE_ENABLED", "true") != "true":
                         continue
-                    schedule = self.config.get(key, "off")
+                    schedule = self.config.values.get(key, "off")
                     slot = schedule_slot(schedule)
                     identity = (schedule, slot)
                     if slot is None or last_run.get(key) == identity:
@@ -312,14 +312,14 @@ class Supervisor:
                     last_run[key] = identity
                     self.control(action)
                     if action == "update":
-                        backup = self.config.get("BACKUP_TIME", "off")
+                        backup = self.config.values.get("BACKUP_TIME", "off")
                         last_run["BACKUP_TIME"] = (backup, schedule_slot(backup))
             except (ApiError, OSError, RuntimeError, ValueError) as exc:
                 print(f"docker supervisor: scheduled operation failed: {exc}", file=sys.stderr)
 
     def idle_loop(self) -> None:
         """Container-native idle watcher using REST, never systemctl."""
-        if self.config.get("PALWORLD_IDLE_SHUTDOWN_ENABLED", "true") != "true":
+        if self.config.values.get("PALWORLD_IDLE_SHUTDOWN_ENABLED", "true") != "true":
             return
         interval = int(self.config.get("PALWORLD_PLAYER_CHECK_INTERVAL_SECONDS"))
         timeout = int(self.config.get("PALWORLD_IDLE_TIMEOUT_MINUTES")) * 60
@@ -340,7 +340,7 @@ class Supervisor:
                     idle_since = idle_since or time.monotonic()
                     if time.monotonic() - idle_since < timeout:
                         continue
-                    if self.config.get("PALWORLD_IDLE_WATCHER_DRY_RUN", "false") == "true":
+                    if self.config.values.get("PALWORLD_IDLE_WATCHER_DRY_RUN", "false") == "true":
                         continue
                     api.save()
                     if not api.players():

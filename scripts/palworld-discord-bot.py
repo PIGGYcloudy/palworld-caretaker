@@ -1035,8 +1035,14 @@ def main() -> None:
     config = config_from(CONFIG_SOURCE)
     token = config.values.get("DISCORD_BOT_TOKEN", "")
     if not token: raise RuntimeError("DISCORD_BOT_TOKEN is required")
-    worlds = WorldManager(config, BotDependencies.create)
-    Client(worlds.dependencies(), worlds).run(token, log_handler=None)
+    try:
+        worlds: WorldManager[BotDependencies] | None = WorldManager(config, BotDependencies.create)
+    except (WorldError, OSError):
+        # The bot unit cannot write the config root, so a deployment without
+        # worlds.json runs as a single world instead of crash-looping.
+        worlds = None
+    dependencies = worlds.dependencies() if worlds is not None else BotDependencies.create(config)
+    Client(dependencies, worlds).run(token, log_handler=None)
 
 
 if __name__ == "__main__":

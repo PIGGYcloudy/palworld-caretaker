@@ -111,8 +111,9 @@ before saving. Each save creates a private copy of the current `server.env`
 and `caretaker.env` below `PALWORLD_MANAGER_STATE_DIR/settings-backups`, then
 atomically writes only changed fields while holding the global operation lock.
 
-In v0.7.0 the schema contains 40 typed world/event settings. The expanded
-groups are:
+The schema contains 41 editable settings (40 typed world/event settings since
+v0.7.0, plus the `UPDATE_TIME` automatic-update schedule). Labels and help text
+are shown in Traditional Chinese in the web panel. The expanded groups are:
 
 - `Survival & Penalties` (3): item weight, equipment durability loss, and death
   penalty (`None`, `Item`, `ItemAndEquipment`, or `All`).

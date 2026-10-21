@@ -178,6 +178,21 @@ class DockerDeploymentTests(unittest.TestCase):
         self.assertIn("--restore", source)
         self.assertIn("waiting for a first unconfigured game boot would expose the server", source)
 
+    def test_supervisor_reads_optional_settings_from_a_real_config(self):
+        # CaretakerConfig.get() takes no default; a two-argument call crashed
+        # PID 1 in start_frontends() and killed the schedule thread.
+        module = self._supervisor_module()
+        supervisor = object.__new__(module.Supervisor)
+        supervisor.config = load_config(self.root / "docker/default-config")
+        supervisor.children = []
+        with mock.patch.object(module.subprocess, "Popen", side_effect=lambda *a, **k: SimpleNamespace()):
+            supervisor.start_frontends()
+        self.assertEqual(len(supervisor.children), 1)
+        stop = threading.Event()
+        stop.set()
+        with mock.patch.object(module, "STOPPING", stop):
+            supervisor.backup_loop()
+
     def test_graceful_shutdown_calls_rest_in_order_without_touching_savegame(self):
         module = self._supervisor_module()
         events = []
@@ -200,7 +215,7 @@ class DockerDeploymentTests(unittest.TestCase):
             save = Path(directory) / "world.sav"
             save.write_bytes(b"durable-world")
             supervisor = object.__new__(module.Supervisor)
-            supervisor.config = {"PALWORLD_SHUTDOWN_WAIT_SECONDS": "1"}
+            supervisor.config = SimpleNamespace(values={"PALWORLD_SHUTDOWN_WAIT_SECONDS": "1"})
             supervisor.game = game
             supervisor.children = []
             supervisor.operation_lock = threading.RLock()

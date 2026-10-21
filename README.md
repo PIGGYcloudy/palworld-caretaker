@@ -21,7 +21,7 @@
 - systemd 管理、崩潰有限重啟與 localhost-only REST API 防護。
 - 安全存檔、正常關服、可設定目的地的版本化備份與互動式還原。
 - 型別驗證的遊戲設定管理器，使用 `config/editable/` 分層設定、差異預覽與原子寫入。
-- v0.7.0 將 Web UI schema 擴充至 40 個 typed world/event settings，涵蓋
+- Web UI schema 目前有 41 個 typed world/event settings（v0.7.0 起擴充），涵蓋
   `Survival & Penalties`、`Stamina & Health`、`Building & Decay` 與 `Pal Dynamics`；
   完整欄位與範圍見 [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md)。
 - Windows 原生維運腳本：[`scripts/windows/`](scripts/windows/) 提供備份、還原、
@@ -33,7 +33,7 @@
   `/pal status` 支援分區 rich embeds，並可主動發送主機記憶體警示。
 - Local Web UI：`PALWORLD_WEB_BIND_IP` 預設為 `127.0.0.1`；Docker 內部監聽
   `0.0.0.0`、Compose 預設只發布到 host loopback，提供遊戲內公告、玩家踢出／封鎖、SaveGames ZIP 匯出、狀態、快照、
-  安全操作，以及 40 個設定欄位的說明與單欄預設值重置。
+  安全操作，以及 41 個設定欄位的中文說明與單欄預設值重置。
 - Docker 一鍵容器化開服：`Dockerfile`、`docker-compose.yml` 與 PID 1
   `docker/docker-supervisor.py` 管理遊戲、Web UI、可選 Discord Bot、更新、備份與
   優雅停服；完整流程見 [`docs/DOCKER.md`](docs/DOCKER.md)。
@@ -229,6 +229,7 @@ timeout、認證失敗、連線錯誤、非 200、JSON 無法解析、缺少 `pl
 ## Discord 指令
 
 所有會讀取或操作伺服器的指令都可加上 `world:<世界名稱>`；省略時會使用目前的預設世界。
+額外世界目前只有 Windows 原生模式可以建立；Linux systemd 與 Docker 部署以單一世界運作。
 使用 `/pal worlds` 查看世界名稱，並由管理員使用 `/pal set-default world:<世界名稱>` 變更預設世界。
 
 - `/pal start`：鎖定後啟動服務，等待 REST API ready；已在線時不重複啟動。
@@ -383,7 +384,7 @@ API 不通時，先查看遊戲 log、確認 `RESTAPIEnabled=True`、8212 loopba
 面板與首次設定精靈可直接選擇間隔數字及小時／天。排程使用主機本地時間；小時間隔於整點執行、
 天間隔於午夜執行，以 1970-01-01 為共同基準，跨午夜不會重設間隔。錯過的時段不補跑。
 
-自動更新使用獨立的 `UPDATE_TIME`（預設 `off`）；面板可勾選啟用並設定每天檢查時間。
+自動更新使用獨立的 `UPDATE_TIME`（預設 `off`，語法與 `BACKUP_TIME` 相同）；面板可勾選啟用並設定每天檢查時間。
 備份與自動更新各有儲存按鈕。單純備份不執行 SteamCMD；更新流程先存檔、備份，
 再由 SteamCMD 驗證並套用更新。更新排程即使沒有新版，也會執行這個維護流程。
 原本運行的伺服器完成後重新啟動，原本關閉則維持關閉。
